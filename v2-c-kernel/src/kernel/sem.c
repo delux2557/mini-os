@@ -36,3 +36,11 @@ uint32_t sem_signal_wake(sem_t *s) {
 }
 
 uint32_t sem_wait_count(sem_t *s) { return s->wait_count; }
+
+/* v0.21 不变量审计：见 sem.h。正常操作序列下恒成立，任何一步错误即返回 0。 */
+int sem_invariant_ok(const sem_t *s) {
+    if (s->count < 0) return 0;                       /* 计数不得为负 */
+    if (s->wait_count > SEM_MAX_WAITERS) return 0;    /* 等待队列不得溢出 */
+    if (s->count > 0 && s->wait_count > 0) return 0;  /* 有资源却还排着队 = signal 丢失 */
+    return 1;
+}

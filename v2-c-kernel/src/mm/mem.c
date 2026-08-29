@@ -108,6 +108,28 @@ void frame_free(uint32_t phys) {
     used_frames--;
 }
 
+/* v0.21 内核自审计：验证 used_frames 与帧位图实际置位数配平。
+ * 任何 alloc/free 记账不一致（漏记、重复释放、计数漂移）都会在此暴露。
+ * 返回失败检查项数（0=全部通过），并打印一行 [audit] 结果。 */
+uint32_t mem_audit(void) {
+    uint32_t bad = 0;
+    uint32_t bcount = 0;
+    for (uint32_t i = 0; i < nframes; i++) bcount += bit_test(i);
+    if (used_frames != bcount) {
+        serial_printf("[audit] mem FAIL: used=%u bitmap=%u\n", used_frames, bcount);
+        vga_printf("[audit] mem FAIL: used=%u bitmap=%u\n", used_frames, bcount);
+        bad++;
+    }
+    if (used_frames > nframes) {
+        serial_printf("[audit] mem FAIL: used_frames=%u > nframes=%u\n",
+                      used_frames, nframes);
+        bad++;
+    }
+    if (bad == 0)
+        serial_printf("[audit] mem ok: frames used=%u/%u\n", used_frames, nframes);
+    return bad;
+}
+
 /*--------------------------------------------------------------*/
 /* 分页                                                            */
 /*--------------------------------------------------------------*/

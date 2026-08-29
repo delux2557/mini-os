@@ -98,4 +98,7 @@ uint32_t sched_current_pid(void);
 pcb_t   *sched_get(uint32_t pid);
 uint32_t sched_alive_count(void);
 
+/* v0.21 内核自审计：PCB 状态机合法性检查，返回失败项数（0=通过） */
+uint32_t sched_audit(void);
+
 #endif

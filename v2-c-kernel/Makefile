@@ -1,16 +1,29 @@
 # mini-os/v2-c-kernel/Makefile
-# 目录约定：
-#   src/    内核源代码（.c/.h/.s/.ld）
-#   tests/  宿主单测 + QEMU 回归脚本
-#   build/  全部构建产物（make clean 一键清理，勿提交到 git）
+# 目录约定（按子系统分组，Linux/MINIX 风格）：
+#   src/arch/     CPU/中断/时钟（boot.s isr.s idt timer）
+#   src/kernel/   核心内核（kernel.c sched sem msg usermode userptr guard elf）
+#   src/mm/       内存管理（mem heap）
+#   src/drv/      设备驱动（vga serial kb ata pci e1000）
+#   src/fs/       文件系统（fs blockdev storage）
+#   src/net/      网络协议（netutil；v0.19 起 ip/udp，v0.23 加 icmp）
+#   src/app/      用户程序（userprog.c user_lib.h + 各 ELF 应用）
+#   src/*.ld      链接脚本（linker.ld userprog.ld）
+#   tests/        宿主单测 + QEMU 回归脚本
+#   build/        全部构建产物（make clean 一键清理，勿提交到 git）
+# 构建技巧：源文件查找用 VPATH（子目录），头文件用 -I 逐目录找，
+#          因此 #include "xxx.h" 与 OBJS 里的裸文件名都无需改。
 CC      = gcc
 CFLAGS  = -m32 -ffreestanding -fno-pie -fno-stack-protector \
           -fno-builtin -fno-asynchronous-unwind-tables -fcf-protection=none \
-          -Wall -Wextra -O2 -std=gnu99 -nostdlib -Isrc -Ibuild
+          -Wall -Wextra -O2 -std=gnu99 -nostdlib \
+          -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -Ibuild
 ASM     = nasm
 LD      = ld
 LDFLAGS = -m elf_i386 -T src/linker.ld -nostdlib -z noexecstack
 OBJCOPY = objcopy
+
+# 源文件查找路径（按子系统；同名文件在各目录间保持唯一）
+VPATH = src:src/arch:src/kernel:src/mm:src/drv:src/fs:src/net:src/app
 
 BUILD        = build
 KERNEL       = $(BUILD)/kernel.elf
@@ -26,33 +39,29 @@ $(shell mkdir -p $(BUILD) $(BUILD)/apps)
 OBJS = $(addprefix $(BUILD)/, \
        boot.o kernel.o vga.o serial.o idt.o isr.o timer.o kb.o mem.o guard.o heap.o \
        usermode.o sched.o sched_policy.o sem.o msg.o blockdev.o fs.o elf.o userptr.o \
-       pci.o e1000.o netutil.o \
+       pci.o e1000.o netutil.o ip.o udp.o icmp.o netsock.o \
        ata.o storage.o userprog_bin.o) \
        $(APP_ELFOBJS) $(SHELL_ELFOBJ)
 
 $(KERNEL): $(OBJS)
 	$(LD) $(LDFLAGS) -o $@ $(OBJS)
 
-# ---- 汇编 ----
-$(BUILD)/boot.o: src/boot.s
+# ---- 汇编 / C（默认模式规则，源文件经 VPATH 定位） ----
+$(BUILD)/%.o: %.s
 	$(ASM) -f elf32 $< -o $@
 
-$(BUILD)/isr.o: src/isr.s
-	$(ASM) -f elf32 $< -o $@
-
-# ---- C（默认模式规则） ----
-$(BUILD)/%.o: src/%.c
+$(BUILD)/%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # 依赖自动生成的头文件（userprog 各进程入口偏移）
-$(BUILD)/kernel.o: src/kernel.c $(USERPROG_OFFS)
+$(BUILD)/kernel.o: src/kernel/kernel.c $(USERPROG_OFFS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/sched.o: src/sched.c $(USERPROG_OFFS)
+$(BUILD)/sched.o: src/kernel/sched.c $(USERPROG_OFFS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ---- 用户程序：编译 -> 链接(0x80000000) -> 转二进制 -> 以 .o 嵌入内核 ----
-$(BUILD)/userprog.o: src/userprog.c
+$(BUILD)/userprog.o: src/app/userprog.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(USERPROG_ELF): $(BUILD)/userprog.o src/userprog.ld
@@ -77,12 +86,12 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
 APP_ADDR   = 0x80040000
 SHELL_ADDR = 0x80030000
-APPS       = hello echo crash isol forkdemo args stackovf fsdemo waitdemo abuse
+APPS       = hello echo crash isol forkdemo args stackovf fsdemo waitdemo abuse sockdemo
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
-# 编译（默认模式规则 build/%.o: src/%.c 已覆盖 src/apps/*.c）
-$(BUILD)/apps/%.o: src/apps/%.c
+# 编译（源文件在 src/app/；构建输出仍在 build/apps/）
+$(BUILD)/apps/%.o: src/app/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # 链接到固定地址（-e _start 指定 ELF 入口；crt.o 提供 _start：app_main 返回即 sys_exit）
@@ -105,6 +114,8 @@ $(BUILD)/apps/fsdemo.elf: $(BUILD)/apps/fsdemo.o $(BUILD)/apps/crt.o
 $(BUILD)/apps/waitdemo.elf: $(BUILD)/apps/waitdemo.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/abuse.elf: $(BUILD)/apps/abuse.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/sockdemo.elf: $(BUILD)/apps/sockdemo.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(SHELL_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<

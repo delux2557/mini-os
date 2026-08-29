@@ -7,7 +7,9 @@ cd "$(dirname "$0")/.." || exit 1
 
 CC="${CC:-gcc}"
 # -no-pie：内核用 32 位地址当指针，宿主编译需把静态数据放在 4GB 内
-CFLAGS="-Wall -Wextra -O1 -g -fno-pie -no-pie -Isrc -Itests \
+# v0.19：源文件按子系统分目录（arch/kernel/mm/drv/fs/net/app），头文件逐目录 -I
+CFLAGS="-Wall -Wextra -O1 -g -fno-pie -no-pie \
+        -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -Itests \
         -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast"
 BUILD="build"
 PASS=0
@@ -32,17 +34,20 @@ run_test() {
     fi
 }
 
-# 每个测试： 套件名, 源文件（内核源码 + 测试源码）
-run_test test_heap "src/heap.c tests/test_heap.c"
-run_test test_kb   "src/kb.c tests/test_kb.c"
-run_test test_sched "src/sched_policy.c tests/test_sched.c"
-run_test test_sem   "src/sem.c tests/test_sem.c"
-run_test test_msg   "src/msg.c tests/test_msg.c"
-run_test test_fs    "src/blockdev.c src/fs.c tests/test_fs.c"
-run_test test_elf   "src/elf.c tests/test_elf.c"
-run_test test_guard "src/guard.c tests/test_guard.c"
-run_test test_userptr "src/userptr.c tests/test_userptr.c"
-run_test test_netutil "src/netutil.c tests/test_netutil.c"
+# 每个测试： 套件名, 源文件（内核源码 + 测试源码；v0.19 起按子系统分目录）
+run_test test_heap "src/mm/heap.c tests/test_heap.c"
+run_test test_kb   "src/drv/kb.c tests/test_kb.c"
+run_test test_sched "src/kernel/sched_policy.c tests/test_sched.c"
+run_test test_sem   "src/kernel/sem.c tests/test_sem.c"
+run_test test_msg   "src/kernel/msg.c tests/test_msg.c"
+run_test test_fs    "src/fs/blockdev.c src/fs/fs.c tests/test_fs.c"
+run_test test_elf   "src/kernel/elf.c tests/test_elf.c"
+run_test test_guard "src/kernel/guard.c tests/test_guard.c"
+run_test test_userptr "src/kernel/userptr.c tests/test_userptr.c"
+run_test test_netutil "src/net/netutil.c tests/test_netutil.c"
+run_test test_ip      "src/net/ip.c tests/test_ip.c"
+run_test test_udp     "src/net/ip.c src/net/udp.c tests/test_udp.c"
+run_test test_icmp    "src/net/icmp.c src/net/ip.c src/net/udp.c tests/test_icmp.c"
 
 echo
 echo "宿主测试汇总: pass=$PASS fail=$FAIL"

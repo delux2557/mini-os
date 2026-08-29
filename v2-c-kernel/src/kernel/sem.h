@@ -27,5 +27,9 @@ int      sem_wait_try(sem_t *s, uint32_t pid);
 /* V 操作：返回需唤醒的 pid；无等待者时 count++ 并返回 SEM_NO_PID */
 uint32_t sem_signal_wake(sem_t *s);
 uint32_t sem_wait_count(sem_t *s);
+/* 不变量审计（v0.21）：count>=0、waiters<=上限、且 count>0 时无等待者
+ * （资源空闲而队列有人 = 丢失了一次 signal）。返回 1=成立 / 0=违反。
+ * 纯逻辑，无内核依赖，宿主单测与内核自审计共用。 */
+int      sem_invariant_ok(const sem_t *s);
 
 #endif

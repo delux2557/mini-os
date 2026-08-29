@@ -538,7 +538,8 @@ void sched_block(registers_t *r, uint32_t reason, uint32_t arg) {
     p->state = PROC_BLOCKED;
     p->block_reason = reason;
     p->block_arg = arg;
-    serial_printf("[sched] block pid=%u reason=%u arg=%u\n", p->pid, reason, arg);
+    serial_printf("[sched] block pid=%u reason=%u arg=%u at tick=%u\n",
+                  p->pid, reason, arg, (uint32_t)ticks);
     schedule(r);
     __asm__ volatile ("cli; hlt");       /* 不可达 */
 }
@@ -558,7 +559,7 @@ void sched_wake_with(uint32_t pid, uint32_t eax_val) {
     p->state = PROC_READY;
     p->block_reason = BLOCK_NONE;
     policy_readyq_push(&readyq, pid);
-    serial_printf("[sched] wake pid=%u\n", pid);
+    serial_printf("[sched] wake pid=%u at tick=%u\n", pid, (uint32_t)ticks);
 }
 
 void sched_wake(uint32_t pid) { sched_wake_with(pid, 0); }
@@ -619,8 +620,8 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
         p->parent_pid = 0;   /* v0.14: 退出码已交付给父进程，僵尸交心跳回收 */
         break;
     }
-    serial_printf("[sched] %s pid=%u name=%s code=%u\n", why,
-                  p->pid, p->name ? p->name : "?", code);
+    serial_printf("[sched] %s pid=%u name=%s code=%u at tick=%u\n", why,
+                  p->pid, p->name ? p->name : "?", code, (uint32_t)ticks);
     vga_printf("[sched] %s pid=%u (%s) code=%u\n", why, p->pid,
                p->name ? p->name : "?", code);
     schedule(r);
@@ -643,4 +644,42 @@ uint32_t sched_alive_count(void) {
     for (uint32_t i = 1; i < MAX_PROCS; i++)
         if (procs[i].state != PROC_FREE) n++;
     return n;
+}
+
+/* v0.21 内核自审计：PCB 状态机合法性。
+ * 检查：状态枚举合法、idle(pid 0) 恒为 RUNNING（从不入就绪队列）、
+ * 用户槽至多一个 RUNNING（idle 除外）、阻塞进程的 block_reason 合法。
+ * 返回失败项数（0=全部通过），并打印一行 [audit] 结果。 */
+uint32_t sched_audit(void) {
+    uint32_t bad = 0, running = 0;
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        pcb_t *p = &procs[i];
+        if (p->state < PROC_FREE || p->state > PROC_ZOMBIE) {
+            serial_printf("[audit] sched FAIL: pid=%u invalid state=%u\n", i, p->state);
+            bad++;
+            continue;
+        }
+        if (i == PID_KERNEL_IDLE) {
+            if (p->state != PROC_RUNNING) {
+                serial_printf("[audit] sched FAIL: idle pid=0 state=%u (expect RUNNING)\n",
+                              p->state);
+                bad++;
+            }
+            continue;
+        }
+        if (p->state == PROC_RUNNING) running++;
+        if (p->state == PROC_BLOCKED && p->block_reason > BLOCK_WAIT) {
+            serial_printf("[audit] sched FAIL: pid=%u invalid block_reason=%u\n",
+                          i, p->block_reason);
+            bad++;
+        }
+    }
+    if (running > 1) {
+        serial_printf("[audit] sched FAIL: %u running (expect <=1)\n", running);
+        bad++;
+    }
+    if (bad == 0)
+        serial_printf("[audit] sched ok: %u alive, %u running\n",
+                      sched_alive_count(), running);
+    return bad;
 }

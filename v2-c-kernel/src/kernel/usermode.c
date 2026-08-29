@@ -22,6 +22,8 @@
 #include "kb.h"
 #include "storage.h"
 #include "userptr.h"
+#include "netsock.h"
+#include "netio.h"
 #include <stdint.h>
 
 /* ---- v0.6 IPC/同步：内核信号量表（用户通过固定 id 引用，id 0 保留） ---- */
@@ -59,7 +61,6 @@ static fs_file_t fs_files[FS_MAX_OBJ];
  * 固定 app 槽：hello/echo/crash 等链接到 APP_LINK（0x80040000，16KB），
  * 加载时用 mapfn 逐页分配物理帧并映射；退出时由调度器回收（pcb.own_frames）。
  * shell 常驻 SHELL_LINK（0x80030000），帧不随退出回收。 */
-#define APP_LINK      0x80040000u
 #define APP_REGION    0x4000u        /* 16KB = 4 页（按需扩张的大上限） */
 #define APP_MAXFRAMES 8
 
@@ -266,6 +267,33 @@ void usermode_init(void) {
 }
 
 void usermode_set_esp0(uint32_t esp0) { tss.esp0 = esp0; }
+
+/* ---- v0.21 内核自审计 ----
+ * 由 selftest 一键触发：物理帧配平（mem_audit）+ 信号量不变量（sem_invariant_ok）
+ * + PCB 状态机（sched_audit）。各子系统打印一行 [audit] 日志（serial+vga），
+ * 本函数汇总返回失败检查项总数（0=全部通过）。 */
+static uint32_t kern_audit(void) {
+    uint32_t bad = 0;
+    bad += mem_audit();
+    bad += sched_audit();
+    uint32_t objs = 0;
+    for (uint32_t i = 1; i < SEM_MAX_OBJ; i++) {
+        if (!sem_objects[i].used) continue;
+        objs++;
+        if (!sem_invariant_ok(&sem_objects[i].sem)) {
+            serial_printf("[audit] sem FAIL: id=%u count=%d waiters=%u\n",
+                          i, sem_objects[i].sem.count, sem_objects[i].sem.wait_count);
+            vga_printf("[audit] sem FAIL: id=%u count=%d waiters=%u\n",
+                       i, sem_objects[i].sem.count, sem_objects[i].sem.wait_count);
+            bad++;
+        }
+    }
+    if (objs == 0)
+        serial_printf("[audit] sem ok: no semaphores\n");
+    else if (bad == 0)
+        serial_printf("[audit] sem ok: %u objects\n", objs);
+    return bad;
+}
 
 /* ---- 系统调用分发（int 0x80 门进入） ---- */
 void syscall_dispatch(registers_t *r) {
@@ -706,6 +734,44 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)rc;
         return;
     }
+    case 30: { /* sys_net_socket(port)：创建 UDP socket；port=0 自动分配；返回 socket id */
+        if (b || c) { r->eax = (uint32_t)-1; return; }
+        int s = netsock_open((uint16_t)a);
+        serial_printf("[net] socket port=%u -> id=%d\n", (uint16_t)a, s);
+        r->eax = (uint32_t)s;
+        return;
+    }
+    case 31: { /* sys_net_sendto(sock, *iov)：发 UDP 数据报，返回实际发送字节数或 -1 */
+        struct net_send_iov iov;
+        if (copyin((const void *)b, &iov, sizeof(iov)) < 0) { r->eax = (uint32_t)-1; return; }
+        if (iov.len > 1400) { r->eax = (uint32_t)-1; return; }
+        uint8_t pbuf[1400];
+        if (iov.len && copyin(iov.buf, pbuf, iov.len) < 0) { r->eax = (uint32_t)-1; return; }
+        int n = netsock_send((int)a, iov.dst_ip, iov.dst_port, pbuf, iov.len);
+        serial_printf("[net] sendto sock=%d %uB -> %x:%u rc=%d\n",
+                      (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
+        r->eax = (uint32_t)n;
+        return;
+    }
+    case 32: { /* sys_net_recvfrom(sock, *iov)：非阻塞收 UDP 数据报（0=无包）；src_* 出参 */
+        struct net_recv_iov iov;
+        if (copyin((const void *)b, &iov, sizeof(iov)) < 0) { r->eax = (uint32_t)-1; return; }
+        if (iov.max > 1400) iov.max = 1400;
+        if (iov.max && !user_ptr_valid(iov.buf, iov.max)) { r->eax = (uint32_t)-1; return; }
+        int n = netsock_recv((int)a, iov.buf, iov.max, &iov.src_ip, &iov.src_port);
+        if (n > 0) copyout(&iov, (void *)b, sizeof(iov));   /* 回写出参 */
+        serial_printf("[net] recvfrom sock=%d -> %dB\n", (int)a, n);
+        r->eax = (uint32_t)n;
+        return;
+    }
+    case 33: /* sys_net_close(sock) */
+        netsock_close((int)a);
+        r->eax = 0;
+        return;
+    case 34: /* sys_kern_audit()：v0.21 内核自审计——帧配平/信号量守恒/PCB 状态机。
+                返回失败检查项总数（0=全部通过），细节见 [audit] 日志行 */
+        r->eax = kern_audit();
+        return;
     default:
         serial_printf("[user] unknown syscall %u\n", num);
         r->eax = (uint32_t)-1;

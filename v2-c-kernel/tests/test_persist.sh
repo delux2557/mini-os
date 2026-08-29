@@ -82,7 +82,7 @@ wait_for "$LOG2" "shell 提示符"        "mini-os\$ " 20
 send "ls"
 wait_for "$LOG2" "重启后 /persist 仍在" "\[ls\]   persist/ "
 send "selftest"
-wait_for "$LOG2" "持久盘应用可运行"    "\[selftest\] PASS (5 checks)" 20
+wait_for "$LOG2" "持久盘应用可运行"    "\[selftest\] PASS (6 checks)" 20
 shutdown
 
 echo

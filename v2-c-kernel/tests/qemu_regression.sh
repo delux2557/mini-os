@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.18: e1000 NIC + ARP"
+"      "Mini-OS v0.24: UDP checksum verified on rx"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -124,8 +124,9 @@ cmd "run waitdemo"   "run waitdemo
 cmd "exec 失败反馈"   "exec nosuchprog
 "      "\[exec\] FAILED to exec '"
 # ---- v0.16 单行结构化自检（agent 可 grep 一行确认全量通过） ----
+# v0.21：第 6 项为内核自审计（帧配平/信号量守恒/PCB 状态机）
 cmd "selftest 自检"   "selftest
-"      "\[selftest\] PASS (5 checks)"
+"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[selftest\] PASS (6 checks)"
 # ---- v0.17 syscall 边界校验：内核指针全部被拒 ----
 cmd "run abuse"       "run abuse
 "      "\[abuse\] write buf@0xB8000 -> 4294967295" "\[abuse\] verify OK"

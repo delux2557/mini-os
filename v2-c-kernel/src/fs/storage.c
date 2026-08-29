@@ -71,6 +71,7 @@ extern char _binary_stackovf_elf_start[], _binary_stackovf_elf_end[];
 extern char _binary_fsdemo_elf_start[],  _binary_fsdemo_elf_end[];
 extern char _binary_waitdemo_elf_start[], _binary_waitdemo_elf_end[];
 extern char _binary_abuse_elf_start[],   _binary_abuse_elf_end[];
+extern char _binary_sockdemo_elf_start[], _binary_sockdemo_elf_end[];
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
@@ -85,8 +86,8 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
 
 static void initramfs_setup(void) {
     static const char motd[] =
-        "Mini-OS v0.18: e1000 NIC + ARP. Try: run abuse\n"
-        "Commands: help ls cat mkdir rmdir rm run exec save selftest exit\n";
+        "Mini-OS v0.24: UDP checksum verified on rx. Try: run abuse\n"
+        "Commands: help ls cat mkdir rmdir rm run exec save selftest exit netping\n";
     initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
     initramfs_file("hello",
                    _binary_hello_elf_start,
@@ -118,6 +119,9 @@ static void initramfs_setup(void) {
     initramfs_file("abuse",
                    _binary_abuse_elf_start,
                    (uint32_t)(_binary_abuse_elf_end - _binary_abuse_elf_start));
+    initramfs_file("sockdemo",
+                   _binary_sockdemo_elf_start,
+                   (uint32_t)(_binary_sockdemo_elf_end - _binary_sockdemo_elf_start));
     initramfs_file("shell",
                    _binary_shell_elf_start,
                    (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));

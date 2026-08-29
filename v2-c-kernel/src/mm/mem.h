@@ -53,6 +53,9 @@ uint32_t frame_alloc(void);
 uint32_t frame_alloc_run(uint32_t count); /* 分配 count 个连续帧 */
 void frame_free(uint32_t phys);
 
+/* v0.21 内核自审计：used_frames 与帧位图配平检查，返回失败项数（0=通过） */
+uint32_t mem_audit(void);
+
 /* 页错误处理（ISR 14 路由进来），懒分配区自动补页后可恢复 */
 void pf_handler(registers_t *r);
 uint32_t lazy_page_count(void);

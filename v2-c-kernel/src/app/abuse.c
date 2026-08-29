@@ -32,7 +32,10 @@ void app_main(int argc, char **argv) {
     report("readline@0x100000",    syscall3(SYS_READLINE, 0x100000u, 64, 0));
     report("spawn@0x100000",       syscall3(SYS_SPAWN_FILE, 0x100000u, 0, 0));
     report("exec@0x100000",        syscall3(SYS_EXEC, 0x100000u, 0, 0));
+    report("exec argv@0x100000",   syscall3(SYS_EXEC, (uint32_t)"/hello", 1, 0x100000u));
     report("wait status@0x100000", syscall3(SYS_WAIT, (uint32_t)-1, 0x100000u, 0));
+    report("sendto iov@0x100000",  syscall3(SYS_NET_SENDTO, 0, 0x100000u, 0));
+    report("recvfrom iov@0x100000",syscall3(SYS_NET_RECVFROM, 0, 0x100000u, 0));
     /* 高地址回绕（> END，接近 4GB）也应被拒 */
     report("print@0xFFFFFFF0",     syscall3(SYS_PRINT, 0xFFFFFFF0u, 0, 0));
 
@@ -56,11 +59,26 @@ void app_main(int argc, char **argv) {
         const char msg[] = "abuse-ok";
         uint32_t w = syscall3(SYS_FS_WRITE, 1, (uint32_t)msg, (uint32_t)(sizeof(msg) - 1));
         syscall3(SYS_FS_CLOSE, 1, 0, 0);
-        syscall3(SYS_FS_DELETE, (uint32_t)"/ok.tmp", 0, 0);
         sys_print("[abuse] valid path write -> ");
         user_putdec(w);
         sys_print("\n");
         if (w != sizeof(msg) - 1) fail++;
+
+        /* 读路径：合法读缓冲读回；内核地址缓冲被拒 */
+        if (syscall3(SYS_FS_OPEN, 1, (uint32_t)"/ok.tmp", 0) == 0) {
+            char rbuf[16];
+            report("read buf@0xB8000", syscall3(SYS_FS_READ, 1, 0xB8000u, 8));
+            uint32_t r = syscall3(SYS_FS_READ, 1, (uint32_t)rbuf, sizeof(rbuf));
+            sys_print("[abuse] valid path read -> ");
+            user_putdec(r);
+            sys_print("\n");
+            if (r != sizeof(msg) - 1) fail++;
+            syscall3(SYS_FS_CLOSE, 1, 0, 0);
+        } else {
+            sys_print("[abuse] valid-path reopen FAIL\n");
+            fail++;
+        }
+        syscall3(SYS_FS_DELETE, (uint32_t)"/ok.tmp", 0, 0);
     }
 
     sys_print(fail == 0 ? "[abuse] verify OK\n" : "[abuse] verify FAIL\n");

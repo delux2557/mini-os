@@ -19,6 +19,8 @@
 
 /* v0.9: 常驻 shell 的固定链接/加载地址（与 app 槽 0x80040000 错开） */
 #define SHELL_LINK  0x80030000u
+/* v0.9: 普通应用（hello/echo/...）的固定链接/加载地址（app 槽，退出即回收） */
+#define APP_LINK    0x80040000u
 
 void usermode_init(void);
 /* 系统调用分发（int 0x80 门进入；可能因退出/睡眠/让出而不返回） */

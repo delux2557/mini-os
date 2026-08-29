@@ -96,5 +96,23 @@ int main(void) {
     CHECK_EQ(sem_signal_wake(&s), SEM_NO_PID);  /* 4 释放 */
     CHECK_EQ(s.count, 2);                  /* 资源守恒：回到初始 2 */
 
+    /* 11) 不变量审计：正常序列恒成立，人为破坏能检出（v0.21） */
+    sem_init(&s, 1);
+    CHECK_EQ(sem_invariant_ok(&s), 1);
+    CHECK_EQ(sem_wait_try(&s, 1), 0);      /* 占用：count=0 */
+    CHECK_EQ(sem_invariant_ok(&s), 1);
+    CHECK_EQ(sem_wait_try(&s, 2), 1);      /* 入队：count=0, waiters=1 */
+    CHECK_EQ(sem_invariant_ok(&s), 1);
+    CHECK_EQ(sem_signal_wake(&s), 2);      /* 唤醒：count=0, waiters=0 */
+    CHECK_EQ(sem_invariant_ok(&s), 1);
+    CHECK_EQ(sem_signal_wake(&s), SEM_NO_PID);  /* 归还：count=1 */
+    CHECK_EQ(sem_invariant_ok(&s), 1);
+    sem_init(&s, 1);
+    s.wait_count = 1; s.waiters[0] = 7;    /* 人为破坏：有资源却排着队 */
+    CHECK_EQ(sem_invariant_ok(&s), 0);
+    sem_init(&s, 0);
+    s.count = -1;                          /* 人为破坏：负计数 */
+    CHECK_EQ(sem_invariant_ok(&s), 0);
+
     UTEST_SUMMARY("test_sem");
 }

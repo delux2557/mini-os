@@ -6,6 +6,7 @@
 #ifndef _USER_LIB_H
 #define _USER_LIB_H
 #include <stdint.h>
+#include "netio.h"   /* v0.20: 网络 I/O 参数结构（与内核 ABI 一致） */
 
 /* ---- 系统调用号（与内核 usermode.c 一致） ---- */
 #define SYS_EXIT       0
@@ -38,6 +39,11 @@
 #define SYS_FS_MKDIR   27   /* v0.14: 建目录（父目录须存在） */
 #define SYS_FS_RMDIR   28   /* v0.14: 删空目录 */
 #define SYS_FS_SYNC    29   /* v0.16: 把 ramdisk 全量写回真盘（持久化） */
+#define SYS_NET_SOCKET  30  /* v0.20: 创建 UDP socket（port=0 自动分配），返回 socket id */
+#define SYS_NET_SENDTO  31  /* v0.20: 发 UDP 数据报（参数在 net_send_iov 中） */
+#define SYS_NET_RECVFROM 32 /* v0.20: 非阻塞收 UDP 数据报（0=无包；出参在 net_recv_iov） */
+#define SYS_NET_CLOSE   33  /* v0.20: 关闭 socket */
+#define SYS_KERN_AUDIT  34  /* v0.21: 内核自审计（帧配平/信号量守恒/PCB 状态机） */
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {
@@ -80,6 +86,24 @@ static inline int sys_exec(const char *name, uint32_t argc, const char **argv) {
     return (int)syscall3(SYS_EXEC, (uint32_t)name, argc, (uint32_t)argv);
 }
 static inline int sys_fs_sync(void) { return (int)syscall3(SYS_FS_SYNC, 0, 0, 0); }
+
+/* v0.20: 用户态 UDP socket（参数结构见 netio.h） */
+static inline int sys_net_socket(uint16_t port) {
+    return (int)syscall3(SYS_NET_SOCKET, port, 0, 0);
+}
+static inline int sys_net_sendto(int sock, const struct net_send_iov *iov) {
+    return (int)syscall3(SYS_NET_SENDTO, (uint32_t)sock, (uint32_t)iov, 0);
+}
+static inline int sys_net_recvfrom(int sock, struct net_recv_iov *iov) {
+    return (int)syscall3(SYS_NET_RECVFROM, (uint32_t)sock, (uint32_t)iov, 0);
+}
+static inline int sys_net_close(int sock) {
+    return (int)syscall3(SYS_NET_CLOSE, (uint32_t)sock, 0, 0);
+}
+/* v0.21: 内核自审计——返回失败检查项总数（0=全部通过） */
+static inline uint32_t sys_kern_audit(void) {
+    return syscall3(SYS_KERN_AUDIT, 0, 0, 0);
+}
 
 /* ---- 打印工具（十进制 / 十六进制） ---- */
 static inline void user_putdec(uint32_t n) {

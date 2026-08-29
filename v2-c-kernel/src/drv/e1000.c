@@ -1,16 +1,25 @@
-/* mini-os/v2-c-kernel/src/e1000.c
- * Intel 82540EM (e1000) 驱动（v0.18）：QEMU 默认网卡（`-device e1000`）。
+/* mini-os/v2-c-kernel/src/drv/e1000.c
+ * Intel 82540EM (e1000) 驱动（v0.18/v0.19）：QEMU 默认网卡（`-device e1000`）。
  *  - MMIO BAR0（128KB）经 pci_bar_alloc_mem 分配后恒等映射进内核页目录
  *  - legacy 16B 描述符环（RX 16 / TX 8），轮询（无中断）
  *  - 链路：软复位后置 CTRL.SLU，轮询 STATUS.LU
  *  - e1000_selftest()：发 ARP 请求（who has 10.0.2.2）收 SLIRP 回复，
- *    端到端验证 TX+RX（配合 QEMU filter-dump 的 pcap 作独立核验）。
+ *    端到端验证 TX+RX（配合 QEMU filter-dump 的 pcap 作独立核验），并把
+ *    网关 MAC 缓存供上层使用
+ *  - e1000_udp_selftest()（v0.19）：经 SLIRP 网关回环，向宿主 UDP echo 服务
+ *    发 "PING" 收 "PONG"（宿主 127.0.0.1:7777，测试脚本提供 echo server）
+ *  - e1000_icmp_selftest()（v0.23）：发 ICMP Echo 请求到 SLIRP 网关 10.0.2.2，
+ *    收其 Echo 应答（SLIRP 内置 ICMP 回显），即"PING 通宿主"的经典语义
  */
 #include "e1000.h"
 #include "pci.h"
 #include "mem.h"
 #include "serial.h"
+#include "timer.h"
 #include "netutil.h"
+#include "ip.h"
+#include "udp.h"
+#include "icmp.h"
 #include <stdint.h>
 
 #define E1000_VENDOR 0x8086u
@@ -73,9 +82,11 @@ static volatile struct e1000_rx_desc rx_ring[RX_N] __attribute__((aligned(4096))
 static volatile struct e1000_tx_desc tx_ring[TX_N] __attribute__((aligned(4096)));
 static uint8_t rx_buf[RX_N][BUF_SIZE] __attribute__((aligned(16)));
 static uint8_t tx_buf[TX_N][BUF_SIZE] __attribute__((aligned(16)));
-static uint32_t rx_cur = 0, tx_cur = 0;
+static uint32_t rx_tail = 0, tx_cur = 0;
 static uint8_t mac[6];
 static int ready = 0;
+static uint8_t gw_mac[6];      /* 10.0.2.2 网关 MAC（ARP 自检学到） */
+static int gw_known = 0;
 
 static inline uint32_t rd(uint32_t off) { return regs[off / 4]; }
 static inline void wr(uint32_t off, uint32_t v) { regs[off / 4] = v; }
@@ -149,6 +160,7 @@ int e1000_init(void) {
 
 int e1000_ready(void) { return ready ? 0 : -1; }
 const uint8_t *e1000_mac(void) { return mac; }
+const uint8_t *e1000_gw_mac(void) { return gw_known ? gw_mac : 0; }
 
 int e1000_tx(const uint8_t *data, uint32_t len) {
     if (!ready || len == 0 || len > BUF_SIZE) return -1;
@@ -175,16 +187,17 @@ int e1000_tx(const uint8_t *data, uint32_t len) {
 
 int e1000_rx(uint8_t *buf, uint32_t max, uint32_t *len) {
     if (!ready) return -1;
-    uint32_t idx = rx_cur % RX_N;
-    volatile struct e1000_rx_desc *d = &rx_ring[idx];
+    volatile struct e1000_rx_desc *d = &rx_ring[rx_tail];
     if (!(d->status & 1u)) return 0;          /* 无新包 */
     uint32_t n = d->length;
     if (n > max) n = max;
-    const uint8_t *src = rx_buf[idx];
+    const uint8_t *src = rx_buf[rx_tail];
     for (uint32_t i = 0; i < n; i++) buf[i] = src[i];
     d->status = 0;
-    rx_cur++;
-    wr(REG_RDT, rx_cur % RX_N);               /* 归还描述符给硬件 */
+    /* 归还刚消费的描述符给硬件：RDT = 该下标（写成 i+1 会让 RDH==RDT，
+     * QEMU e1000_can_receive 判"无缓冲"而丢弃后续收包） */
+    wr(REG_RDT, rx_tail);
+    rx_tail = (rx_tail + 1) % RX_N;
     *len = n;
     return 1;
 }
@@ -205,6 +218,8 @@ void e1000_selftest(void) {
                 uint32_t sip = 0;
                 uint8_t smac[6];
                 if (net_parse_arp_reply(rxb, rlen, &sip, smac) == 0) {
+                    for (int j = 0; j < 6; j++) gw_mac[j] = smac[j];
+                    gw_known = 1;
                     serial_printf("[net] selftest: rx ARP reply 10.0.2.2 @ "
                                   "%02x:%02x:%02x:%02x:%02x:%02x -> OK\n",
                                   smac[0], smac[1], smac[2], smac[3], smac[4], smac[5]);
@@ -215,4 +230,74 @@ void e1000_selftest(void) {
         }
     }
     serial_puts("[net] selftest: ARP exchange FAIL (no reply)\n");
+}
+
+void e1000_udp_selftest(void) {
+    if (!ready || !gw_known) { serial_puts("[net] udp selftest skipped (no gw)\n"); return; }
+    uint32_t my_ip = 0x0A00020Fu;    /* 10.0.2.15 */
+    uint32_t gw_ip = 0x0A000202u;    /* 10.0.2.2  -> 宿主 127.0.0.1（SLIRP 别名） */
+    uint8_t frame[BUF_SIZE];
+    /* 向宿主 UDP echo 服务（127.0.0.1:7777）发 PING；echo server 回 PONG+原载荷 */
+    int flen = udp_build_frame(frame, gw_mac, mac, my_ip, gw_ip, 7777, 7777,
+                               (const uint8_t *)"PING", 4);
+    if (flen <= 0 || e1000_tx(frame, (uint32_t)flen) < 0) {
+        serial_puts("[net] udp selftest: tx fail\n"); return;
+    }
+    serial_printf("[net] udp: tx %dB -> 10.0.2.2:7777 (PING)\n", flen);
+    for (int attempt = 0; attempt < 5; attempt++) {
+        for (int i = 0; i < 30000; i++) {
+            uint8_t rxb[1600];
+            uint32_t rlen = 0;
+            if (e1000_rx(rxb, sizeof(rxb), &rlen) == 1) {
+                uint32_t sip = 0; uint16_t sp = 0, dp = 0;
+                const uint8_t *pay = 0; uint32_t plen = 0;
+                if (udp_parse(rxb, rlen, &sip, &sp, &dp, &pay, &plen) == 0 &&
+                    dp == 7777 && plen >= 4 && pay[0] == 'P' && pay[1] == 'O' &&
+                    pay[2] == 'N' && pay[3] == 'G') {
+                    serial_printf("[net] udp echo: rx %uB 'PONG' from 10.0.2.2:%u -> OK\n",
+                                  plen, sp);
+                    return;
+                }
+            }
+            for (volatile uint32_t d = 0; d < 2000; d++) ;
+        }
+    }
+    serial_puts("[net] udp echo FAIL (no PONG)\n");
+}
+
+void e1000_icmp_selftest(void) {
+    if (!ready || !gw_known) { serial_puts("[net] icmp selftest skipped (no gw)\n"); return; }
+    uint32_t my_ip = 0x0A00020Fu;    /* 10.0.2.15 */
+    uint32_t gw_ip = 0x0A000202u;    /* 10.0.2.2  SLIRP 网关（内置 ICMP 回显） */
+    uint8_t frame[BUF_SIZE];
+    /* 发 Echo 请求（id=0x4242, seq=1, 载荷 "PING"）；SLIRP 回 Echo 应答（type=0） */
+    int flen = icmp_build_frame(frame, gw_mac, mac, my_ip, gw_ip,
+                                0x4242u, 1, (const uint8_t *)"PING", 4);
+    if (flen <= 0 || e1000_tx(frame, (uint32_t)flen) < 0) {
+        serial_puts("[net] icmp selftest: tx fail\n"); return;
+    }
+    serial_printf("[net] icmp: tx echo req (%dB) -> 10.0.2.2\n", flen);
+    uint32_t t0 = (uint32_t)ticks;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        for (int i = 0; i < 30000; i++) {
+            uint8_t rxb[1600];
+            uint32_t rlen = 0;
+            if (e1000_rx(rxb, sizeof(rxb), &rlen) == 1) {
+                uint32_t sip = 0;
+                uint8_t type = 0, code = 0;
+                uint16_t id = 0, seq = 0;
+                const uint8_t *pay = 0; uint32_t plen = 0;
+                if (icmp_parse(rxb, rlen, &sip, &type, &code, &id, &seq, &pay, &plen) == 0 &&
+                    type == ICMP_TYPE_ECHO_REP && code == 0 &&
+                    id == 0x4242u && seq == 1 && plen >= 4 &&
+                    pay[0] == 'P' && pay[1] == 'I' && pay[2] == 'N' && pay[3] == 'G') {
+                    serial_printf("[icmp] echo reply from 10.0.2.2 OK (rtt=%u ticks)\n",
+                                  (uint32_t)ticks - t0);
+                    return;
+                }
+            }
+            for (volatile uint32_t d = 0; d < 2000; d++) ;
+        }
+    }
+    serial_puts("[icmp] echo FAIL (no reply)\n");
 }

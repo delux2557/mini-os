@@ -57,7 +57,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS v0.18  (e1000 NIC + minimal ARP stack)\n");
+    vga_puts("Micro-OS v0.24  (UDP checksum error path: drop bad frames)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
@@ -84,6 +84,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     storage_init();   /* v0.16：ramdisk + 真盘加载/格式化 + initramfs */
     e1000_init();     /* v0.18：PCI + e1000 网卡（无网卡则跳过） */
     e1000_selftest(); /* v0.18：ARP 请求/应答自检（验证 TX+RX） */
+    e1000_udp_selftest(); /* v0.19：经 SLIRP 网关回环到宿主 UDP echo（PING/PONG） */
+    e1000_icmp_selftest(); /* v0.23：ICMP Echo 自检——PING 通宿主（SLIRP 网关回显） */
 
     timer_init(100);      /* 100 Hz 心跳 */
     kb_init();
@@ -112,6 +114,14 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     kb_set_line_hook(sched_wake_keyboard);
     int shell_pid = usermode_spawn_elf("shell", SHELL_LINK, 1);
     serial_printf("[boot] shell pid=%d\n", shell_pid);
+
+    /* v0.20：网络可用时启动用户态 UDP socket 演示（sockdemo 用 sys_net_* 系统调用
+     * 与宿主 UDP echo 服务端到端回环；依赖 ARP 自检已学到网关 MAC）。
+     * 无网卡（e1000_ready()=-1）则不生成，避免无网络环境下的噪音。 */
+    if (e1000_ready() == 0) {
+        int sock_pid = usermode_spawn_elf("sockdemo", APP_LINK, 0);
+        serial_printf("[boot] sockdemo pid=%d\n", sock_pid);
+    }
 
     /* 切入第一个就绪进程（不返回）；中断由 iret 的 eflags 开启 */
     sched_start();
