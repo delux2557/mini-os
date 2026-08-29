@@ -57,7 +57,7 @@ wait_for "help 输出"           "mini-os shell commands:"
 send "ls"
 wait_for "ls 输出"             "\[ls\] /:"
 send "cat motd"
-wait_for "cat motd 输出"       "Mini-OS v0.12: fork/exec process model"
+wait_for "cat motd 输出"       "Mini-OS v0.13: user stack guard pages"
 send "run hello"
 wait_for "run hello 输出"      "Hello from 'hello' app! pid="
 wait_for "hello 退出码"        "'hello' exited code=0"
@@ -84,6 +84,11 @@ wait_for "exec 镜像替换"       "\[exec\] pid=.* -> 'args'"
 wait_for "exec argv"          "\[args\] pid=.* argc=3"
 wait_for "exec argv[1]"       "\[args\] argv\[1\]='hello'"
 wait_for "exec 退出码"        "'args' exited code=0"
+# ---- v0.13 栈守卫页 ----
+send "run stackovf"
+wait_for "stackovf 启动"       "\[stackovf\] pid=.* starting"
+wait_for "栈溢出被检测"        "\[user\] STACK OVERFLOW pid="
+wait_for "stackovf 被终止"    "'stackovf' exited code="
 
 # 稳定后收尾（让串口缓冲落盘）
 sleep 1

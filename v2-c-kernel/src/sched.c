@@ -44,9 +44,10 @@ extern char _binary_userprog_bin_end[];
 /* v0.11: 共享代码页物理帧（每个进程在自己的页目录里映射到 0x80000000） */
 static uint32_t user_code_phys = 0;
 
-/* 每个进程的用户栈虚拟基址：代码页之后，按 pid 错开一页 */
+/* v0.13: 每个进程的用户栈区虚拟基址：代码页之后，按 pid 错开一个 8KB 槽。
+ * 槽内 [基址, +4KB) 为守卫页（不映射，栈溢出陷阱），[+4KB, +8KB) 为栈页（映射）。 */
 static uint32_t user_stack_vbase(uint32_t pid) {
-    return USER_CODE_BASE + 0x10000u + pid * KSTACK_SIZE;
+    return USER_STACK_AREA_BASE + pid * USER_STACK_SLOT;
 }
 
 static void memcpy8(void *dst, const void *src, uint32_t n) {
@@ -161,11 +162,12 @@ int sched_spawn(uint32_t entry_off, const char *name) {
     }
 
     p->kstack_top = p->kstack_frame + KSTACK_SIZE;
-    uint32_t usv = user_stack_vbase(pid);
-    p->user_esp_top = usv + KSTACK_SIZE;
-    /* v0.11: 共享代码页 + 独立用户栈页，都映射进本进程自己的页目录 */
+    uint32_t usv = user_stack_vbase(pid);         /* 栈区基址（守卫页） */
+    uint32_t stk = usv + USER_STACK_GUARD;        /* 栈页（守卫页之后） */
+    p->user_esp_top = usv + USER_STACK_SLOT;      /* 栈区顶 */
+    /* v0.11: 共享代码页映射；v0.13: 只映射栈页，守卫页不映射（栈溢出陷阱） */
     map_page_in(p->page_dir, USER_CODE_BASE, user_code_phys, 0x7);
-    map_page_in(p->page_dir, usv, p->stack_frame, 0x7);
+    map_page_in(p->page_dir, stk, p->stack_frame, 0x7);
 
     p->pid = pid;
     set_name(p, name);
@@ -200,9 +202,10 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
     }
 
     p->kstack_top = p->kstack_frame + KSTACK_SIZE;
-    uint32_t usv = user_stack_vbase(pid);
-    p->user_esp_top = usv + KSTACK_SIZE;
-    map_page_in(pd, usv, p->stack_frame, 0x7);   /* 独立用户栈页 */
+    uint32_t usv = user_stack_vbase(pid);         /* 栈区基址（守卫页） */
+    uint32_t stk = usv + USER_STACK_GUARD;        /* 栈页 */
+    p->user_esp_top = usv + USER_STACK_SLOT;      /* 栈区顶 */
+    map_page_in(pd, stk, p->stack_frame, 0x7);    /* 独立用户栈页（守卫页不映射） */
 
     p->pid = pid;
     set_name(p, name);
@@ -341,7 +344,8 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
                uint32_t entry, const uint32_t *frames, uint32_t fcount, uint32_t vbase,
                const char (*argv)[64], uint32_t argc) {
     pcb_t *p = &procs[current_pid];
-    uint32_t usv = user_stack_vbase(p->pid);
+    uint32_t usv = user_stack_vbase(p->pid);      /* 栈区基址（守卫页） */
+    uint32_t stk = usv + USER_STACK_GUARD;        /* 栈页 */
 
     /* name 可能指向当前进程用户内存（如 shell 栈上的参数字符串），
      * 而下面会释放旧地址空间，故先拷贝进 PCB 的 name_buf。 */
@@ -350,8 +354,8 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
     uint32_t sframe = frame_alloc();
     if (!sframe) return -1;
     memset8((void *)sframe, 0, 4096);
-    map_page_in(pd, usv, sframe, 0x7);       /* 新用户栈 -> 新地址空间 */
-    uint32_t esp = argv_layout(sframe, usv, argv, argc);
+    map_page_in(pd, stk, sframe, 0x7);            /* 新用户栈页（守卫页不映射） */
+    uint32_t esp = argv_layout(sframe, stk, argv, argc);
 
     /* 释放旧用户资源（ELF 代码/私有页/fork 帧/旧栈/旧页目录）；内核栈保留复用 */
     release_priv_frames(p);

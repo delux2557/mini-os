@@ -40,6 +40,7 @@ run_test test_sem   "src/sem.c tests/test_sem.c"
 run_test test_msg   "src/msg.c tests/test_msg.c"
 run_test test_fs    "src/blockdev.c src/fs.c tests/test_fs.c"
 run_test test_elf   "src/elf.c tests/test_elf.c"
+run_test test_guard "src/guard.c tests/test_guard.c"
 
 echo
 echo "宿主测试汇总: pass=$PASS fail=$FAIL"

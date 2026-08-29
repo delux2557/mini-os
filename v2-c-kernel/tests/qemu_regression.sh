@@ -82,7 +82,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.12: fork/exec process model"
+"      "Mini-OS v0.13: user stack guard pages"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -98,6 +98,9 @@ cmd "run forkdemo"   "run forkdemo
 "      "\[fork\] pid=.* before fork" "\[fork\] PARENT pid=.* fork returned child=" "\[fork\] CHILD pid=.* fork returned 0" "\[fork\] pid=.* ISOLATED OK" "\[shell\] 'forkdemo' exited code=0"
 cmd "exec args"      "exec args alpha beta gamma
 "      "\[exec\] pid=.* -> 'args'" "\[args\] pid=.* argc=4" "\[args\] argv\[1\]='alpha'" "\[args\] argv\[3\]='gamma'" "\[shell\] 'args' exited code=0"
+# ---- v0.13 栈守卫页 ----
+cmd "run stackovf"   "run stackovf
+"      "\[stackovf\] pid=.* starting" "\[user\] STACK OVERFLOW pid=" "\[shell\] 'stackovf' exited code="
 
 # 等待剩余时间（让后台 sem/msg/fs 演示继续输出），随后收尾
 END=$((QSTART + DURATION))
@@ -207,6 +210,11 @@ check "exec 镜像替换"            "\[exec\] pid=.* -> 'args'"
 check "argv 参数传递"            "\[args\] pid=.* argc=4"
 check "argv[1] 内容"             "\[args\] argv\[1\]='alpha'"
 check "exec 退出码"              "\[shell\] 'args' exited code=0"
+# ---- v0.13 栈守卫页 ----
+check "initramfs 写入 stackovf" "\[ramdisk\] 'stackovf'"
+check "stackovf 启动"           "\[stackovf\] pid=.* starting"
+check "栈溢出被检测"             "\[user\] STACK OVERFLOW pid="
+check "stackovf 被终止"          "\[sched\] kill pid=.* name=stackovf"
 # ---- 通用 ----
 check "idle 状态行心跳"     "alive="
 check "定时器心跳正常"      "ticks="

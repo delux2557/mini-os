@@ -46,6 +46,7 @@ extern char _binary_crash_elf_start[], _binary_crash_elf_end[];
 extern char _binary_isol_elf_start[],  _binary_isol_elf_end[];
 extern char _binary_forkdemo_elf_start[], _binary_forkdemo_elf_end[];
 extern char _binary_args_elf_start[],   _binary_args_elf_end[];
+extern char _binary_stackovf_elf_start[], _binary_stackovf_elf_end[];
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
@@ -60,8 +61,8 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
 
 static void initramfs_setup(void) {
     static const char motd[] =
-        "Mini-OS v0.12: fork/exec process model + argv passing.\n"
-        "Commands: help ls cat run exec exit   (try: run forkdemo, exec args a b)\n";
+        "Mini-OS v0.13: user stack guard pages + overflow detection.\n"
+        "Commands: help ls cat run exec exit   (try: run stackovf)\n";
     initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
     initramfs_file("hello",
                    _binary_hello_elf_start,
@@ -81,6 +82,9 @@ static void initramfs_setup(void) {
     initramfs_file("args",
                    _binary_args_elf_start,
                    (uint32_t)(_binary_args_elf_end - _binary_args_elf_start));
+    initramfs_file("stackovf",
+                   _binary_stackovf_elf_start,
+                   (uint32_t)(_binary_stackovf_elf_end - _binary_stackovf_elf_start));
     initramfs_file("shell",
                    _binary_shell_elf_start,
                    (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));
@@ -125,7 +129,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS v0.12  (fork/exec process model + argv passing)\n");
+    vga_puts("Micro-OS v0.13  (user stack guard pages + overflow detection)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {

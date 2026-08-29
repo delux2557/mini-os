@@ -2,6 +2,30 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## [v0.13] - 2026-08-29 · 用户栈守卫页与栈溢出检测
+
+**Added**
+- **用户栈守卫页（guard page）**：用户地址空间布局重构（mem.h）——
+  每进程栈区改为 **8KB 槽** = [守卫页 4KB（不映射） | 栈页 4KB（映射）]，
+  栈从槽顶向下增长，下溢越过栈页底部即进入守卫页（未映射陷阱页）。
+  - `USER_STACK_AREA_BASE=0x80010000`，槽按 pid 错开（`+ pid*0x2000`），
+    `SHMEM_VBASE` 后移至 `0x80044000` 避免与栈区重叠
+  - `spawn/spawn_at/exec` 只映射栈页，**守卫页不映射**（sched.c `user_stack_vbase`）
+- **栈溢出检测**：`stack_guard_hit(fault)`（src/guard.c，纯逻辑可宿主单测）——
+  页错误处理 `pf_handler` 先判定 fault 是否落在本进程用户栈守卫页，
+  命中即打印 `[user] STACK OVERFLOW pid=.. @.. -> killed` 并终止该进程（内存安全演示）
+- 演示应用 `src/apps/stackovf.c`：故意往本进程栈槽的守卫页写入 →
+  触发页错误 → 内核识别为 STACK OVERFLOW 并隔离终止
+
+**Engineering**
+- 宿主单元测试 `tests/test_guard.c`（15 条断言：栈区外/pid0..2 槽内守卫页边界/
+  跨槽边界/地址 0 与全 F 等）验证 `stack_guard_hit` 边界
+- QEMU 回归新增 v0.13 检查项：initramfs 写入 stackovf / stackovf 启动 /
+  栈溢出被检测（`STACK OVERFLOW pid=`）/ stackovf 被终止（kill + exited）
+- 串口终端回归补 `run stackovf` 用例
+- Makefile 新增 `stackovf` 应用构建与 `guard.o` 内核对象
+- 初始化 Git 仓库：v0.12 基线提交 `ac80cc9`，v0.13 作为增量特性直接在主分支提交
+
 ## [v0.12] - 2026-08-29 · fork/exec 进程模型与 argv 参数传递
 
 **Added**

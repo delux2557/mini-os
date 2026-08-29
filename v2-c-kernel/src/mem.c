@@ -218,6 +218,15 @@ void pf_handler(registers_t *r) {
 
     /* 用户态页错误：用户程序越界访问（内核内存/非法地址）-> 隔离终止该进程 */
     if ((r->cs & 3) == 3) {
+        /* v0.13 栈溢出检测：fault 落在本进程用户栈守卫页（未映射陷阱页） */
+        if (stack_guard_hit(fault)) {
+            serial_printf("\n[user] STACK OVERFLOW pid=%u @%x -> killed\n",
+                          sched_current_pid(), fault);
+            vga_printf("\n[user] STACK OVERFLOW pid=%u @%x -> killed\n",
+                       sched_current_pid(), fault);
+            sched_kill(r, (uint32_t)-1);
+            __asm__ volatile ("cli; hlt");   /* 不可达 */
+        }
         serial_printf("\n[user] PAGE FAULT pid=%u @%x err=%u -> killed\n",
                       sched_current_pid(), fault, r->err_code);
         vga_printf("\n[user] PAGE FAULT pid=%u @%x err=%u -> killed\n",
@@ -252,3 +261,6 @@ void pf_handler(registers_t *r) {
 }
 
 uint32_t lazy_page_count(void) { return lazy_pages; }
+
+/* 用户栈守卫页判定（v0.13）实现在 src/guard.c（纯逻辑，可宿主单测）；
+ * 声明见 mem.h，此处由 pf_handler 使用。 */
