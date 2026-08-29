@@ -18,12 +18,14 @@
 #include "fs.h"
 #include "mem.h"
 #include "heap.h"
+#include "brk.h"
 #include "elf.h"
 #include "kb.h"
 #include "storage.h"
 #include "userptr.h"
 #include "netsock.h"
 #include "netio.h"
+#include <stddef.h>
 #include <stdint.h>
 
 /* ---- v0.6 IPC/同步：内核信号量表（用户通过固定 id 引用，id 0 保留） ---- */
@@ -58,19 +60,25 @@ typedef struct {
 static fs_file_t fs_files[FS_MAX_OBJ];
 
 /* ---- v0.9 从文件系统加载 ELF 应用 ----
- * 固定 app 槽：hello/echo/crash 等链接到 APP_LINK（0x80040000，16KB），
- * 加载时用 mapfn 逐页分配物理帧并映射；退出时由调度器回收（pcb.own_frames）。
- * shell 常驻 SHELL_LINK（0x80030000），帧不随退出回收。 */
-#define APP_REGION    0x4000u        /* 16KB = 4 页（按需扩张的大上限） */
-#define APP_MAXFRAMES 8
+ * 应用链接到 APP_LINK（0x800A0000，v0.26#3 app 区扩到 1MB），加载时用 mapfn
+ * 逐页分配物理帧并映射；退出时由调度器回收（pcb.own_frames，v0.26#3 动态数组）。
+ * shell 常驻 SHELL_LINK（0x80090000），帧不随退出回收。
+ * v0.26#3: load_frames 由固定 8 项静态数组改为按需 kmalloc 的动态列表，
+ * 不再受 32KB/8 帧上限约束（ELF 加载去上限）。 */
+#define APP_ELF_MAXSIZE 0x100000u   /* 单个 ELF 文件上限：1MB（app 区同量级） */
 
 static uint32_t load_vbase;        /* mapfn 边界检查：ELF 实际最低链接地址（页对齐） */
 static uint32_t load_region;       /* 覆盖范围字节数 = load_maxframes 页 */
-static uint32_t load_frames[APP_MAXFRAMES];   /* 各页的物理帧 */
+static uint32_t *load_frames;      /* v0.26#3: 各页物理帧（kmalloc 动态数组，load_maxframes 项） */
 static uint32_t load_fcount;
 static uint32_t load_maxframes;
 static uint32_t load_pd;           /* v0.11: 本次加载的目标进程页目录 */
 static int      load_failed;
+
+/* 释放本次加载的帧记账数组（帧本身已移交 PCB 或另行回收） */
+static void load_frames_free(void) {
+    if (load_frames) { kfree(load_frames); load_frames = NULL; }
+}
 
 /* elf_load 的映射钩子：为目标虚拟区分配物理帧并映射进"目标进程页目录"。
  * v0.11: 加载期间 CR3 已被切到目标页目录，故只映射进 load_pd 即可，
@@ -98,7 +106,7 @@ static int load_elf_file(const char *name, uint32_t vbase, uint32_t *entry) {
     int ino = fs_lookup(bd, name);
     if (ino < 0) { serial_printf("[elf] '%s' not found\n", name); return -1; }
     uint32_t sz = fs_size(bd, (uint32_t)ino);
-    if (sz == 0 || sz > 65536) { serial_printf("[elf] '%s' bad size %u\n", name, sz); return -1; }
+    if (sz == 0 || sz > APP_ELF_MAXSIZE) { serial_printf("[elf] '%s' bad size %u\n", name, sz); return -1; }
 
     uint8_t *buf = (uint8_t *)kmalloc(sz);
     if (!buf) return -1;
@@ -111,12 +119,8 @@ static int load_elf_file(const char *name, uint32_t vbase, uint32_t *entry) {
     load_vbase = lbase;
     load_region = lend - lbase;
     load_maxframes = load_region / 0x1000u;
-    if (load_maxframes > APP_MAXFRAMES) {
-        serial_printf("[elf] '%s' too big (%u pages > %u)\n", name,
-                      load_maxframes, APP_MAXFRAMES);
-        kfree(buf);
-        return -1;
-    }
+    load_frames = (uint32_t *)kmalloc(load_maxframes * sizeof(uint32_t));
+    if (!load_frames) { kfree(buf); return -1; }
     load_fcount = 0;
     load_failed = 0;
     (void)vbase;
@@ -124,6 +128,7 @@ static int load_elf_file(const char *name, uint32_t vbase, uint32_t *entry) {
     kfree(buf);
     if (rc != 0 || load_failed) {
         for (uint32_t i = 0; i < load_fcount; i++) frame_free(load_frames[i]);
+        load_frames_free();
         load_fcount = 0;
         serial_printf("[elf] load '%s' failed rc=%d\n", name, rc);
         return -1;
@@ -173,14 +178,16 @@ int usermode_spawn_elf(const char *name, uint32_t vbase, int resident) {
                              resident ? 0 : load_fcount, vbase);
     if (pid < 0) {
         for (uint32_t i = 0; i < load_fcount; i++) frame_free(load_frames[i]);
+        load_frames_free();
+        load_fcount = 0;
         addr_space_destroy(pd);
         serial_printf("[elf] spawn '%s' failed (no pid)\n", namebuf);
-        load_fcount = 0;
         return -1;
     }
     /* v0.11: 帧仅映射在目标进程页目录（进程运行时使用），当前地址空间无临时映射，
      * 无需清理；帧已移交 pcb（成功时）/已回收（失败时） */
     load_fcount = 0;
+    load_frames_free();   /* v0.26#3: 记账数组用完即还（帧已移交 PCB） */
     return pid;
 }
 
@@ -774,6 +781,44 @@ void syscall_dispatch(registers_t *r) {
                 返回失败检查项总数（0=全部通过），细节见 [audit] 日志行 */
         r->eax = kern_audit();
         return;
+    case 35: { /* sys_brk(addr)：v0.26#2 用户堆。addr=0 返回当前 brk（sbrk(0) 风格）；
+                否则设置 program break，返回 0 成功 / -1 失败。
+                向上扩展按页补映射（记账 heap_frames[]）；收缩只更新 brk 保留映射复用。 */
+        pcb_t *p = sched_get(sched_current_pid());
+        if (!p) { r->eax = (uint32_t)-1; return; }
+        if (a == 0) { r->eax = p->heap_brk; return; }
+        if (!brk_in_range(a, p->heap_base, USER_HEAP_MAX)) {
+            serial_printf("[heap] brk pid=%u bad addr=%x\n", p->pid, a);
+            r->eax = (uint32_t)-1;
+            return;
+        }
+        uint32_t old = p->heap_brk;
+        if (a > old) {
+            if (brk_pages_up(old, a) > USER_HEAP_PAGES - p->heap_fcount) {
+                serial_printf("[heap] brk pid=%u over cap %u+%u pages\n",
+                              p->pid, p->heap_fcount, brk_pages_up(old, a));
+                r->eax = (uint32_t)-1;
+                return;
+            }
+            uint32_t v = old;
+            while (v < a) {
+                if (!is_mapped(v)) {          /* 已映射页（收缩后复用）跳过 */
+                    uint32_t phys = frame_alloc();
+                    if (!phys) { r->eax = (uint32_t)-1; return; }
+                    uint32_t *wp = (uint32_t *)phys;
+                    for (int i = 0; i < 1024; i++) wp[i] = 0;
+                    map_page(v, phys, 0x7);   /* 当前进程地址空间 */
+                    if (p->heap_fcount < USER_HEAP_PAGES)
+                        p->heap_frames[p->heap_fcount++] = phys;
+                }
+                v += 0x1000u;
+            }
+        }
+        p->heap_brk = a;
+        serial_printf("[heap] brk pid=%u %x -> %x pages=%u\n", p->pid, old, a, p->heap_fcount);
+        r->eax = 0;
+        return;
+    }
     default:
         serial_printf("[user] unknown syscall %u\n", num);
         r->eax = (uint32_t)-1;

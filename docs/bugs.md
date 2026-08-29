@@ -397,6 +397,8 @@
 |------|------|------|-----------|
 | OPS-001 | git 提交（沙箱环境） | `Author identity unknown`：环境未配置 user.name/user.email | 逐次用 `git -c user.name=… -c user.email=… commit` 指定，不改全局 config；`git log` 历史可溯源 |
 | OPS-002 | 编辑 selftest 日志调用 | 改 ARP 自检日志时把 `serial_printf("… #%d", attempt)` 误改为 `serial_puts("… #%d")` | `serial_puts` 单参、`%d` 只是普通字符 → **编译不报错、输出丢参数**；且现有断言 `selftest: tx ARP req` 不校验 `#N` 数字 → 回归抓不到。提交前人工核对日志格式参数；日志格式化参数丢失类问题应靠"打印变量值"的断言或 diff 日志发现 |
+| OPS-003 | v0.26#3 堆区迁址 | 用户堆区由 0x800B0000 迁至 0x801A4000 后，`test_serial.sh`/`qemu_regression.sh` 的 heapdemo 断言仍写旧地址 0x800b0000 → 首轮回归 3 项 FAIL | **地址类断言与布局常量强耦合**：每次改动 mem.h 布局必须全仓搜索该地址（`800b0000`/`USER_HEAP_BASE`）同步测试。教训：测试里的"魔法地址"应尽量引用常量或用正则前缀（如 `brk=0x801a4000` 单独写成一行便于批量更新） |
+| OPS-004 | bigdemo 单行输出拆断断言 | `[bigdemo] 70KB write+verify sum=… survived big-ELF load` 两段打在同一行，断言 `\[bigdemo\] survived` 需"连续子串"，grep 匹配失败 | **grep 是连续子串匹配，不是"包含两个独立短语"**。多段语义日志应拆成独立行（本项目约定"每行单次 sys_print 原子行"正是为此），断言也按行拆分；避免"一行塞两个可断言关键词" |
 
 ## 未解决问题（观察记录）
 

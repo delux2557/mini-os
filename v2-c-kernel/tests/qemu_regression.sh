@@ -110,6 +110,12 @@ cmd "run stackovf"   "run stackovf
 # ---- v0.26 用户栈按需生长 ----
 cmd "run deep"       "run deep
 "      "\[deep\] pid=.* recursing 12\*1KB on a 4KB start stack" "\[stack\] grow pid=" "\[deep\] survived 12KB recursion via stack growth" "\[shell\] 'deep' exited code=0"
+# ---- v0.26#2 用户堆（brk/sbrk）：扩展/写入校验/收缩复用/bump alloc ----
+cmd "run heapdemo"   "run heapdemo
+"      "\[heapdemo\] initial brk=0x801a4000" "\[heapdemo\] sbrk(4096) old=0x801a4000" "\[heapdemo\] 4KB page write+verify OK" "\[heapdemo\] 16KB write+verify OK" "\[heapdemo\] shrink+reuse write+verify OK" "\[heapdemo\] bump alloc 3 blocks write+verify OK" "\[heapdemo\] survived heap brk/sbrk demo" "\[shell\] 'heapdemo' exited code=0"
+# ---- v0.26#3 ELF 加载去上限：>64KB 大 ELF（旧 32KB/8 帧上限会拒绝） ----
+cmd "run bigdemo"    "run bigdemo
+"      "\[bigdemo\] pid=.* blob=70KB size=70000" "\[bigdemo\] 70KB write+verify sum=" "\[bigdemo\] survived big-ELF load" "\[shell\] 'bigdemo' exited code=0"
 # ---- v0.14 文件系统增强：shell 目录命令 + fsdemo ----
 # 注意：QEMU HMP sendkey 不支持 '/'（斜杠会静默丢弃），此处用平铺名；
 # 带斜杠路径的交互验证走串口通道（test_serial.sh）。
@@ -251,6 +257,16 @@ check "stackovf 被终止"          "\[sched\] kill pid=.* name=stackovf"
 check "initramfs 写入 deep"     "\[ramdisk\] 'deep'"
 check "deep 栈按需生长"          "\[stack\] grow pid=.* pages="
 check "deep 存活"                "\[deep\] survived 12KB recursion via stack growth"
+# ---- v0.26#2 用户堆（brk/sbrk） ----
+check "initramfs 写入 heapdemo" "\[ramdisk\] 'heapdemo'"
+check "brk 起始日志"             "\[heap\] brk pid=.* 801a4000 -> 801a5000"
+check "brk 扩 16KB 日志"         "\[heap\] brk pid=.* 801a5000 -> 801a9000"
+check "brk 收缩保留映射"         "\[heap\] brk pid=.* 801a9000 -> 801a7000"
+check "heapdemo 存活"            "\[heapdemo\] survived heap brk/sbrk demo"
+# ---- v0.26#3 ELF 加载去上限：>64KB 大 ELF ----
+check "initramfs 写入 bigdemo"   "\[ramdisk\] 'bigdemo'"
+check "大 ELF 加载日志"           "\[elf\] 'bigdemo' loaded"
+check "bigdemo 帧数超旧上限"      "\[elf\] 'bigdemo' loaded.*[0-9][0-9]* frames"
 # ---- v0.14 文件系统增强 ----
 check "initramfs 写入 fsdemo"   "\[ramdisk\] 'fsdemo'"
 check "fsdemo 建目录 /etc"       "\[fsdemo\] mkdir /etc -> [0-9][0-9]*"

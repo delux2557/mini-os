@@ -116,11 +116,14 @@
     = v0.3 懒分配 + v0.13 守卫页两个已验证机制的组合。~~ ✅ **v0.26#1 已完成**
     （32KB 槽 = 硬底守卫页 + 28KB 可生长栈区，三态判定，`deep` 演示 12KB 递归触发 3 次生长）
 
-  * **`sys_brk`** **用户堆**：现无堆（`map_frames[8]` 固定、`sys_map_page` 一次一页）。在私有页
-    之上开可伸缩区，记账进 PCB；记账表 kmalloc 动态化（为编译器 malloc 铺路）。
+  * **`sys_brk`** **用户堆**：~~现无堆（`map_frames[8]` 固定、`sys_map_page` 一次一页）。在私有页
+    之上开可伸缩区，记账进 PCB；记账表 kmalloc 动态化（为编译器 malloc 铺路）。~~ ✅ **v0.26#2 已完成**
+    （SYS_BRK 查询/设置 program break，堆区 320KB，扩展按页补映射、收缩保留映射复用，
+    `heapdemo` 演示 + `test_brk` 宿主单测）
 
-  * **ELF 加载去上限**：`load_frames[APP_MAXFRAMES=8]` 改动态列表、app 区 16KB 扩 MB 级；
-    顺带解决 `APP_LINK` 单槽掩护的结构债（并发跑两个同链接地址程序）。
+  * **ELF 加载去上限**：~~`load_frames[APP_MAXFRAMES=8]` 改动态列表、app 区 16KB 扩 MB 级；
+    顺带解决 `APP_LINK` 单槽掩护的结构债（并发跑两个同链接地址程序）。~~ ✅ **v0.26#3 已完成**
+    （load\_frames/own\_frames 动态化、app 区 1MB、用户空间 16MB；`bigdemo` 70KB/21 帧验证）
 
   * 三项均可纯逻辑化宿主单测（stack\_guard\_hit 边界、brk 状态机、加载器 frames 记账），
     延续现有测试风格。

@@ -50,6 +50,56 @@
 
 * `deep` 演示程序尾递归被 `-O2` 改写为循环、栈占用不足 4KB 不触发生长（见 BUG-024）
 
+## \[v0.26#2] - 2026-08-29 · 容量三连#2：用户堆（brk/sbrk）
+
+**Added**
+
+* **用户堆系统调用**（`SYS_BRK=35`，`src/kernel/usermode.c` 分发）：`sys_brk(addr)`
+  查询/设置 program break、`sys_sbrk(incr)` 相对增长（返回旧 brk）；堆区
+  [USER_HEAP_BASE, USER_HEAP_MAX) 在共享内存之后（v0.26#3 定为 0x801A4000-0x801F4000，
+  320KB = 80 页），每进程独立、相互隔离
+
+* **堆状态纯逻辑**（`src/mm/brk.h` `brk.c`）：`brk_pages_up`（扩展需补映射页数）、
+  `brk_in_range`（收缩/复用边界）独立成模块，可宿主单测；扩展按页补映射物理帧并
+  记账进 PCB（`heap_frames[]` + `heap_fcount`），收缩只更新 `heap_brk` 保留映射复用
+
+* **页错误堆处理**（`src/mm/mem.c` `pf_handler`）：访问已分配但未映射的堆页时按需补映射，
+  与栈生长共用页错误路径；堆页访问越界（越过 heap_brk 且映射缺失）按普通缺页拒绝
+
+* **`heapdemo` 演示程序**（`src/app/heapdemo.c`）：初始 brk 查询 → sbrk(4K) 写入校验 →
+  sbrk(16K) 写入校验 → 收缩回 8KB 处（内核保留映射）→ sbrk 复用已映射页 → 极简
+  bump-allocator 冒烟（编译器 malloc 铺路）
+
+**Engineering**
+
+* 宿主单测 `tests/test_brk.c`（21 断言）：brk 状态机边界——不动/收缩/页对齐扩展/超上限
+* 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 `heapdemo` 用例
+  （brk 查询 → 扩页日志 → 收缩保留映射 → 存活 → 退出码 0）
+
+## \[v0.26#3] - 2026-08-29 · 容量三连#3：ELF 加载去上限
+
+**Added**
+
+* **ELF 加载去上限**：`usermode.c` 的 `load_frames` 由固定 8 项静态数组改为按需
+  `kmalloc` 动态列表，`sched.c` 的 `own_frames` 同步动态化（`own_frames_take` 拷入
+  PCB、`release_priv_frames` 归还），解除 32KB/8 帧约束，支持 MB 级 ELF；
+  `APP_MAXFRAMES`/65536B 旧上限检查移除（上限改为 app 区同量级 1MB）
+
+* **地址空间重布局**：用户空间扩至 16MB（USER_SPACE_END=0x81000000）；app 区扩为
+  1MB（0x800A0000-0x801A0000），共享内存迁至 app 区之后（0x801A0000）、堆区迁至
+  0x801A4000（v0.26#2 首版曾驻 0x800B0000，随本次迁址后断言同步更新）
+
+* **`bigdemo` 演示程序**（`src/app/bigdemo.c`）：70KB 初值数据（.data 段）使 ELF 文件
+  78KB > 旧上限 65536B，加载需 21 帧（旧 8 帧上限时代无法加载）；逐字节填充校验和
+  验证数据完好
+
+**Engineering**
+
+* 宿主单测 `tests/test_userptr.c` 边界更新：USER_SPACE_END 扩为 0x81000000 后
+  上限内末 4 字节 / 越界 / 长度溢出断言随新边界调整
+* 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 `bigdemo` 用例
+  （启动 → 70KB 校验 → 存活 → 退出码 0），并断言加载帧数突破旧 8 帧上限
+
 ## \[v0.25] - 2026-08-29 · DHCP 客户端：动态获取 IP/网关（静态可配置化）
 
 **Added**

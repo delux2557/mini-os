@@ -156,6 +156,10 @@ void map_page_in(uint32_t pd, uint32_t virt, uint32_t phys, uint32_t flags) {
     }
     uint32_t *pt = (uint32_t *)(dir[pd_idx] & ~(PAGE_SIZE - 1));
     pt[pt_idx] = (phys & ~(PAGE_SIZE - 1)) | (flags & 0xFFF);
+    /* v0.26 bugfix: 写页表后必须刷新 TLB。此前栈按需生长补映射后，
+     * CPU/QEMU 仍缓存旧 TLB 项（表现为未映射），iret 重试再次 fault 被误杀。
+     * invlpg 只刷该线性地址，任何上下文调用均安全（未映射地址也不异常）。 */
+    __asm__ volatile ("invlpg %0" : : "m"(*(char *)virt) : "memory");
 }
 
 /* 切换当前地址空间：写 CR3（写 CR3 自动刷新 TLB）；pd=0 视为内核页目录 */

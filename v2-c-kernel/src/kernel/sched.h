@@ -49,6 +49,12 @@ typedef struct {
     uint32_t stack_frames[USER_STACK_PAGES];
     uint32_t stack_fcount;   /* 上表有效项数 */
     uint32_t stack_bottom;   /* 最低已映射栈页的虚拟地址（栈向下生长） */
+    /* v0.26#2 用户堆（brk）：堆区 [USER_HEAP_BASE, heap_brk) 已按需映射（页对齐）。
+     * heap_frames[] 记已映射堆页的物理帧（回收用）；收缩只更新 heap_brk 保留映射。 */
+    uint32_t heap_frames[USER_HEAP_PAGES];
+    uint32_t heap_fcount;    /* 上表有效项数 */
+    uint32_t heap_brk;       /* 当前 program break（堆顶，虚拟地址） */
+    uint32_t heap_base;      /* 堆起点（= USER_HEAP_BASE，创建进程时置位） */
     uint32_t entry_off;      /* 用户入口在 userprog.bin 中的偏移 */
     uint32_t user_esp_top;   /* 本进程用户栈顶（iret 帧的 esp） */
     uint32_t exit_code;
@@ -56,7 +62,8 @@ typedef struct {
     uint32_t block_reason;   /* 阻塞原因（BLOCK_*） */
     uint32_t block_arg;      /* 阻塞参数（如消息队列 id / 等待的子进程 pid / readline 缓冲区） */
     uint32_t block_arg2;     /* v0.9: 阻塞辅助参数（如 readline 缓冲区上限） */
-    uint32_t own_frames[8];  /* v0.9: 从文件加载的用户代码物理帧（退出时回收） */
+    uint32_t *own_frames;   /* v0.9+0.26#3: 从文件加载的用户代码物理帧列表（kmalloc 动态数组，
+                               退出时回收；不再受 8 帧/32KB 上限约束，支持 MB 级 ELF） */
     uint32_t own_fcount;     /* 上表有效项数 */
     uint32_t own_vbase;      /* 该代码区虚拟基址（判定 app 槽占用用） */
     uint32_t map_frames[8];  /* v0.11: sys_map_page 用户申请的物理页（退出时回收） */

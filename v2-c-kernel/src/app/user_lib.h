@@ -44,6 +44,7 @@
 #define SYS_NET_RECVFROM 32 /* v0.20: 非阻塞收 UDP 数据报（0=无包；出参在 net_recv_iov） */
 #define SYS_NET_CLOSE   33  /* v0.20: 关闭 socket */
 #define SYS_KERN_AUDIT  34  /* v0.21: 内核自审计（帧配平/信号量守恒/PCB 状态机） */
+#define SYS_BRK         35  /* v0.26#2: 用户堆（brk/sbrk） */
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {
@@ -103,6 +104,18 @@ static inline int sys_net_close(int sock) {
 /* v0.21: 内核自审计——返回失败检查项总数（0=全部通过） */
 static inline uint32_t sys_kern_audit(void) {
     return syscall3(SYS_KERN_AUDIT, 0, 0, 0);
+}
+/* v0.26#2: 用户堆。sys_brk(addr)：addr=0 查询当前 brk，否则设置 program break（0/-1）；
+ * sys_sbrk(incr)：incr 字节增长，返回旧 brk（-1=失败，可作 sbrk(0) 查询） */
+static inline int sys_brk(uint32_t addr) {
+    return (int)syscall3(SYS_BRK, addr, 0, 0);
+}
+static inline uint32_t sys_sbrk(int32_t incr) {
+    uint32_t old = sys_brk(0);
+    if (incr == 0) return old;
+    uint32_t nbrk = (uint32_t)((int64_t)old + (int64_t)incr);
+    if (sys_brk(nbrk) == 0) return old;
+    return (uint32_t)-1;
 }
 
 /* ---- 打印工具（十进制 / 十六进制） ---- */

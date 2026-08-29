@@ -69,10 +69,12 @@ extern char _binary_forkdemo_elf_start[], _binary_forkdemo_elf_end[];
 extern char _binary_args_elf_start[],   _binary_args_elf_end[];
 extern char _binary_stackovf_elf_start[], _binary_stackovf_elf_end[];
 extern char _binary_deep_elf_start[], _binary_deep_elf_end[];
+extern char _binary_heapdemo_elf_start[], _binary_heapdemo_elf_end[];
 extern char _binary_fsdemo_elf_start[],  _binary_fsdemo_elf_end[];
 extern char _binary_waitdemo_elf_start[], _binary_waitdemo_elf_end[];
 extern char _binary_abuse_elf_start[],   _binary_abuse_elf_end[];
 extern char _binary_sockdemo_elf_start[], _binary_sockdemo_elf_end[];
+extern char _binary_bigdemo_elf_start[], _binary_bigdemo_elf_end[];
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
@@ -114,6 +116,9 @@ static void initramfs_setup(void) {
     initramfs_file("deep",
                    _binary_deep_elf_start,
                    (uint32_t)(_binary_deep_elf_end - _binary_deep_elf_start));
+    initramfs_file("heapdemo",
+                   _binary_heapdemo_elf_start,
+                   (uint32_t)(_binary_heapdemo_elf_end - _binary_heapdemo_elf_start));
     initramfs_file("fsdemo",
                    _binary_fsdemo_elf_start,
                    (uint32_t)(_binary_fsdemo_elf_end - _binary_fsdemo_elf_start));
@@ -126,6 +131,9 @@ static void initramfs_setup(void) {
     initramfs_file("sockdemo",
                    _binary_sockdemo_elf_start,
                    (uint32_t)(_binary_sockdemo_elf_end - _binary_sockdemo_elf_start));
+    initramfs_file("bigdemo",   /* v0.26#3: >64KB 大 ELF（验证加载去上限） */
+                   _binary_bigdemo_elf_start,
+                   (uint32_t)(_binary_bigdemo_elf_end - _binary_bigdemo_elf_start));
     initramfs_file("shell",
                    _binary_shell_elf_start,
                    (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));

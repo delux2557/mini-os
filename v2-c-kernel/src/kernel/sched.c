@@ -14,10 +14,12 @@
 #include "usermode.h"
 #include "timer.h"
 #include "mem.h"
+#include "heap.h"
 #include "serial.h"
 #include "vga.h"
 #include "kb.h"
 #include "userprog_offsets.h"
+#include <stddef.h>
 #include <stdint.h>
 
 #define USER_CODE_BASE   0x80000000u   /* 所有进程共享的代码页虚拟基址 */
@@ -29,6 +31,8 @@ static policy_readyq_t readyq;
 
 /* v0.12: 定义在文件后部；sched_exec 需在定义前调用它 */
 static void schedule(registers_t *r);
+/* v0.26#3: 定义在文件后部；sched_spawn_at 需在定义前调用它 */
+static int own_frames_take(pcb_t *p, const uint32_t *frames, uint32_t fcount);
 
 /* 分配一个空闲进程槽（pid）。v0.12: 进程退出（reap 置 FREE）后槽位可重用——
  * fork/exec 演示会产生更多并发进程，若按 next_pid 单调递增会在 MAX_PROCS 处耗尽。 */
@@ -204,6 +208,9 @@ int sched_spawn(uint32_t entry_off, const char *name) {
     set_name(p, name);
     p->entry_off = entry_off;
     p->state = PROC_READY;
+    p->heap_base = USER_HEAP_BASE;   /* v0.26#2: 用户堆从堆区起点开始 */
+    p->heap_brk  = USER_HEAP_BASE;
+    p->heap_fcount = 0;
     /* v0.16: 入口统一为 cdecl——esp 落在栈页顶下方 12B（[esp]=ret,[esp+4]=argc,[esp+8]=argv 全在已映射栈页内），
      * 使 CRT 的 _start 能安全读取 argc/argv，无参数启动用 argc=0/argv=0 */
     uint32_t entry_esp = entry_block(p->stack_frames[0], stk, p->user_esp_top);
@@ -234,6 +241,13 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
         serial_printf("[sched] spawn_at %s FAILED (OOM)\n", name);
         return -1;
     }
+    p->own_vbase = vbase;
+    if (own_frames_take(p, frames, fcount) != 0) {
+        frame_free(p->kstack_frame);
+        frame_free(p->stack_frames[0]);
+        serial_printf("[sched] spawn_at %s FAILED (own_frames OOM)\n", name);
+        return -1;
+    }
 
     p->kstack_top = p->kstack_frame + KSTACK_SIZE;
     uint32_t stk = stack_init(p, pid, p->stack_frames[0]); /* v0.26: 槽顶下方一页 */
@@ -244,9 +258,9 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
     set_name(p, name);
     p->entry_off = 0;
     p->state = PROC_READY;
-    p->own_fcount = fcount;
-    p->own_vbase = vbase;
-    for (uint32_t i = 0; i < fcount && i < 8; i++) p->own_frames[i] = frames[i];
+    p->heap_base = USER_HEAP_BASE;   /* v0.26#2: 用户堆从堆区起点开始 */
+    p->heap_brk  = USER_HEAP_BASE;
+    p->heap_fcount = 0;
 
     /* v0.16: 同 sched_spawn——无参数启动（argc=0/argv=0）的 cdecl 入口块 */
     uint32_t entry_esp = entry_block(p->stack_frames[0], stk, p->user_esp_top);
@@ -263,17 +277,36 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
  * fork：复制当前进程（用户地址空间深拷贝，共享内存保持共享），子进程从调用点继续。
  * exec：用新程序替换当前进程（配合 fork 实现经典 fork+exec+argv 模型）。 */
 
+/* v0.26#3: 把加载器移交的物理帧列表拷入 PCB 的动态记账数组（kmalloc）。
+ * 返回 0 成功 / -1 OOM（数组未分配，own_fcount 保持 0）。 */
+static int own_frames_take(pcb_t *p, const uint32_t *frames, uint32_t fcount) {
+    p->own_frames = NULL;
+    p->own_fcount = 0;
+    if (fcount == 0) return 0;
+    uint32_t *arr = (uint32_t *)kmalloc(fcount * sizeof(uint32_t));
+    if (!arr) return -1;
+    for (uint32_t i = 0; i < fcount; i++) arr[i] = frames[i];
+    p->own_frames = arr;
+    p->own_fcount = fcount;
+    return 0;
+}
+
 /* 释放进程"私有数据帧"（不含内核栈 kstack_frame）：
  * ELF 代码帧 + sys_map_page 私有页 + fork 深拷贝帧 + 用户栈帧。
  * terminate/reap/exec 复用；调用方负责 addr_space_destroy 与 kstack_frame。 */
 static void release_priv_frames(pcb_t *p) {
-    for (uint32_t i = 0; i < p->own_fcount && i < 8; i++) frame_free(p->own_frames[i]);
+    for (uint32_t i = 0; i < p->own_fcount; i++) frame_free(p->own_frames[i]);
+    if (p->own_frames) kfree(p->own_frames);   /* v0.26#3: 动态记账数组一并归还 */
+    p->own_frames = NULL;
     p->own_fcount = 0;
     for (uint32_t i = 0; i < p->map_fcount && i < 8; i++) frame_free(p->map_frames[i]);
     p->map_fcount = 0;
     for (uint32_t i = 0; i < p->fork_fcount && i < 24; i++) frame_free(p->fork_frames[i]);
     p->fork_fcount = 0;
     stack_free(p);   /* v0.26: 释放已映射的用户栈页 */
+    for (uint32_t i = 0; i < p->heap_fcount && i < USER_HEAP_PAGES; i++) /* v0.26#2 */
+        frame_free(p->heap_frames[i]);
+    p->heap_fcount = 0;
 }
 
 int sched_fork(registers_t *r) {
@@ -333,6 +366,9 @@ int sched_fork(registers_t *r) {
     c->own_vbase = p->own_vbase;
     c->block_reason = BLOCK_NONE;
     /* own_frames/map_frames 已清零：深拷贝出的帧统一记在 fork_frames，退出时回收 */
+    c->heap_base = p->heap_base;   /* v0.26#2: 子进程继承父进程堆区与断点；已深拷贝全部堆页，
+                                      新帧记 fork_frames，故 heap_frames 保持清零 */
+    c->heap_brk = p->heap_brk;
 
     policy_readyq_push(&readyq, pid);
     serial_printf("[fork] pid=%u -> child=%u pd=%x frames=%u\n",
@@ -395,6 +431,15 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
     map_page_in(pd, stk, sframe, 0x7);            /* 新用户栈页（守卫页不映射） */
     uint32_t esp = argv_layout(sframe, stk, argv, argc);
 
+    /* v0.26#3: 新程序代码帧先拷入临时数组（释放旧地址空间前分配；
+     * 若 OOM 可安全回滚——sframe 归还，pd 由调用方销毁） */
+    uint32_t *of = NULL;
+    if (fcount) {
+        of = (uint32_t *)kmalloc(fcount * sizeof(uint32_t));
+        if (!of) { frame_free(sframe); return -1; }
+        for (uint32_t i = 0; i < fcount; i++) of[i] = frames[i];
+    }
+
     /* 释放旧用户资源（ELF 代码/私有页/fork 帧/旧栈/旧页目录）；内核栈保留复用 */
     release_priv_frames(p);
     addr_space_destroy(p->page_dir);
@@ -406,11 +451,14 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
     p->stack_frames[0] = sframe;
     p->stack_fcount = 1;
     p->stack_bottom = stk;
+    p->own_frames = of;                      /* v0.26#3: 动态记账数组 */
     p->own_fcount = fcount;
-    for (uint32_t i = 0; i < fcount && i < 8; i++) p->own_frames[i] = frames[i];
     p->own_vbase = vbase;
     p->entry_off = 0;
     p->block_reason = BLOCK_NONE;
+    p->heap_base = USER_HEAP_BASE;   /* v0.26#2: 镜像替换后堆重来（旧堆帧已由上面 release 释放） */
+    p->heap_brk  = USER_HEAP_BASE;
+    p->heap_fcount = 0;
 
     /* 就地改写当前中断帧为新程序入口现场：
      * schedule() 保存的 kernel_esp 即 r，下次切回时 iret 从新入口执行。

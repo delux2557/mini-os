@@ -10,10 +10,11 @@
 #include <stdint.h>
 
 /* 用户空间 [USER_SPACE_BASE, USER_SPACE_END)：代码页 0x80000000 / 栈区 /
- * 共享区 0x80044000 / app 槽 0x80040000 均在内。END 取 0x80100000 作防回绕上界
- * （比实际映射区更宽裕；校验目标是"不得指向内核低地址"，上界只是安全侧收紧）。 */
+ * 共享区 0x801A0000 / app 槽 0x800A0000 / 堆区 0x801A4000 均在内。
+ * v0.26#3 扩到 0x81000000（16MB）承载 1MB app 区；END 取此作防回绕上界
+ * （校验目标是"不得指向内核低地址"，上界只是安全侧收紧）。 */
 #define USER_SPACE_BASE 0x80000000u
-#define USER_SPACE_END  0x80100000u
+#define USER_SPACE_END  0x81000000u
 
 /* [p, p+len) 是否全部落在用户空间（含上界与回绕保护）；len 可为 0（空指针需单独判定） */
 int user_ptr_valid(const void *p, uint32_t len);
