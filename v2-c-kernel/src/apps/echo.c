@@ -13,5 +13,4 @@ void app_main(int argc, char **argv) {
     sys_print(" bytes: [");
     sys_print(line);
     sys_print("]\n");
-    sys_exit(0);
 }

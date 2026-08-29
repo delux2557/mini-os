@@ -144,6 +144,18 @@ void sched_init(void) {
     policy_readyq_init(&readyq);
 }
 
+/* v0.16: 在用户栈页顶下方写 cdecl 入口块 [fake_ret][argc][argv]（各 4B），
+ * 返回 user_esp。esp = 槽顶 - 12，使 [esp..esp+12) 全部落在已映射栈页内，
+ * CRT 的 _start 可安全读 argc/argv；无参数启动用 argc=0/argv=0。 */
+static uint32_t entry_block(uint32_t sframe, uint32_t stk, uint32_t esp_top) {
+    uint32_t esp = esp_top - 12;
+    uint32_t *blk = (uint32_t *)(sframe + (esp - stk));
+    blk[0] = 0;   /* fake_ret */
+    blk[1] = 0;   /* argc */
+    blk[2] = 0;   /* argv */
+    return esp;
+}
+
 int sched_spawn(uint32_t entry_off, const char *name) {
     int pid = alloc_pid();
     if (pid < 0) return -1;
@@ -174,8 +186,11 @@ int sched_spawn(uint32_t entry_off, const char *name) {
     set_name(p, name);
     p->entry_off = entry_off;
     p->state = PROC_READY;
+    /* v0.16: 入口统一为 cdecl——esp 落在栈页顶下方 12B（[esp]=ret,[esp+4]=argc,[esp+8]=argv 全在已映射栈页内），
+     * 使 CRT 的 _start 能安全读取 argc/argv，无参数启动用 argc=0/argv=0 */
+    uint32_t entry_esp = entry_block(p->stack_frame, stk, p->user_esp_top);
     frame_build(p, SEL_UCODE_R3, SEL_UDATA_R3,
-                USER_CODE_BASE + entry_off, p->user_esp_top);
+                USER_CODE_BASE + entry_off, entry_esp);
 
     policy_readyq_push(&readyq, pid);
 
@@ -217,7 +232,9 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
     p->own_vbase = vbase;
     for (uint32_t i = 0; i < fcount && i < 8; i++) p->own_frames[i] = frames[i];
 
-    frame_build(p, SEL_UCODE_R3, SEL_UDATA_R3, entry, p->user_esp_top);
+    /* v0.16: 同 sched_spawn——无参数启动（argc=0/argv=0）的 cdecl 入口块 */
+    uint32_t entry_esp = entry_block(p->stack_frame, stk, p->user_esp_top);
+    frame_build(p, SEL_UCODE_R3, SEL_UDATA_R3, entry, entry_esp);
 
     policy_readyq_push(&readyq, pid);
 

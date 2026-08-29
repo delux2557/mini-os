@@ -2,6 +2,42 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## [v0.16] - 2026-08-29 · 用户态 CRT 收口 + ATA 真盘持久化 + 单行自检
+
+**Added**
+- **用户态 CRT 收口**：新增 `src/apps/crt.c`，ELF 入口由 `app_main` 提升为 `_start`——
+  `_start(argc, argv)` 调 `app_main`，返回后统一 `sys_exit(0)`。根治"app_main 忘了
+  sys_exit 从栈槽顶未映射处 ret 崩溃"这类问题（BUG-016），各应用不再手写尾部 `sys_exit(0)`
+- **ATA PIO 驱动**（`src/ata.c/h`）：主通道 master、LBA28、轮询模式；IDENTIFY(0xEC)
+  探测扇区数，读(0x20)/写(0x30) 按扇区，带 BSY/ERR/超时保护；无盘立即返回、回落纯内存盘
+- **FS 持久化（分水岭）**：`src/storage.c/h` 存储子系统
+  - 有盘：整盘读入 ramdisk → 超级块 magic 有效则**直接挂载**（磁盘即真源，用户数据跨重启存活）；
+    空白盘格式化 + initramfs 并首启落盘一次
+  - 无盘：纯内存盘（v0.8 原行为）
+  - `SYS_FS_SYNC(29)` + shell `save` 命令：把 ramdisk 全量写回磁盘
+- **单行结构化自检**：shell `selftest` 命令——逐跑 hello/isol/forkdemo/fsdemo/waitdemo
+  （覆盖 spawn/隔离/fork/FS/wait），每项打印退出码，汇总一行 `[selftest] PASS (5 checks)` / FAIL，
+  外部 agent grep 一行即完成全量验证
+
+**Fixed**
+- BUG-016：fsdemo 无 `sys_exit` → app_main 返回从栈槽顶未映射处 ret → 页错误被误判为
+  STACK OVERFLOW、退出码 -1（回归只 grep `[fsdemo] done` 而被掩盖）。v0.16 双管齐下：
+  ① CRT 收口根除整类问题；② guard.c `stack_guard_hit(fault, pid)` 改为只认定"落在本进程
+  守卫页"的 fault 才是栈溢出（槽顶边界归下一槽，不再误报）
+- CRT 引入时的连带问题：spawn 路径入口改 `_start` 后，`_start` 读 `[esp+8]` 的 argv 越出
+  已映射栈页 → shell 一启动即页错误；sched.c `entry_block` 把入口 cdecl 块写在栈页顶下方 12B 修复
+
+**Engineering**
+- 回归体系升级为**四层**，并新增 `make test-persist`：
+  - `tests/test_persist.sh`：**两次 QEMU 运行共享同一 `-hda` 镜像**——第 1 次格式化空白盘、
+    `mkdir /persist` + `save` + 退出；第 2 次重启挂载校验 `/persist` 仍在、持久盘应用可经
+    `selftest` 正常运行（用户数据跨重启存活的铁证）
+  - 断言补强（fsdemo 教训）：给 qemu 通道 fsdemo/waitdemo 补退出码断言；serial/persist/qemu
+    三通道加入 `[selftest] PASS (5 checks)` 检查
+- 回归盲区反思：关键字断言只能验证"某行出现了"，验证不了"退出码"这类不变量——
+  文档新增"回归盲区的教训"，把可见输出匹配提升为退出码不变量校验
+- 版本横幅与 motd 更新为 v0.16；Makefile 接入 `ata.o`/`storage.o`，应用链接改 `-e _start`
+
 ## [v0.15] - 2026-08-29 · 补全 wait()/waitpid 语义与孤儿清理
 
 **Added**

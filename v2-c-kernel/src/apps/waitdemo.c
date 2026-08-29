@@ -98,5 +98,4 @@ void app_main(int argc, char **argv) {
     emit_line(buf, i);
 
     sys_print("[waitdemo] done\n");
-    sys_exit(0);
 }

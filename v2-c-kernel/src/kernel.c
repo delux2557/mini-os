@@ -10,93 +10,12 @@
 #include "heap.h"
 #include "usermode.h"
 #include "sched.h"
-#include "blockdev.h"
-#include "fs.h"
+#include "storage.h"
+#include "ata.h"
 #include "userprog_offsets.h"
 #include <stdint.h>
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
-
-/* ---- v0.8 文件系统：内存盘（ramdisk）后端 ---- */
-#define RAMDISK_BLOCKS 256   /* 1MB：数据块 252 个，足够演示多文件/跨块写 */
-static blockdev_t ramdisk;
-
-static void ramdisk_init(void) {
-    uint32_t phys = frame_alloc_run(RAMDISK_BLOCKS);   /* 申请连续物理帧 */
-    if (!phys) {
-        vga_puts("[fs] FATAL: ramdisk alloc failed\n");
-        serial_puts("[fs] FATAL: ramdisk alloc failed\n");
-        for (;;);
-    }
-    blockdev_init(&ramdisk, (uint8_t *)phys, RAMDISK_BLOCKS);
-    fs_mount(&ramdisk);
-    int rc = fs_init(&ramdisk);                        /* 格式化并建根目录 */
-    vga_printf("[fs] ramdisk %u blocks @%x (1MB), format %s\n",
-               RAMDISK_BLOCKS, phys, rc == 0 ? "ok" : "FAIL");
-    serial_printf("[fs] ramdisk %u blocks @%x (1MB), format %s\n",
-                  RAMDISK_BLOCKS, phys, rc == 0 ? "ok" : "FAIL");
-}
-
-/* ---- v0.9 initramfs：把嵌入式文件（motd + 各应用的 ELF 文件）写入 ramdisk ----
- * 应用由 Makefile 编译链接到固定地址后以 ld -r -b binary 整体内嵌进内核，
- * 启动时作为文件落盘；shell 由内核直接加载常驻，其余由 shell 的 run 命令加载。 */
-extern char _binary_hello_elf_start[], _binary_hello_elf_end[];
-extern char _binary_echo_elf_start[],  _binary_echo_elf_end[];
-extern char _binary_crash_elf_start[], _binary_crash_elf_end[];
-extern char _binary_isol_elf_start[],  _binary_isol_elf_end[];
-extern char _binary_forkdemo_elf_start[], _binary_forkdemo_elf_end[];
-extern char _binary_args_elf_start[],   _binary_args_elf_end[];
-extern char _binary_stackovf_elf_start[], _binary_stackovf_elf_end[];
-extern char _binary_fsdemo_elf_start[],  _binary_fsdemo_elf_end[];
-extern char _binary_waitdemo_elf_start[], _binary_waitdemo_elf_end[];
-extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
-
-static void initramfs_file(const char *name, const void *data, uint32_t len) {
-    int ino = fs_create(fs_device(), name);
-    if (ino < 0) {
-        serial_printf("[ramdisk] create '%s' failed\n", name);
-        return;
-    }
-    int n = fs_write(fs_device(), (uint32_t)ino, data, 0, len);
-    serial_printf("[ramdisk] '%s' %u bytes inode=%d write=%d\n", name, len, ino, n);
-}
-
-static void initramfs_setup(void) {
-    static const char motd[] =
-        "Mini-OS v0.15: complete wait()/waitpid semantics + orphan reaping.\n"
-        "Commands: help ls cat mkdir rmdir rm run exec exit   (try: run waitdemo)\n";
-    initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
-    initramfs_file("hello",
-                   _binary_hello_elf_start,
-                   (uint32_t)(_binary_hello_elf_end - _binary_hello_elf_start));
-    initramfs_file("echo",
-                   _binary_echo_elf_start,
-                   (uint32_t)(_binary_echo_elf_end - _binary_echo_elf_start));
-    initramfs_file("crash",
-                   _binary_crash_elf_start,
-                   (uint32_t)(_binary_crash_elf_end - _binary_crash_elf_start));
-    initramfs_file("isol",
-                   _binary_isol_elf_start,
-                   (uint32_t)(_binary_isol_elf_end - _binary_isol_elf_start));
-    initramfs_file("forkdemo",
-                   _binary_forkdemo_elf_start,
-                   (uint32_t)(_binary_forkdemo_elf_end - _binary_forkdemo_elf_start));
-    initramfs_file("args",
-                   _binary_args_elf_start,
-                   (uint32_t)(_binary_args_elf_end - _binary_args_elf_start));
-    initramfs_file("stackovf",
-                   _binary_stackovf_elf_start,
-                   (uint32_t)(_binary_stackovf_elf_end - _binary_stackovf_elf_start));
-    initramfs_file("fsdemo",
-                   _binary_fsdemo_elf_start,
-                   (uint32_t)(_binary_fsdemo_elf_end - _binary_fsdemo_elf_start));
-    initramfs_file("waitdemo",
-                   _binary_waitdemo_elf_start,
-                   (uint32_t)(_binary_waitdemo_elf_end - _binary_waitdemo_elf_start));
-    initramfs_file("shell",
-                   _binary_shell_elf_start,
-                   (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));
-}
 
 extern uint32_t _kernel_start, _kernel_end;
 
@@ -137,7 +56,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS v0.15  (complete wait()/waitpid semantics + orphans)\n");
+    vga_puts("Micro-OS v0.16  (ATA PIO + persistent disk FS)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
@@ -160,8 +79,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
 
     memory_selftest();
 
-    ramdisk_init();   /* v0.8：内存盘 + 格式化文件系统 */
-    initramfs_setup();  /* v0.9：写入 motd + 各应用 ELF blob */
+    ata_init();       /* v0.16：探测 IDE 真盘（无盘则纯内存盘） */
+    storage_init();   /* v0.16：ramdisk + 真盘加载/格式化 + initramfs */
 
     timer_init(100);      /* 100 Hz 心跳 */
     kb_init();

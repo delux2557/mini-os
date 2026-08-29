@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.15: complete wait"
+"      "Mini-OS v0.16: ATA PIO"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -117,12 +117,15 @@ cmd "ls 子目录"      "ls dir1
 cmd "rmdir 目录"     "rmdir dir1
 "      "\[shell\] rmdir 'dir1' -> 0"
 cmd "run fsdemo"     "run fsdemo
-"      "\[fsdemo\] mkdir /etc -> " "\[fsdemo\] seek(5) read '8080" "\[fsdemo\] big.bin 100000B indirect spot-check OK" "\[fsdemo\] done"
+"      "\[fsdemo\] mkdir /etc -> " "\[fsdemo\] seek(5) read '8080" "\[fsdemo\] big.bin 100000B indirect spot-check OK" "\[fsdemo\] done" "\[shell\] 'fsdemo' exited code=0"
 # ---- v0.15 wait 语义：wait(-1) 任意子进程 + exec 失败反馈 ----
 cmd "run waitdemo"   "run waitdemo
-"      "\[waitdemo\] parent pid=[0-9][0-9]* forked" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=7" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=9" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=11" "\[waitdemo\] verify OK" "\[waitdemo\] final wait any -> 4294967295" "\[waitdemo\] done"
+"      "\[waitdemo\] parent pid=[0-9][0-9]* forked" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=7" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=9" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=11" "\[waitdemo\] verify OK" "\[waitdemo\] final wait any -> 4294967295" "\[waitdemo\] done" "\[shell\] 'waitdemo' exited code=0"
 cmd "exec 失败反馈"   "exec nosuchprog
 "      "\[exec\] FAILED to exec '"
+# ---- v0.16 单行结构化自检（agent 可 grep 一行确认全量通过） ----
+cmd "selftest 自检"   "selftest
+"      "\[selftest\] PASS (5 checks)"
 
 # 等待剩余时间（让后台 sem/msg/fs 演示继续输出），随后收尾
 END=$((QSTART + DURATION))
@@ -187,7 +190,7 @@ check "msg 演示完成"       "\[MC\] done"
 # ---- v0.8 文件系统 ----
 check "spawn procFSA"     "spawn pid=8 name=procFSA"
 check "spawn procFSB"     "spawn pid=9 name=procFSB"
-check "内存盘初始化"       "\[fs\] ramdisk 256 blocks"
+check "内存盘初始化"       "\[storage\] ramdisk 256 blocks"
 check "fs 创建 hello.txt" "\[fs\] create 'hello.txt'"
 check "fs 打开写模式"      "\[fs\] open slot=1 'hello.txt' inode=.* mode=1"
 check "fs 跨块写入"       "\[fs\] write slot=1"

@@ -219,7 +219,7 @@ void pf_handler(registers_t *r) {
     /* 用户态页错误：用户程序越界访问（内核内存/非法地址）-> 隔离终止该进程 */
     if ((r->cs & 3) == 3) {
         /* v0.13 栈溢出检测：fault 落在本进程用户栈守卫页（未映射陷阱页） */
-        if (stack_guard_hit(fault)) {
+        if (stack_guard_hit(fault, sched_current_pid())) {
             serial_printf("\n[user] STACK OVERFLOW pid=%u @%x -> killed\n",
                           sched_current_pid(), fault);
             vga_printf("\n[user] STACK OVERFLOW pid=%u @%x -> killed\n",

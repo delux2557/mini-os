@@ -54,7 +54,53 @@ static void cmd_help(void) {
     sys_print("  rm <path>       delete file\n");
     sys_print("  run <prog>      load and run ELF app (hello/echo/crash/isol/forkdemo)\n");
     sys_print("  exec <prog> [a] fork + exec app with argv (forkdemo/args)\n");
+    sys_print("  save            write FS back to disk (v0.16 persist)\n");
+    sys_print("  selftest        run all demos, print one-line PASS/FAIL (agent-verifiable)\n");
     sys_print("  exit            quit shell\n");
+}
+
+static void cmd_save(void) {
+    int rc = sys_fs_sync();
+    sys_print("[shell] save -> ");
+    user_putdec((uint32_t)rc);
+    sys_print(rc == 0 ? " (fs saved to disk)\n" : " (no disk, memory only)\n");
+}
+
+/* 跑一个应用并等其退出，返回退出码 */
+static int selftest_one(const char *name) {
+    int pid = sys_spawn_file(name);
+    if (pid <= 0) return -1;
+    int code = 0;
+    (void)sys_wait((uint32_t)pid, &code);
+    return code;
+}
+
+/* v0.16 单行结构化自检：逐跑代表性演示（覆盖 spawn/隔离/fork/FS/wait），
+ * 每项打印退出码，最后汇总为一行 `[selftest] PASS (N checks)` / FAIL，供 agent grep。 */
+static void cmd_selftest(void) {
+    static const char *apps[] = { "hello", "isol", "forkdemo", "fsdemo", "waitdemo" };
+    uint32_t n = sizeof(apps) / sizeof(apps[0]);
+    uint32_t pass = 0, fail = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        int code = selftest_one(apps[i]);
+        sys_print("[selftest] '");
+        sys_print(apps[i]);
+        sys_print("' code=");
+        user_putdec((uint32_t)code);
+        sys_print("\n");
+        if (code == 0) pass++; else fail++;
+    }
+    if (fail == 0) {
+        sys_print("[selftest] PASS (");
+        user_putdec(pass);
+        sys_print(" checks)\n");
+    } else {
+        sys_print("[selftest] FAIL: ");
+        user_putdec(fail);
+        sys_print("/");
+        user_putdec(n);
+        sys_print(" checks\n");
+    }
 }
 
 static void cmd_ls(char *path) {
@@ -201,6 +247,8 @@ void app_main(int argc, char **argv) {
         else if (user_strcmp(cmd, "rm") == 0)   cmd_rm(arg);
         else if (user_strcmp(cmd, "run") == 0)  cmd_run(arg);
         else if (user_strcmp(cmd, "exec") == 0) cmd_exec(arg);
+        else if (user_strcmp(cmd, "save") == 0) cmd_save();
+        else if (user_strcmp(cmd, "selftest") == 0) cmd_selftest();
         else if (user_strcmp(cmd, "exit") == 0) {
             sys_print("bye\n");
             sys_exit(0);

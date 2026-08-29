@@ -80,17 +80,17 @@ void app_main(int argc, char **argv) {
         sys_print("[fsdemo] open conf fail\n");
     } else {
         syscall3(SYS_FS_SEEK, 1, 5, 0);
-        char rb[16];
-        uint32_t rn = syscall3(SYS_FS_READ, 1, (uint32_t)rb, sizeof(rb) - 1);
+        char rb[32];
+        uint32_t rn = syscall3(SYS_FS_READ, 1, (uint32_t)rb, 17);   /* 恰好 "8080\nhost=0.0.0.0"（17B） */
         rb[rn] = 0;
-        char okbuf[32];
+        char okbuf[64];   /* 足够容纳前缀 + 读回 + "' -> OK\n"，不被截断 */
         uint32_t i = 0;
         const char *pfx = "[fsdemo] seek(5) read '";
-        while (*pfx && i < 31) okbuf[i++] = *pfx++;
+        while (*pfx && i < 62) okbuf[i++] = *pfx++;
         const char *c = rb;
-        while (*c && i < 31) okbuf[i++] = *c++;
+        while (*c && i < 62) okbuf[i++] = *c++;
         const char *suf = user_strncmp(rb, "8080", 4) == 0 ? "' -> OK\n" : "' -> FAIL\n";
-        while (*suf && i < 31) okbuf[i++] = *suf++;
+        while (*suf && i < 62) okbuf[i++] = *suf++;
         okbuf[i] = 0;
         sys_print(okbuf);
         syscall3(SYS_FS_CLOSE, 1, 0, 0);
@@ -152,4 +152,5 @@ void app_main(int argc, char **argv) {
     fs_rmdir_p("/tmp");
 
     sys_print("[fsdemo] done\n");
+    /* 收口（v0.16）：app_main 返回后由 CRT 的 _start 统一 sys_exit(0) */
 }

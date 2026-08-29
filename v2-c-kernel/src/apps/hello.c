@@ -9,5 +9,4 @@ void app_main(int argc, char **argv) {
     sys_print(" ticks=");
     user_putdec(sys_getticks());
     sys_print("\n");
-    sys_exit(0);
 }

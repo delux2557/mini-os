@@ -26,7 +26,7 @@ $(shell mkdir -p $(BUILD) $(BUILD)/apps)
 OBJS = $(addprefix $(BUILD)/, \
        boot.o kernel.o vga.o serial.o idt.o isr.o timer.o kb.o mem.o guard.o heap.o \
        usermode.o sched.o sched_policy.o sem.o msg.o blockdev.o fs.o elf.o \
-       userprog_bin.o) \
+       ata.o storage.o userprog_bin.o) \
        $(APP_ELFOBJS) $(SHELL_ELFOBJ)
 
 $(KERNEL): $(OBJS)
@@ -84,27 +84,27 @@ SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 $(BUILD)/apps/%.o: src/apps/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# 链接到固定地址（-e app_main 指定 ELF 入口）
-$(BUILD)/apps/hello.elf: $(BUILD)/apps/hello.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/echo.elf: $(BUILD)/apps/echo.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/crash.elf: $(BUILD)/apps/crash.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/isol.elf: $(BUILD)/apps/isol.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/forkdemo.elf: $(BUILD)/apps/forkdemo.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/args.elf: $(BUILD)/apps/args.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/stackovf.elf: $(BUILD)/apps/stackovf.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/fsdemo.elf: $(BUILD)/apps/fsdemo.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/waitdemo.elf: $(BUILD)/apps/waitdemo.o
-	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
-$(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o
-	$(LD) -m elf_i386 -Ttext $(SHELL_ADDR) -e app_main -o $@ $<
+# 链接到固定地址（-e _start 指定 ELF 入口；crt.o 提供 _start：app_main 返回即 sys_exit）
+$(BUILD)/apps/hello.elf: $(BUILD)/apps/hello.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/echo.elf: $(BUILD)/apps/echo.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/crash.elf: $(BUILD)/apps/crash.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/isol.elf: $(BUILD)/apps/isol.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/forkdemo.elf: $(BUILD)/apps/forkdemo.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/args.elf: $(BUILD)/apps/args.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/stackovf.elf: $(BUILD)/apps/stackovf.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/fsdemo.elf: $(BUILD)/apps/fsdemo.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/waitdemo.elf: $(BUILD)/apps/waitdemo.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(SHELL_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 
 # ELF 文件原始字节内嵌（objcopy -I binary 按原始字节复制，保留 ELF 头；
 # 符号名 _binary_<name>_elf_start/end，由输入文件名决定）
@@ -135,8 +135,12 @@ test-qemu:
 test-serial:
 	bash tests/test_serial.sh
 
+# QEMU ATA 真盘持久化回归：两次运行共享磁盘镜像，校验用户数据跨重启存活
+test-persist:
+	bash tests/test_persist.sh
+
 # 完整测试
-test: test-host test-qemu test-serial
+test: test-host test-qemu test-serial test-persist
 
 clean:
 	rm -rf build tests/build

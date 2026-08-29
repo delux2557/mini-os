@@ -37,6 +37,7 @@
 #define SYS_FS_SEEK    26   /* v0.14: 定位打开文件槽的读写位置 */
 #define SYS_FS_MKDIR   27   /* v0.14: 建目录（父目录须存在） */
 #define SYS_FS_RMDIR   28   /* v0.14: 删空目录 */
+#define SYS_FS_SYNC    29   /* v0.16: 把 ramdisk 全量写回真盘（持久化） */
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {
@@ -78,6 +79,7 @@ static inline uint32_t sys_fork(void) {
 static inline int sys_exec(const char *name, uint32_t argc, const char **argv) {
     return (int)syscall3(SYS_EXEC, (uint32_t)name, argc, (uint32_t)argv);
 }
+static inline int sys_fs_sync(void) { return (int)syscall3(SYS_FS_SYNC, 0, 0, 0); }
 
 /* ---- 打印工具（十进制 / 十六进制） ---- */
 static inline void user_putdec(uint32_t n) {

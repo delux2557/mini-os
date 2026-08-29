@@ -15,8 +15,8 @@ boot.s(multiboot 头 + 进入内核) → kernel_main
    ├─ timer_init()    PIT 100Hz 心跳
    ├─ kb_init()       键盘（v0.9：装行完成回调 → sched_wake_keyboard）
    ├─ serial_set_rx_hook(kb_feed_char)  v0.10：串口接收 → 键盘行缓冲（输入源统一）
-   ├─ ramdisk_init()  v0.8 内存盘 + fs 格式化
-   ├─ initramfs_setup() v0.9 把内嵌应用 ELF 写入 ramdisk（motd/hello/echo/crash/shell）
+   ├─ ata_init()      v0.16 探测 IDE 真盘（无盘则回落纯内存盘）
+   ├─ storage_init()  v0.16 ramdisk + 真盘加载/格式化 + initramfs（见第 14 节）
    └─ sched_init/spawn/start → 多进程调度接管（不返回）
        └─ usermode_spawn_elf("shell", ...)  v0.9 加载常驻 shell
 ```
@@ -282,22 +282,46 @@ v0.5~v0.10 所有进程共享同一页表：任何进程都可访问其他进程
 - 各自写入 `1000+pid` → 睡眠交错 → 读回仍是自己写的值 → `ISOLATED OK`。
 - QEMU 回归用正则统计日志中该虚拟地址对应的不同物理页数量（≥2 即通过）。
 
-## 10. 测试策略（工程化）
+## 10. 测试策略（工程化，v0.16 起四层）
 
 ### 宿主单元测试（tests/run_host_tests.sh）
 - 把无内核依赖的纯逻辑编译成普通 Linux 程序断言：
-  `heap.c`、`kb.c`、`sched_policy.c`、`sem.c`、`msg.c`、`blockdev.c + fs.c`、`elf.c`。
+  `heap.c`、`kb.c`、`sched_policy.c`、`sem.c`、`msg.c`、`blockdev.c + fs.c`、`elf.c`、`guard.c`。
 - 优点：秒级反馈、可用 ASan/valgrind、无需 QEMU。
 - 用 `-fno-pie -no-pie` 保证 32 位地址假设在宿主环境成立。
 
-### QEMU 自动回归（tests/qemu_regression.sh）
+### QEMU 自动回归（tests/qemu_regression.sh，键盘 HMP sendkey 路径）
 - 无图形界面运行内核 N 秒 → 抓串口日志 → 正则校验关键里程碑。
 - 覆盖：进程创建/spawn/切入、A/B 抢占打印、sleep/wake、crash 隔离、僵尸回收、idle 心跳、
   v0.6 信号量创建/等待阻塞/唤醒/共享内存/rendezvous/互斥自增、
   v0.7 消息队列创建/消费者阻塞/生产者阻塞/生产者唤醒/收发完成、
   v0.8 内存盘初始化/文件创建/写模式打开/跨块写入/读回校验通过/多文件创建/ls 列出/演示完成、
   v0.9 initramfs 写入/内核加载 shell/readline 阻塞/交互式注入 shell 命令
-  （经 HMP monitor `sendkey` 端到端跑 `help/ls/cat motd/run hello/run echo/run crash`）。
+  （经 HMP monitor `sendkey` 端到端跑 `help/ls/cat motd/run hello/run echo/run crash`）、
+  v0.12~v0.15 fork/exec/argv/栈守卫/waitdemo/exec 失败反馈，以及 v0.16 的 `selftest` 单行自检。
+
+### 串口终端回归（tests/test_serial.sh，串口 agent 通道）
+- 以 FIFO 模拟"外部 agent 通道"，经 `qemu -serial stdio` 驱动 shell 逐命令交互，
+  校验命令回显与各输出里程碑（help/ls/cat motd/run hello/echo/crash/isol/forkdemo/exec/
+  stackovf/fsdemo/waitdemo/selftest）。与键盘路径互补，验证"终端通道"。
+
+### ATA 持久化回归（tests/test_persist.sh，v0.16 新增）
+- **两次 QEMU 运行共享同一 `-hda` 磁盘镜像**：
+  第 1 次格式化空白盘 → `mkdir /persist` → `save` 写回 → 退出；
+  第 2 次重启挂载同一镜像 → 校验 `/persist` 仍在、且持久盘上的应用可经 `selftest` 正常运行。
+- 这就是"OS 报告 → agent 修改 → make test → QEMU 重启 → 结构化回归"闭环里的"重启验证"环节。
+
+### 单行结构化自检（shell `selftest`，v0.16 新增）
+- shell 内置 `selftest` 命令：逐跑 hello/isol/forkdemo/fsdemo/waitdemo 五个代表应用
+  （覆盖 spawn/隔离/fork/FS/wait），每项打印退出码，最后汇总**一行**：
+  `[selftest] PASS (5 checks)` 或 `[selftest] FAIL: N/5 checks`。
+- 外部 agent 只 grep 这一行即可全量确认，避免逐条关键字匹配几十个里程碑。
+
+### 回归盲区的教训（fsdemo BUG-016）
+- 关键字断言只能验证"某行出现了"，验证不了"不变量"（如退出码）。
+  fsdemo 曾"通过"测试却以退出码 -1 + 误导性 STACK OVERFLOW 退出，因为回归只 grep `[fsdemo] done`。
+- v0.16 起系统性地：给各应用补**退出码断言**（`'<app>' exited code=0`），并用 `selftest`
+  按退出码汇总，把"可见输出匹配"提升为"行为不变量校验"。
 
 ## 11. fork/exec 进程模型与 argv（v0.12 核心）
 
@@ -398,7 +422,36 @@ v0.12 fork/exec 已能创建任意进程，但用户栈只有 4KB 且没有任�
   打印每次返回的 pid 与 code；校验 3 个 pid 互异、退出码集合 {7,9,11}（`verify OK`）；
   全部回收后再 `wait(-1)` 返回 -1。原子行输出便于回归断言。
 
-## 14. 关键设计取舍
+## 14. 用户态 CRT 收口 + ATA 持久化 + 单行自检（v0.16 核心）
+
+### 用户态 CRT 收口（app_main 返回即退出）
+- 新增 `src/apps/crt.c`：ELF 入口由 `app_main` 提升为 `_start`——
+  `_start(argc, argv)` 取参调用 `app_main`，返回后统一 `sys_exit(0)`。
+  根治"app_main 忘了 sys_exit 就从栈槽顶未映射处 ret"这类崩溃（BUG-016），
+  各应用不再需要手写尾部 `sys_exit(0)`。
+- 内核配套（sched.c `entry_block`）：spawn 路径把入口 cdecl 块
+  `[fake_ret][argc][argv]` 写在栈页顶下方 12B（esp = 槽顶-12），保证
+  `_start` 读 argc/argv 时 `[esp+8]` 仍在已映射栈页内；无参数启动用 argc=0/argv=0。
+- 教训：改入口符号后，凡是"新入口会读参数"的代码，都必须保证对应地址已映射
+  （CRT 首次引入时 shell 因读 `[esp+8]` 越页直接页错误，经 entry_block 修复）。
+
+### ATA PIO 驱动（src/ata.c）
+- 主通道 master，LBA28，轮询模式（不依赖中断）：IDENTIFY(0xEC) 探测扇区数、
+  读(0x20)/写(0x30) 按扇区（512B）。带 BSY/ERR/超时保护；无盘立即返回 0。
+- QEMU：`-hda disk.img` 即挂 PIIX IDE 盘；无 `-hda` 时探测失败、回落纯内存盘。
+
+### 存储子系统（src/storage.c）——持久化分水岭
+- **有盘**：整盘读入 ramdisk → 超级块 magic 有效则**直接挂载**（跳过格式化/initramfs，
+  磁盘即真源，用户数据跨重启存活）；空白盘则格式化 + initramfs，并落盘一次。
+- **无盘**：纯内存盘（v0.8 原行为，重启丢失）。
+- `storage_sync()`：把 ramdisk 全量写回磁盘（SYS_FS_SYNC=29 / shell `save`）。
+- 扇区级搬运用 512B 静态缓冲，避免内核栈大数组。
+
+### 单行结构化自检（shell `selftest`）
+- 见 §10 测试策略；价值在于把"几十个关键字断言"收敛成"一行 PASS/FAIL"，
+  是"OS 主动报告自身健康"的机器可读通道。
+
+## 15. 关键设计取舍
 
 | 取舍 | 理由 |
 |------|------|
@@ -416,7 +469,7 @@ v0.12 fork/exec 已能创建任意进程，但用户栈只有 4KB 且没有任�
 | resident 常驻 shell + 一次性应用槽 | shell 常驻免于反复加载；普通应用退出即回收代码帧，简单防泄漏 |
 | 键盘行缓冲与环形缓冲解耦 | idle 继续负责回显，用户进程按行消费；阻塞/唤醒语义清晰 |
 | 串口接收经钩子复用键盘行缓冲 | 输入源统一、零重复代码；`sys_readline` 无需感知键盘还是串口 |
-| `-serial stdio` + FIFO 模拟 agent 通道 | 外部 agent/脚本可完全无头驱动内核，回归可复用同一通道 |
+| `-serial stdio` + FIFO 模拟 agent 通道 | 外部 agent/脚本可在无界面模式（无图形窗口、仅串口输出）下驱动内核，回归可复用同一通道 |
 | 每进程独立页目录 + 内核 PDE 克隆共享 | 用户半区真正隔离，内核半区零复制（共享同一批页表帧）；只多一份页目录+独占页表帧开销 |
 | 页表/页目录帧落在低 16MB 恒等映射区 | 任何地址空间（任何 CR3）都能直接读写任意进程的页表，`map_page_in` 可在任意上下文安全调用 |
 | ELF 加载期间切 CR3 直写目标地址空间 | 避免临时映射进父进程页目录覆盖其自身映射；加载全程关中断，防止抢占后 CR3 错乱 |
@@ -435,3 +488,10 @@ v0.12 fork/exec 已能创建任意进程，但用户栈只有 4KB 且没有任�
 | pid 槽位扫描重用（alloc_pid） | 并发演示（fork/isol 等）会耗尽单调递增的 next_pid；退出后复用槽位让 MAX_PROCS 够用 |
 | exec 就地改写中断帧 + 复用 pid/内核栈 | 无需新建进程；`schedule` 保存的就是改写后的现场，切回即执行新程序 |
 | argv 按 cdecl 布置在新用户栈 | 应用入口即 `app_main(argc, argv)`，零启动代码，GCC 直接按标准调用约定取参 |
+| CRT 收口：ELF 入口为 `_start`（app_main 返回即 sys_exit） | 根除"忘写 sys_exit 从栈顶 ret 崩溃"整类问题，统一各应用退出语义（v0.16） |
+| spawn 路径入口 cdecl 块写在栈页顶下方 12B | 保证 `_start` 读 argc/argv 时 `[esp+8]` 已映射；无参启动用 argc=0/argv=0（v0.16） |
+| ATA PIO（轮询）代替 DMA/中断 | 教学内核聚焦块设备语义本身；QEMU 下 PIO 足够快，无中断/PIC 依赖（v0.16） |
+| 整盘读入 ramdisk + 显式 `save` 写回 | FS 逻辑零改动复用（仍按 blockdev 内存寻址）；持久化=按需落盘，符合"先跑通再优化"（v0.16） |
+| 持久化判定用超级块 magic | 空白盘/有效盘可区分；首启格式化后自动落盘一次（v0.16） |
+| 扇区级搬运用 512B 静态缓冲 | 避免内核栈放 4KB 大数组（KSTACK=4KB 会溢出）（v0.16） |
+| shell `selftest` 单行结构化汇总 | 让 agent grep 一行即完成全量验证；把"可见输出匹配"提升为"退出码不变量校验"（v0.16） |

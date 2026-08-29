@@ -226,6 +226,43 @@
   `fs_make`/`fs_list` 依据 leaf 是否为空判断。
 - **回归**：test_fs 新增 `/none/x` 等非法路径断言（8686 条全绿）。
 
+## BUG-016 [已修复] v0.15 fsdemo 无 sys_exit → 栈顶 ret 崩溃被误报 STACK OVERFLOW
+
+- **版本**：v0.14（fsdemo 引入时），v0.15 修复
+- **现象**：`run fsdemo` 正常完成所有工作后异常终止，退出码应为 0 实为 -1，且打印误导性的
+  `[user] STACK OVERFLOW pid=.. @.. -> killed`；shell 报 `exited code=4294967295`。
+- **根因**：所有其他应用都在 `app_main` 末尾显式 `sys_exit`，唯独 fsdemo 没有 →
+  `app_main` 返回 → `ret` 弹出**栈槽顶端的字**（初始 esp=user_esp_top=槽顶，该字未映射）→
+  页错误 → `stack_guard_hit` 旧实现只按 `(fault & 0x1FFF) < 0x1000` 对齐模式判定，
+  **不校验地址属于本进程守卫页** → 槽顶边界恰好命中低半页模式 → 误报 STACK OVERFLOW 并 kill。
+- **为何测试没抓到**：`tests/test_serial.sh` 只 grep `[fsdemo] done`，没有像 hello/isol/forkdemo
+  那样断言 `exited code=0`（回归盲区的典型案例）。
+- **修复（双管齐下）**：
+  1. **CRT 收口**（v0.16）：ELF 入口改 `_start`，`app_main` 返回后统一 `sys_exit(0)`，
+     根除"忘写 sys_exit 从栈顶 ret"整类问题；
+  2. **guard.c 改为按 pid 判定**：`stack_guard_hit(fault, pid)` 只认定 fault 落在
+     `[BASE+pid*SLOT, +GUARD)`（本进程守卫页）才是栈溢出，槽顶边界归下一槽，不再误报。
+- **回归**：test_guard 新增槽顶边界/跨槽归属断言（22 条）；serial/qemu 补 fsdemo 退出码断言；
+  `make test` 全绿。
+- **教训**：关键字断言验证不了"退出码"这类不变量 → 引入 shell `selftest` 单行结构化自检
+  与各应用退出码断言（见 design.md §10）。
+
+## BUG-017 [已修复] v0.16 引入 CRT 后 spawn 路径入口读 argc/argv 越出栈页
+
+- **版本**：v0.16（把 ELF 入口从 `app_main` 改为 `_start` 时引入）
+- **现象**：`run hello` 等经 spawn 启动的应用一切正常，但**常驻 shell（spawn 路径）**
+  一启动就页错误：`[user] PAGE FAULT pid=10 @80026008 err=4 -> killed`，
+  串口无提示符、交互回归大面积失败。
+- **根因**：spawn 路径 `frame_build` 把 `user_esp` 设为 `user_esp_top`（栈页**顶**），
+  栈页只映射到 `[stk, 槽顶)`，槽顶上方未映射。旧入口 `app_main` 忽略 argc/argv 时
+  从不读 `[esp+8]`（编译器连引用都没有）故侥幸可用；新入口 `_start` **必然**读
+  `[esp+8]`/`[esp+12]` 取 argv/argc 转给 `app_main` → 读取未映射地址 → 页错误。
+- **修复**（sched.c `entry_block`）：spawn 路径把入口 cdecl 块 `[fake_ret][argc][argv]`
+  写在**栈页顶下方 12B**（esp = 槽顶-12），三槽全在已映射栈页内；无参启动用 argc=0/argv=0。
+  exec 路径本就由 `argv_layout` 布置真实 argv，不受影响。
+- **回归**：serial/qemu 回归 shell 提示符、`run hello`、`exec args` argv 校验全部通过。
+- **教训**：更换入口约定时，必须核对"新入口会读哪些栈上参数、这些地址是否已映射"。
+
 ## 未解决问题（观察记录）
 
 | 编号 | 现象 | 结论 |

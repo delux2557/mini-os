@@ -19,5 +19,4 @@ void app_main(int argc, char **argv) {
         if (argv[i]) sys_print(argv[i]);
         sys_print("'\n");
     }
-    sys_exit(0);
 }

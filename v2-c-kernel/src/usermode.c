@@ -20,6 +20,7 @@
 #include "heap.h"
 #include "elf.h"
 #include "kb.h"
+#include "storage.h"
 #include <stdint.h>
 
 /* ---- v0.6 IPC/同步：内核信号量表（用户通过固定 id 引用，id 0 保留） ---- */
@@ -667,6 +668,12 @@ void syscall_dispatch(registers_t *r) {
     case 28: { /* sys_fs_rmdir(path)：删空目录（非空/非目录返回 -1） */
         int rc = fs_rmdir(fs_device(), (const char *)a);
         serial_printf("[fs] rmdir '%s' rc=%d\n", (const char *)a, rc);
+        r->eax = (uint32_t)rc;
+        return;
+    }
+    case 29: { /* sys_fs_sync()：把 ramdisk 全量写回真盘（v0.16 持久化）；无盘返回 -1 */
+        int rc = storage_sync();
+        serial_printf("[fs] sync -> %d\n", rc);
         r->eax = (uint32_t)rc;
         return;
     }

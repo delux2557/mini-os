@@ -45,8 +45,8 @@ void addr_space_destroy(uint32_t pd);   /* 释放该页目录独占的页表帧 
 #define SHMEM_VBASE   0x80044000u         /* 栈区/shell/app 槽之后 */
 #define SHMEM_SLOTS   4
 
-/* 用户态页错误时判定：fault 是否落在某进程的用户栈守卫页（未映射陷阱页） */
-int stack_guard_hit(uint32_t fault);
+/* 用户态页错误时判定：fault 是否落在"pid 本进程"的用户栈守卫页（未映射陷阱页） */
+int stack_guard_hit(uint32_t fault, uint32_t pid);
 
 /* 物理帧分配器：返回物理地址（4KB 对齐） */
 uint32_t frame_alloc(void);

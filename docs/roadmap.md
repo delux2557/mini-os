@@ -22,6 +22,7 @@
 | v0.13 | 用户栈守卫页与栈溢出检测 | 每进程 8KB 栈槽 = [守卫页 4KB(不映射) \| 栈页 4KB(映射)]、`stack_guard_hit` 纯逻辑判定（可宿主单测）、pf_handler 识别栈溢出并隔离终止、`stackovf` 演示（写守卫页被内核抓）、SHMEM 区后移避让；Git 仓库建立（v0.12 基线 `ac80cc9`） |
 | v0.14 | 文件系统增强 | 目录层级（mkdir/rmdir + 绝对路径解析器，支持 `.`/`..`/重复斜杠）、间接块（单文件 48KB → ~4.1MB，删除递归释放）、文件偏移定位与追加写（`sys_fs_seek`、open mode=2）、`sys_fs_ls` 按路径并按类型打印、shell 新增 `mkdir/rmdir/rm`、`fsdemo` 演示（子目录/追加/seek/100KB 间接块大文件）；修复 `sys_wait` spawn-wait 竞态（BUG-014） |
 | v0.15 | 补全 wait 语义与孤儿清理 | `sys_wait(pid,*status)` 升级经典 wait/waitpid（`pid=-1` 等任意子进程、返回 pid、退出码走 status 出参、只回收自己的子进程）；父进程退出时子进程孤儿化（防 pid 槽复用后的孤儿泄漏）；`waitdemo` 演示（fork 3 子不同退出码，`wait(-1)` 依次回收 + verify + 无子返回 -1）；shell run/exec 适配；`exec <不存在程序>` 失败反馈用例 |
+| v0.16 | 用户态 CRT 收口 + ATA 真盘持久化 + 单行自检 | ① CRT 收口：ELF 入口改为 `_start`（app_main 返回即 `sys_exit(0)`），根治 fsdemo 类"忘写 sys_exit 栈顶 ret 崩溃"（BUG-016，guard.c 同时改为按 pid 判定守卫页）；② ATA PIO 驱动（LBA28 轮询）+ 存储子系统：真盘整盘读入 ramdisk、magic 有效即挂载（用户数据跨重启存活）、`save` 命令全量写回；③ shell `selftest` 单行结构化自检（`[selftest] PASS (5 checks)`）；回归升级四层（+`tests/test_persist.sh` 两次 QEMU 共享镜像验证持久化） |
 
 ## 下一步规划
 
@@ -31,9 +32,12 @@
 - ~~用户栈守卫页（guard page）与栈溢出检测~~ ✅ v0.13 已完成
 - ~~更完整的文件系统（目录层级、文件偏移定位/追加写、间接块）~~ ✅ v0.14 已完成
 - ~~补全 fork/exec 的 wait 语义（wait/waitpid、孤儿清理）~~ ✅ v0.15 已完成
-- 网络：NIC 驱动 + 极简协议栈（建议的 v0.16）
-- 真实硬件引导（GRUB/ISO）——串口终端（v0.10）已就绪，届时可直接在真机串口上交互调试
-- 可选：多级间接块/索引节点、mmap/写时复制(COW) fork、信号与信号处理
+- ~~用户态 CRT 收口（app_main 返回即 exit）+ ATA 真盘持久化 + 单行自检~~ ✅ v0.16 已完成
+- 候选下一步（按价值排序）：
+  - **syscall 边界校验（copyin/copyout）**：审计所有 syscall 用户指针，加内核/用户边界校验，防恶意应用传内核地址破坏内核/磁盘镜像（与持久化配套的安全加固）
+  - 网络：NIC 驱动（e1000）+ 极简协议栈（TCP/IP 或先 UDP）
+  - 真实硬件引导（GRUB/ISO）——串口终端（v0.10）已就绪，届时可直接在真机串口上交互调试
+  - 可选：多级间接块/索引节点、mmap/写时复制(COW) fork、信号与信号处理、进程槽扩容
 
 ### 支线 B：为移植 ARM 预留架构（HAL 抽象层）
 - 抽出 **HAL**（硬件抽象层）：把 GDT/IDT/PIC/PIT/串口/键盘等 x86 特有操作封装成
@@ -44,7 +48,8 @@
 - 风险提示：这是较大重构，**届时必须在独立分支上做**（如 `git switch -c feature/hal`），
   HAL 落地 + 回归全绿后再合并回主线，避免破坏 x86 主线可运行状态
 
-> 建议顺序：先按支线 A 把 x86 内核做扎实（v0.15 wait 语义已完成，建议继续 v0.16 网络），
+> 建议顺序：先按支线 A 把 x86 内核做扎实（v0.16 ATA 持久化 + CRT 收口已完成，
+> 建议继续 v0.17 syscall 边界校验，再考虑网络），
 > 等 x86 特性攒够、且真有 ARM 目标时再启动 HAL 重构——因为独立地址空间已牵动页表/切换，
 > 届时抽象 HAL 收益最大、返工最少。HAL 属破坏性重构，需开分支。
 
