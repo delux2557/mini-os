@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.14: filesystem"
+"      "Mini-OS v0.15: complete wait"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -118,6 +118,11 @@ cmd "rmdir 目录"     "rmdir dir1
 "      "\[shell\] rmdir 'dir1' -> 0"
 cmd "run fsdemo"     "run fsdemo
 "      "\[fsdemo\] mkdir /etc -> " "\[fsdemo\] seek(5) read '8080" "\[fsdemo\] big.bin 100000B indirect spot-check OK" "\[fsdemo\] done"
+# ---- v0.15 wait 语义：wait(-1) 任意子进程 + exec 失败反馈 ----
+cmd "run waitdemo"   "run waitdemo
+"      "\[waitdemo\] parent pid=[0-9][0-9]* forked" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=7" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=9" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=11" "\[waitdemo\] verify OK" "\[waitdemo\] final wait any -> 4294967295" "\[waitdemo\] done"
+cmd "exec 失败反馈"   "exec nosuchprog
+"      "\[exec\] FAILED to exec '"
 
 # 等待剩余时间（让后台 sem/msg/fs 演示继续输出），随后收尾
 END=$((QSTART + DURATION))
@@ -243,6 +248,16 @@ check "fsdemo 间接块大文件"      "\[fsdemo\] big.bin 100000B indirect spot
 check "fsdemo 拒绝删非空目录"    "\[fsdemo\] rmdir /etc -> 4294967295"
 check "fsdemo 演示完成"          "\[fsdemo\] done"
 check "shell mkdir 命令"         "\[shell\] mkdir 'dir1' -> "
+# ---- v0.15 wait 语义 ----
+check "initramfs 写入 waitdemo"  "\[ramdisk\] 'waitdemo'"
+check "waitdemo 父进程 fork"     "\[waitdemo\] parent pid=[0-9][0-9]* forked"
+check "wait 任意回收 code=7"     "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=7"
+check "wait 任意回收 code=9"     "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=9"
+check "wait 任意回收 code=11"    "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=11"
+check "waitdemo 校验通过"        "\[waitdemo\] verify OK"
+check "wait 无子进程返回 -1"      "\[waitdemo\] final wait any -> 4294967295"
+check "exec 失败反馈"            "\[exec\] FAILED to exec '"
+check "wait 内核日志 reaped"      "\[user\] wait any -> pid="
 # ---- 通用 ----
 check "idle 状态行心跳"     "alive="
 check "定时器心跳正常"      "ticks="

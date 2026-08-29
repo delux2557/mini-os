@@ -57,7 +57,7 @@ wait_for "help 输出"           "mini-os shell commands:"
 send "ls"
 wait_for "ls 输出"             "\[ls\] /:"
 send "cat motd"
-wait_for "cat motd 输出"       "Mini-OS v0.14: filesystem"
+wait_for "cat motd 输出"       "Mini-OS v0.15: complete wait"
 send "run hello"
 wait_for "run hello 输出"      "Hello from 'hello' app! pid="
 wait_for "hello 退出码"        "'hello' exited code=0"
@@ -102,6 +102,15 @@ wait_for "fsdemo 间接块"       "\[fsdemo\] big.bin 100000B indirect spot-chec
 wait_for "fsdemo 完成"        "\[fsdemo\] done"
 send "rmdir /sd1"
 wait_for "rmdir 返回 0"        "\[shell\] rmdir '/sd1' -> 0"
+# ---- v0.15 wait 语义 ----
+send "run waitdemo"
+wait_for "waitdemo 父进程"     "\[waitdemo\] parent pid=.* forked"
+wait_for "wait 任意回收"       "\[waitdemo\] wait any -> pid=.* code=7"
+wait_for "wait 校验通过"       "\[waitdemo\] verify OK"
+wait_for "wait 无子返回 -1"    "\[waitdemo\] final wait any -> 4294967295"
+wait_for "waitdemo 完成"      "\[waitdemo\] done"
+send "exec nosuchprog"
+wait_for "exec 失败反馈"       "\[exec\] FAILED to exec '"
 
 # 稳定后收尾（让串口缓冲落盘）
 sleep 1

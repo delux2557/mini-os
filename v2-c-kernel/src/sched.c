@@ -576,17 +576,31 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
     p->state = PROC_ZOMBIE;
     /* v0.9/v0.11/v0.12: 回收本进程私有数据帧（ELF 代码/私有页/fork 深拷贝帧/用户栈） */
     release_priv_frames(p);
-    /* v0.9: 唤醒等待本进程退出的父进程（sys_wait 阻塞者），返回其退出码 */
+    /* v0.15: 父进程退出 -> 子进程孤儿化（parent_pid=0，交心跳回收）。
+     * 否则父的 pid 槽被复用后，孤儿永远等不到"父进程 FREE"而被回收。 */
+    for (uint32_t i = 1; i < MAX_PROCS; i++)
+        if (i != current_pid && procs[i].parent_pid == current_pid)
+            procs[i].parent_pid = 0;
+    /* v0.15: 唤醒等待本进程退出的父进程（sys_wait 阻塞者）：
+     *  - 等待具体 pid（waitpid(pid)）或等待任意子进程（wait()，block_arg=-1）
+     *  - 返回子进程 pid；退出码写入等待者的 *status 出参（切到其地址空间写入） */
     for (uint32_t i = 1; i < MAX_PROCS; i++) {
         pcb_t *q = &procs[i];
-        if (q->state == PROC_BLOCKED && q->block_reason == BLOCK_WAIT &&
-            q->block_arg == p->pid) {
-            sched_wake_with(q->pid, p->exit_code);
-            serial_printf("[sched] wake waiter pid=%u (child %u exit code=%u)\n",
-                          q->pid, p->pid, p->exit_code);
-            p->parent_pid = 0;   /* v0.14: 退出码已交付给父进程，僵尸交心跳回收 */
-            break;
+        if (q->state != PROC_BLOCKED || q->block_reason != BLOCK_WAIT) continue;
+        if (q->block_arg != p->pid && q->block_arg != (uint32_t)-1) continue;
+        uint32_t *status = (uint32_t *)q->block_arg2;
+        if (status) {
+            uint32_t saved_pd = mem_current_pd();
+            if (q->page_dir && q->page_dir != saved_pd)
+                switch_page_dir(q->page_dir);
+            *status = p->exit_code;
+            switch_page_dir(saved_pd);
         }
+        sched_wake_with(q->pid, p->pid);   /* sys_wait 返回子进程 pid */
+        serial_printf("[sched] wake waiter pid=%u (child %u exit code=%u)\n",
+                      q->pid, p->pid, p->exit_code);
+        p->parent_pid = 0;   /* v0.14: 退出码已交付给父进程，僵尸交心跳回收 */
+        break;
     }
     serial_printf("[sched] %s pid=%u name=%s code=%u\n", why,
                   p->pid, p->name ? p->name : "?", code);

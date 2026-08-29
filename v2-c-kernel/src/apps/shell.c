@@ -129,7 +129,8 @@ static void cmd_run(char *name) {
     sys_print("' pid=");
     user_putdec((uint32_t)pid);
     sys_print("; waiting...\n");
-    int code = sys_wait((uint32_t)pid);
+    int code = 0;
+    (void)sys_wait((uint32_t)pid, &code);   /* v0.15: 返回 pid + 退出码出参（这里只取 code） */
     sys_print("[shell] '");
     sys_print(name);
     sys_print("' exited code=");
@@ -165,7 +166,8 @@ static void cmd_exec(char *args) {
     sys_print(", exec '");
     sys_print(tok[0]);
     sys_print("'\n");
-    int code = sys_wait(pid);
+    int code = 0;
+    (void)sys_wait(pid, &code);   /* v0.15: 返回 pid + 退出码出参 */
     sys_print("[shell] '");
     sys_print(tok[0]);
     sys_print("' exited code=");
@@ -179,7 +181,7 @@ void app_main(int argc, char **argv) {
     char cmd[ARG_MAX];
     char arg[ARG_MAX];
 
-    sys_print("\n=== Mini-OS v0.14 shell ===\n");
+    sys_print("\n=== Mini-OS v0.15 shell ===\n");
     sys_print("type 'help' for commands\n");
 
     for (;;) {

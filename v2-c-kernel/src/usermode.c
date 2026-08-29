@@ -516,23 +516,62 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)pid;
         return;
     }
-    case 22: { /* sys_wait(pid)：等待子进程退出，返回其退出码（不存在返回 -1） */
-        if (a == 0 || a >= MAX_PROCS) { r->eax = (uint32_t)-1; return; }
-        pcb_t *ch = sched_get(a);
-        if (!ch || ch->state == PROC_FREE) { r->eax = (uint32_t)-1; return; }
-        if (ch->state == PROC_ZOMBIE) {
-            /* v0.14: 子进程已退出且保留为僵尸——回收其资源并返回退出码。
-             * （此前由心跳抢先回收导致 wait 返回 -1 的竞态，见 bugs.md） */
-            uint32_t code = ch->exit_code;
-            sched_reap(a);
-            serial_printf("[user] wait pid=%u -> reaped code=%u\n", a, code);
-            r->eax = code;
-            return;
+    case 22: { /* sys_wait(pid, *status)：等待子进程退出（经典 wait/waitpid，v0.15）。
+                  - pid = -1：等待"任意"子进程（wait()）
+                  - pid 具体：等待该子进程（waitpid(pid)）
+                  返回：被回收的子进程 pid；无子进程/非法参数返回 -1；
+                  退出码写入 *status 出参（NULL 则丢弃）。
+                  只回收"自己的"子进程（ch->parent_pid == 当前 pid）。 */
+        uint32_t *status = (uint32_t *)b;
+        uint32_t cur = sched_current_pid();
+
+        /* 快速路径：已有已退出的子进程（ZOMBIE），立即回收 */
+        if (a == (uint32_t)-1) {
+            for (uint32_t i = 1; i < MAX_PROCS; i++) {
+                pcb_t *c = sched_get(i);
+                if (!c || c->state != PROC_ZOMBIE || c->parent_pid != cur) continue;
+                uint32_t code = c->exit_code;
+                if (status) *status = code;      /* 当前地址空间即父进程，直接写 */
+                sched_reap(i);
+                serial_printf("[user] wait any -> pid=%u code=%u (reaped)\n", i, code);
+                r->eax = i;
+                return;
+            }
+        } else {
+            if (a >= MAX_PROCS) { r->eax = (uint32_t)-1; return; }
+            pcb_t *ch = sched_get(a);
+            if (!ch || ch->state == PROC_FREE || ch->parent_pid != cur) {
+                r->eax = (uint32_t)-1;   /* 不存在 / 已回收 / 不是我的子进程 */
+                return;
+            }
+            if (ch->state == PROC_ZOMBIE) {
+                uint32_t code = ch->exit_code;
+                if (status) *status = code;
+                sched_reap(a);
+                serial_printf("[user] wait pid=%u -> reaped code=%u\n", a, code);
+                r->eax = a;
+                return;
+            }
         }
-        serial_printf("[user] wait pid=%u -> block\n", a);
-        sched_block(r, BLOCK_WAIT, a);
-        __asm__ volatile ("cli; hlt");           /* 不可达 */
-        return;                                  /* 显式返回，抑制 fallthrough 告警 */
+        /* 阻塞路径：目标子进程还活着 -> 阻塞等待其退出；无子进程可等 -> -1 */
+        {
+            int have_child = 0;
+            for (uint32_t i = 1; i < MAX_PROCS; i++) {
+                pcb_t *c = sched_get(i);
+                if (!c || c->state == PROC_FREE || c->parent_pid != cur) continue;
+                if (a != (uint32_t)-1 && i != a) continue;
+                have_child = 1;
+                break;
+            }
+            if (!have_child) { r->eax = (uint32_t)-1; return; }
+            /* 记录 status 出参指针（唤醒时内核切到本进程地址空间写入） */
+            pcb_t *me = sched_get(cur);
+            if (me) me->block_arg2 = (uint32_t)status;
+            serial_printf("[user] wait pid=%u -> block\n", a);
+            sched_block(r, BLOCK_WAIT, a);
+            __asm__ volatile ("cli; hlt");           /* 不可达 */
+            return;                                  /* 显式返回，抑制 fallthrough 告警 */
+        }
     }
     case 23: { /* sys_map_page(addr)：在"当前进程"地址空间映射一张清零物理页。
                 * v0.11 每进程地址空间演示：同一虚拟地址在不同进程映射到不同物理页，

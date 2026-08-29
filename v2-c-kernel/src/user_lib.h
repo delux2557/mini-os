@@ -60,8 +60,10 @@ static inline int sys_readline(char *buf, uint32_t max) {
 static inline int sys_spawn_file(const char *name) {
     return (int)syscall3(SYS_SPAWN_FILE, (uint32_t)name, 0, 0);
 }
-static inline int sys_wait(uint32_t pid) {
-    return (int)syscall3(SYS_WAIT, pid, 0, 0);
+static inline int sys_wait(uint32_t pid, int *status) {
+    /* v0.15: 经典 wait/waitpid——pid=-1 等任意子进程；返回回收的子进程 pid（-1=无子进程），
+     * 退出码写入 *status（NULL 则丢弃）。 */
+    return (int)syscall3(SYS_WAIT, pid, (uint32_t)status, 0);
 }
 static inline uint32_t sys_map_page(uint32_t addr) {
     return syscall3(SYS_MAP_PAGE, addr, 0, 0);

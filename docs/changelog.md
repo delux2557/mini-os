@@ -2,6 +2,29 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## [v0.15] - 2026-08-29 · 补全 wait()/waitpid 语义与孤儿清理
+
+**Added**
+- **`sys_wait(pid, *status)` 升级为经典 wait/waitpid**：
+  - `pid=-1`：等待**任意**子进程（`wait()`）；`pid` 具体：等待该子进程（`waitpid(pid)`）
+  - 返回**被回收的子进程 pid**（无子进程/非法返回 -1），退出码写入 `*status` 出参
+  - **只回收"自己的"子进程**（校验 `parent_pid == 当前进程`），不误收他人僵尸
+  - 唤醒路径：`terminate_current` 同时唤醒"等任意"（`block_arg=-1`）与"等具体 pid"的
+    等待者，唤醒时返回子 pid，并把退出码切到父进程地址空间写入 `*status` 出参
+- **子进程孤儿化**：父进程退出时把所有子进程 `parent_pid` 置 0（交心跳回收），
+  修复"父退出后其 pid 槽被复用、孤儿永远等不到父 FREE 而被回收"的潜在泄漏
+- 演示应用 `src/apps/waitdemo.c`（原子行输出）：fork 3 个子进程（退出码 7/9/11），
+  父进程循环 `wait(-1, &code)` 依次回收任意子进程，校验 pid 互异、退出码集合 {7,9,11}，
+  全部回收后再次 `wait(-1)` 返回 -1
+- shell 的 `run`/`exec` 适配新签名；`exec <不存在的程序>` 失败反馈用例
+  （子进程 `[exec] FAILED to exec` → `sys_exit(1)` → 父进程 wait 拿到 code=1）
+
+**Engineering**
+- QEMU 回归新增 v0.15 检查项：waitdemo 父 fork / 三个 `wait any` 回收码 7/9/11 /
+  verify OK / 无子进程返回 -1 / exec 失败反馈 / 内核 `wait any` 日志
+- 串口终端回归补 `run waitdemo` 与 `exec nosuchprog` 用例
+- Makefile/initramfs 接入 `waitdemo`
+
 ## [v0.14] - 2026-08-29 · 文件系统增强：目录层级 / 间接块 / 偏移定位与追加写
 
 **Added**
