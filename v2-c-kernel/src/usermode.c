@@ -21,6 +21,7 @@
 #include "elf.h"
 #include "kb.h"
 #include "storage.h"
+#include "userptr.h"
 #include <stdint.h>
 
 /* ---- v0.6 IPC/同步：内核信号量表（用户通过固定 id 引用，id 0 保留） ---- */
@@ -283,9 +284,16 @@ void syscall_dispatch(registers_t *r) {
         sched_exit(r, a);
         __asm__ volatile ("cli; hlt");   /* 不可达 */
         return;
-    case 1:   /* sys_print(string) */
-        vga_puts((const char *)a);
-        serial_puts((const char *)a);
+    case 1:   /* sys_print(string)：先拷贝进内核缓冲（v0.17 校验用户指针） */
+        {
+            char sbuf[256];
+            if (copyin_str((const char *)a, sbuf, sizeof(sbuf)) < 0) {
+                r->eax = (uint32_t)-1;
+                return;
+            }
+            vga_puts(sbuf);
+            serial_puts(sbuf);
+        }
         r->eax = 0;
         return;
     case 2:   /* sys_get_ticks() */
@@ -424,38 +432,44 @@ void syscall_dispatch(registers_t *r) {
         return;
     }
     case 13: { /* sys_fs_create(name)：根目录建文件，返回 inode 或 -1 */
-        int ino = fs_create(fs_device(), (const char *)a);
-        serial_printf("[fs] create '%s' inode=%d\n", (const char *)a, ino);
+        char path[64];
+        if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
+        int ino = fs_create(fs_device(), path);
+        serial_printf("[fs] create '%s' inode=%d\n", path, ino);
         r->eax = (uint32_t)ino;
         return;
     }
     case 14: { /* sys_fs_open(slot, name, mode)：mode 0=只读 1=只写 2=追加(v0.14) */
         if (a == 0 || a >= FS_MAX_OBJ || fs_files[a].used) { r->eax = (uint32_t)-1; return; }
-        int ino = fs_lookup(fs_device(), (const char *)b);
+        char path[64];
+        if (copyin_str((const char *)b, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
+        int ino = fs_lookup(fs_device(), path);
         if (ino < 0) { r->eax = (uint32_t)-1; return; }
         fs_files[a].used  = 1;
         fs_files[a].inode = (uint32_t)ino;
         fs_files[a].pos   = (c == 2) ? fs_size(fs_device(), (uint32_t)ino) : 0;
         fs_files[a].mode  = c;
         serial_printf("[fs] open slot=%u '%s' inode=%u mode=%u pos=%u\n",
-                      a, (const char *)b, ino, c, fs_files[a].pos);
+                      a, path, ino, c, fs_files[a].pos);
         r->eax = 0;
         return;
     }
-    case 15: { /* sys_fs_write(slot, buf, len)：从当前位置写 */
+    case 15: { /* sys_fs_write(slot, buf, len)：从当前位置写（buf 须为合法用户指针） */
         if (a == 0 || a >= FS_MAX_OBJ || !fs_files[a].used) { r->eax = (uint32_t)-1; return; }
         fs_file_t *f = &fs_files[a];
         if (f->mode == 0) { r->eax = (uint32_t)-1; return; }   /* 只读槽不可写 */
+        if (!user_ptr_valid((const void *)b, c)) { r->eax = (uint32_t)-1; return; }
         int n = fs_write(fs_device(), f->inode, (const void *)b, f->pos, c);
         if (n > 0) f->pos += (uint32_t)n;
         serial_printf("[fs] write slot=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
         r->eax = (uint32_t)n;
         return;
     }
-    case 16: { /* sys_fs_read(slot, buf, len)：从当前位置读，返回实际字节数 */
+    case 16: { /* sys_fs_read(slot, buf, len)：从当前位置读（buf 须为合法用户指针） */
         if (a == 0 || a >= FS_MAX_OBJ || !fs_files[a].used) { r->eax = (uint32_t)-1; return; }
         fs_file_t *f = &fs_files[a];
         if (f->mode != 0) { r->eax = (uint32_t)-1; return; }
+        if (!user_ptr_valid((const void *)b, c)) { r->eax = (uint32_t)-1; return; }
         int n = fs_read(fs_device(), f->inode, (void *)b, f->pos, c);
         if (n > 0) f->pos += (uint32_t)n;
         serial_printf("[fs] read slot=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
@@ -470,12 +484,16 @@ void syscall_dispatch(registers_t *r) {
         return;
     }
     case 18: { /* sys_fs_ls(path)：列出目录内容（v0.14 路径化；path 空/0=根目录） */
-        const char *path = a ? (const char *)a : "";
+        char path[64];
+        const char *pp;
+        if (a == 0) { pp = ""; }
+        else if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
+        else { pp = path; }
         fs_dir_entry_t ents[FS_MAX_INODES];
-        int n = fs_list(fs_device(), path, ents, FS_MAX_INODES);
+        int n = fs_list(fs_device(), pp, ents, FS_MAX_INODES);
         if (n < 0) { r->eax = (uint32_t)-1; return; }
-        vga_printf("[ls] %s:\n", path[0] ? path : "/");
-        serial_printf("[ls] %s:\n", path[0] ? path : "/");
+        vga_printf("[ls] %s:\n", pp[0] ? pp : "/");
+        serial_printf("[ls] %s:\n", pp[0] ? pp : "/");
         for (int i = 0; i < n; i++) {
             uint32_t sz = fs_size(fs_device(), ents[i].inode);
             const char *mark = ents[i].type == FS_TYPE_DIR ? "/" : "";
@@ -490,14 +508,17 @@ void syscall_dispatch(registers_t *r) {
         return;
     }
     case 19: { /* sys_fs_delete(name)：删除文件（v0.14 支持路径；目录用 sys_fs_rmdir） */
-        int rc = fs_delete(fs_device(), (const char *)a);
-        serial_printf("[fs] delete '%s' rc=%d\n", (const char *)a, rc);
+        char path[64];
+        if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
+        int rc = fs_delete(fs_device(), path);
+        serial_printf("[fs] delete '%s' rc=%d\n", path, rc);
         r->eax = (uint32_t)rc;
         return;
     }
     case 20: { /* sys_readline(buf, max)：阻塞式读一行；行已就绪则直接返回长度 */
         char *out = (char *)a;
         uint32_t max = b ? b : KB_LINE_MAX + 1;
+        if (!user_ptr_valid(out, max)) { r->eax = (uint32_t)-1; return; }   /* v0.17 */
         if (!kb_line_ready()) {
             /* 无行：记录缓冲区（唤醒时由 sched_wake_keyboard 拷入），阻塞等待 */
             pcb_t *p = sched_get(sched_current_pid());
@@ -512,8 +533,10 @@ void syscall_dispatch(registers_t *r) {
         return;
     }
     case 21: { /* sys_spawn_file(name)：从文件系统加载 ELF 应用到 app 槽，返回 pid */
-        int pid = usermode_spawn_elf((const char *)a, APP_LINK, 0);
-        serial_printf("[user] spawn_file '%s' -> pid=%d\n", (const char *)a, pid);
+        char namebuf[16];
+        if (copyin_str((const char *)a, namebuf, sizeof(namebuf)) < 0) { r->eax = (uint32_t)-1; return; }
+        int pid = usermode_spawn_elf(namebuf, APP_LINK, 0);
+        serial_printf("[user] spawn_file '%s' -> pid=%d\n", namebuf, pid);
         r->eax = (uint32_t)pid;
         return;
     }
@@ -525,6 +548,10 @@ void syscall_dispatch(registers_t *r) {
                   只回收"自己的"子进程（ch->parent_pid == 当前 pid）。 */
         uint32_t *status = (uint32_t *)b;
         uint32_t cur = sched_current_pid();
+        if (status && !user_ptr_valid(status, sizeof(uint32_t))) {   /* v0.17 */
+            r->eax = (uint32_t)-1;
+            return;
+        }
 
         /* 快速路径：已有已退出的子进程（ZOMBIE），立即回收 */
         if (a == (uint32_t)-1) {
@@ -601,23 +628,21 @@ void syscall_dispatch(registers_t *r) {
     case 25: { /* sys_exec(name, argc, argv)：加载 ELF 替换当前进程（镜像替换）。
                   argv 为用户空间指针数组（argc 个 char*，最多 8 条）。成功不返回；失败返回 -1 */
         if (b > 8) { r->eax = (uint32_t)-1; return; }
-        const char *name = (const char *)a;
         uint32_t argc = b;
         char *const *argv = (char *const *)c;
-        /* name 与 argv 内容都位于当前（旧）地址空间，而加载/替换期间会切 CR3，
+        /* v0.17：name / argv 数组 / 每个 argv[i] 字符串都先校验并拷入内核缓冲。
+         * name 与 argv 内容都位于当前（旧）地址空间，而加载/替换期间会切 CR3，
          * 故须先在当前地址空间把它们全部拷入内核缓冲（与 spawn_elf 的 namebuf 同因）。 */
         char namebuf[16];
-        uint32_t ni = 0;
-        if (name)
-            while (name[ni] && ni < (int)sizeof(namebuf) - 1) { namebuf[ni] = name[ni]; ni++; }
-        namebuf[ni] = 0;
+        if (copyin_str((const char *)a, namebuf, sizeof(namebuf)) < 0) { r->eax = (uint32_t)-1; return; }
+        if (argc && !user_ptr_valid((const void *)argv, argc * sizeof(char *))) {
+            r->eax = (uint32_t)-1;
+            return;
+        }
         char names[8][64];
         for (uint32_t i = 0; i < argc; i++) {
             if (!argv[i]) { r->eax = (uint32_t)-1; return; }
-            const char *s = argv[i];
-            uint32_t j = 0;
-            while (j < 63 && s[j]) { names[i][j] = s[j]; j++; }
-            names[i][j] = 0;
+            if (copyin_str(argv[i], names[i], sizeof(names[i])) < 0) { r->eax = (uint32_t)-1; return; }
         }
         /* 加载 ELF 到新地址空间（与 spawn_elf 同法：建 pd、切 CR3 加载、切回）。
          * 全程关中断：sched_exec 释放旧地址空间期间不允许抢占。 */
@@ -660,14 +685,18 @@ void syscall_dispatch(registers_t *r) {
         return;
     }
     case 27: { /* sys_fs_mkdir(path)：建目录（父目录须存在），返回 inode 或 -1 */
-        int ino = fs_mkdir(fs_device(), (const char *)a);
-        serial_printf("[fs] mkdir '%s' inode=%d\n", (const char *)a, ino);
+        char path[64];
+        if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
+        int ino = fs_mkdir(fs_device(), path);
+        serial_printf("[fs] mkdir '%s' inode=%d\n", path, ino);
         r->eax = (uint32_t)ino;
         return;
     }
     case 28: { /* sys_fs_rmdir(path)：删空目录（非空/非目录返回 -1） */
-        int rc = fs_rmdir(fs_device(), (const char *)a);
-        serial_printf("[fs] rmdir '%s' rc=%d\n", (const char *)a, rc);
+        char path[64];
+        if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
+        int rc = fs_rmdir(fs_device(), path);
+        serial_printf("[fs] rmdir '%s' rc=%d\n", path, rc);
         r->eax = (uint32_t)rc;
         return;
     }

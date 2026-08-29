@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.16: ATA PIO"
+"      "Mini-OS v0.17: syscall boundary"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -126,6 +126,9 @@ cmd "exec 失败反馈"   "exec nosuchprog
 # ---- v0.16 单行结构化自检（agent 可 grep 一行确认全量通过） ----
 cmd "selftest 自检"   "selftest
 "      "\[selftest\] PASS (5 checks)"
+# ---- v0.17 syscall 边界校验：内核指针全部被拒 ----
+cmd "run abuse"       "run abuse
+"      "\[abuse\] write buf@0xB8000 -> 4294967295" "\[abuse\] verify OK"
 
 # 等待剩余时间（让后台 sem/msg/fs 演示继续输出），随后收尾
 END=$((QSTART + DURATION))

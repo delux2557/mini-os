@@ -2,6 +2,31 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## [v0.17] - 2026-08-29 · syscall 边界校验（copyin/copyout）
+
+**Added**
+- **用户指针校验层** `src/userptr.c/h`（纯逻辑，可宿主单测）：
+  - `user_ptr_valid(p, len)`：校验 `[p, p+len)` 完整落在用户空间
+    `[USER_SPACE_BASE=0x80000000, USER_SPACE_END=0x80100000)`（含上界与回绕保护）
+  - `copyin` / `copyout`：校验通过后内核直接拷贝用户内存（当前 CR3 即用户页目录）
+  - `copyin_str`：把用户 NUL 结尾字符串拷入内核缓冲（非法基址/越界/超长返回 -1）
+- **全部涉用户指针的 syscall 接入校验**（usermode.c）：
+  - `sys_print`（拷贝进内核缓冲再打印）、`sys_readline`（缓冲校验）、
+    `sys_spawn_file`（name 校验）、`sys_wait`（status 出参校验）、
+    `sys_exec`（name + argv 数组 + 每个 argv[i] 校验）
+  - FS 全链路：`create/open/ls/delete/mkdir/rmdir` 的路径、`write/read` 的缓冲指针
+- 演示应用 `src/apps/abuse.c`：用内核低地址（0x100000/0xB8000）与回绕地址
+  （0xFFFFFFF0）调用各类 syscall，验证全部被拒（-1），合法路径不受影响
+  （写文件返回正常字节数），最后 `[abuse] verify OK`
+
+**Engineering**
+- 宿主单测 `tests/test_userptr.c`（20 条断言）：`user_ptr_valid` 纯逻辑边界
+  （起点/上限/END/内核低地址/地址 0/回绕/长度溢出）+ copyin/copyout/copyin_str 拒绝路径
+- 回归补 `run abuse` 用例（serial + qemu 双通道）：断言内核指针被拒 + verify OK
+- 版本横幅与 motd 更新为 v0.17；Makefile 接入 `userptr.o` 与 `abuse` 应用
+- 开发期自查修正：`user_ptr_valid` 首版 `len > END - a` 在 `a > END` 时减法回绕误判为
+  合法，改为先 `a > END` 拒绝再判区间（未发布，已在本版修正）
+
 ## [v0.16] - 2026-08-29 · 用户态 CRT 收口 + ATA 真盘持久化 + 单行自检
 
 **Added**

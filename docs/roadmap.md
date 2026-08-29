@@ -23,6 +23,7 @@
 | v0.14 | 文件系统增强 | 目录层级（mkdir/rmdir + 绝对路径解析器，支持 `.`/`..`/重复斜杠）、间接块（单文件 48KB → ~4.1MB，删除递归释放）、文件偏移定位与追加写（`sys_fs_seek`、open mode=2）、`sys_fs_ls` 按路径并按类型打印、shell 新增 `mkdir/rmdir/rm`、`fsdemo` 演示（子目录/追加/seek/100KB 间接块大文件）；修复 `sys_wait` spawn-wait 竞态（BUG-014） |
 | v0.15 | 补全 wait 语义与孤儿清理 | `sys_wait(pid,*status)` 升级经典 wait/waitpid（`pid=-1` 等任意子进程、返回 pid、退出码走 status 出参、只回收自己的子进程）；父进程退出时子进程孤儿化（防 pid 槽复用后的孤儿泄漏）；`waitdemo` 演示（fork 3 子不同退出码，`wait(-1)` 依次回收 + verify + 无子返回 -1）；shell run/exec 适配；`exec <不存在程序>` 失败反馈用例 |
 | v0.16 | 用户态 CRT 收口 + ATA 真盘持久化 + 单行自检 | ① CRT 收口：ELF 入口改为 `_start`（app_main 返回即 `sys_exit(0)`），根治 fsdemo 类"忘写 sys_exit 栈顶 ret 崩溃"（BUG-016，guard.c 同时改为按 pid 判定守卫页）；② ATA PIO 驱动（LBA28 轮询）+ 存储子系统：真盘整盘读入 ramdisk、magic 有效即挂载（用户数据跨重启存活）、`save` 命令全量写回；③ shell `selftest` 单行结构化自检（`[selftest] PASS (5 checks)`）；回归升级四层（+`tests/test_persist.sh` 两次 QEMU 共享镜像验证持久化） |
+| v0.17 | syscall 边界校验（copyin/copyout） | `userptr.c/h` 校验层（`user_ptr_valid`/`copyin`/`copyout`/`copyin_str`，纯逻辑可宿主单测）；全部涉用户指针的 syscall（print/readline/spawn/wait/exec/FS 全链路）先校验再使用；`abuse` 演示应用（内核低地址/回绕地址全部被拒、合法路径正常）；宿主单测 test_userptr + serial/qemu 双通道 `run abuse` 回归 |
 
 ## 下一步规划
 
@@ -33,8 +34,8 @@
 - ~~更完整的文件系统（目录层级、文件偏移定位/追加写、间接块）~~ ✅ v0.14 已完成
 - ~~补全 fork/exec 的 wait 语义（wait/waitpid、孤儿清理）~~ ✅ v0.15 已完成
 - ~~用户态 CRT 收口（app_main 返回即 exit）+ ATA 真盘持久化 + 单行自检~~ ✅ v0.16 已完成
+- ~~syscall 边界校验（copyin/copyout）~~ ✅ v0.17 已完成
 - 候选下一步（按价值排序）：
-  - **syscall 边界校验（copyin/copyout）**：审计所有 syscall 用户指针，加内核/用户边界校验，防恶意应用传内核地址破坏内核/磁盘镜像（与持久化配套的安全加固）
   - 网络：NIC 驱动（e1000）+ 极简协议栈（TCP/IP 或先 UDP）
   - 真实硬件引导（GRUB/ISO）——串口终端（v0.10）已就绪，届时可直接在真机串口上交互调试
   - 可选：多级间接块/索引节点、mmap/写时复制(COW) fork、信号与信号处理、进程槽扩容

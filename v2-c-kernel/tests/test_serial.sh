@@ -57,7 +57,7 @@ wait_for "help 输出"           "mini-os shell commands:"
 send "ls"
 wait_for "ls 输出"             "\[ls\] /:"
 send "cat motd"
-wait_for "cat motd 输出"       "Mini-OS v0.16: ATA PIO"
+wait_for "cat motd 输出"       "Mini-OS v0.17: syscall boundary"
 send "run hello"
 wait_for "run hello 输出"      "Hello from 'hello' app! pid="
 wait_for "hello 退出码"        "'hello' exited code=0"
@@ -116,6 +116,10 @@ wait_for "exec 失败反馈"       "\[exec\] FAILED to exec '"
 # ---- v0.16 单行结构化自检 ----
 send "selftest"
 wait_for "selftest 自检通过"   "\[selftest\] PASS (5 checks)"
+# ---- v0.17 syscall 边界校验 ----
+send "run abuse"
+wait_for "abuse 内核指针被拒"  "\[abuse\] print@0x100000 -> 4294967295"
+wait_for "abuse 校验通过"     "\[abuse\] verify OK"
 
 # 稳定后收尾（让串口缓冲落盘）
 sleep 1

@@ -1,6 +1,6 @@
 # v2-c-kernel（当前版本）
 
-x86 32 位 C 内核，multiboot 引导，运行于 QEMU。当前里程碑：v0.16 用户态 CRT 收口 + ATA 真盘持久化 + 单行结构化自检。
+x86 32 位 C 内核，multiboot 引导，运行于 QEMU。当前里程碑：v0.17 syscall 边界校验（copyin/copyout）。
 
 ```
 src/     内核源代码（.c/.h/.s/.ld）
@@ -48,6 +48,13 @@ shell 内置 `selftest` 命令：逐跑 hello/isol/forkdemo/fsdemo/waitdemo 五�
 ```
 
 外部 agent 只需 grep 这一行即可完成全量确认，无需逐条匹配几十个里程碑。
+
+## syscall 边界校验（v0.17）
+
+所有涉用户指针的系统调用（print / readline / spawn / exec / wait / 文件系统全链路）
+都会先校验指针是否落在用户空间（`userptr.c` 的 `copyin/copyout/copyin_str`），
+用户程序无法借 syscall 读写内核内存。`run abuse` 演示：用内核低地址/回绕地址
+调用各类 syscall 全部被拒（-1），合法路径不受影响，输出 `[abuse] verify OK`。
 
 ## 依赖
 

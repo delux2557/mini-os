@@ -56,7 +56,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS v0.16  (ATA PIO + persistent disk FS)\n");
+    vga_puts("Micro-OS v0.17  (syscall boundary check / copyin-copyout)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {

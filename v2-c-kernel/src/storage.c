@@ -70,6 +70,7 @@ extern char _binary_args_elf_start[],   _binary_args_elf_end[];
 extern char _binary_stackovf_elf_start[], _binary_stackovf_elf_end[];
 extern char _binary_fsdemo_elf_start[],  _binary_fsdemo_elf_end[];
 extern char _binary_waitdemo_elf_start[], _binary_waitdemo_elf_end[];
+extern char _binary_abuse_elf_start[],   _binary_abuse_elf_end[];
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
@@ -84,8 +85,8 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
 
 static void initramfs_setup(void) {
     static const char motd[] =
-        "Mini-OS v0.16: ATA PIO + persistent disk FS. save your work with 'save'!\n"
-        "Commands: help ls cat mkdir rmdir rm run exec save exit  (try: run fsdemo)\n";
+        "Mini-OS v0.17: syscall boundary check (copyin/copyout). Try: run abuse\n"
+        "Commands: help ls cat mkdir rmdir rm run exec save selftest exit\n";
     initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
     initramfs_file("hello",
                    _binary_hello_elf_start,
@@ -114,6 +115,9 @@ static void initramfs_setup(void) {
     initramfs_file("waitdemo",
                    _binary_waitdemo_elf_start,
                    (uint32_t)(_binary_waitdemo_elf_end - _binary_waitdemo_elf_start));
+    initramfs_file("abuse",
+                   _binary_abuse_elf_start,
+                   (uint32_t)(_binary_abuse_elf_end - _binary_abuse_elf_start));
     initramfs_file("shell",
                    _binary_shell_elf_start,
                    (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));
