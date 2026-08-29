@@ -240,19 +240,42 @@ void pf_handler(registers_t *r) {
 
     /* 用户态页错误：用户程序越界访问（内核内存/非法地址）-> 隔离终止该进程 */
     if ((r->cs & 3) == 3) {
-        /* v0.13 栈溢出检测：fault 落在本进程用户栈守卫页（未映射陷阱页） */
-        if (stack_guard_hit(fault, sched_current_pid())) {
-            serial_printf("\n[user] STACK OVERFLOW pid=%u @%x -> killed\n",
-                          sched_current_pid(), fault);
-            vga_printf("\n[user] STACK OVERFLOW pid=%u @%x -> killed\n",
-                       sched_current_pid(), fault);
+        uint32_t pid = sched_current_pid();
+        pcb_t *p = sched_get(pid);
+        stack_evt_t ev = stack_guard_hit(fault, pid, p ? p->stack_bottom : 0);
+
+        /* v0.26 栈按需生长：命中"当前守卫页"（栈底下方 1 页）且槽内还有空间
+         * -> 补映射一页、守卫页随之下移，iret 重试触发异常的指令 */
+        if (ev == STACK_GROWTH) {
+            if (p && p->stack_fcount < USER_STACK_PAGES) {
+                uint32_t newb = p->stack_bottom - PAGE_SIZE;
+                uint32_t phys = frame_alloc();
+                if (phys) {
+                    map_page_in(p->page_dir, newb, phys, 0x7);
+                    p->stack_frames[p->stack_fcount++] = phys;
+                    p->stack_bottom = newb;
+                    serial_printf("[stack] grow pid=%u @%x pages=%u\n",
+                                  pid, newb, p->stack_fcount);
+                    vga_printf("[stack] grow pid=%u @%x pages=%u\n",
+                               pid, newb, p->stack_fcount);
+                    return;   /* iret 后自动重试触发异常的指令 */
+                }
+            }
+            ev = STACK_BOOM;   /* 无物理帧 / 已生长到上限 / 无 PCB：视同栈溢出 */
+        }
+
+        /* v0.13 栈溢出检测：fault 深越界（越过当前守卫页，或已到槽底硬底） */
+        if (ev == STACK_BOOM) {
+            serial_printf("\n[user] STACK OVERFLOW pid=%u @%x -> killed\n", pid, fault);
+            vga_printf("\n[user] STACK OVERFLOW pid=%u @%x -> killed\n", pid, fault);
             sched_kill(r, (uint32_t)-1);
             __asm__ volatile ("cli; hlt");   /* 不可达 */
         }
+
         serial_printf("\n[user] PAGE FAULT pid=%u @%x err=%u -> killed\n",
-                      sched_current_pid(), fault, r->err_code);
+                      pid, fault, r->err_code);
         vga_printf("\n[user] PAGE FAULT pid=%u @%x err=%u -> killed\n",
-                   sched_current_pid(), fault, r->err_code);
+                   pid, fault, r->err_code);
         sched_kill(r, (uint32_t)-1);
         __asm__ volatile ("cli; hlt");   /* 不可达 */
     }

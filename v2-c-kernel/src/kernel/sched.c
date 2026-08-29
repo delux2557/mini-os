@@ -44,10 +44,29 @@ extern char _binary_userprog_bin_end[];
 /* v0.11: 共享代码页物理帧（每个进程在自己的页目录里映射到 0x80000000） */
 static uint32_t user_code_phys = 0;
 
-/* v0.13: 每个进程的用户栈区虚拟基址：代码页之后，按 pid 错开一个 8KB 槽。
- * 槽内 [基址, +4KB) 为守卫页（不映射，栈溢出陷阱），[+4KB, +8KB) 为栈页（映射）。 */
+/* v0.13: 每个进程的用户栈区虚拟基址：代码页之后，按 pid 错开一个 32KB 槽（v0.26 起）。
+ * 槽内 [基址, +4KB) 为守卫页（不映射，槽底硬底），其上为可生长栈区（初始仅顶页映射）。 */
 static uint32_t user_stack_vbase(uint32_t pid) {
     return USER_STACK_AREA_BASE + pid * USER_STACK_SLOT;
+}
+
+/* v0.26: 初始化用户栈：槽顶下方一页为初始栈页（槽底守卫页为硬底，永不映射）。
+ * 返回初始栈页虚拟地址（= stack_bottom，供映射/入口块/argv 布局使用）。 */
+static uint32_t stack_init(pcb_t *p, uint32_t pid, uint32_t frame) {
+    uint32_t usv = user_stack_vbase(pid);
+    p->user_esp_top = usv + USER_STACK_SLOT;         /* 槽顶 */
+    p->stack_bottom = p->user_esp_top - 0x1000u;     /* 初始：槽顶下方一页 */
+    p->stack_frames[0] = frame;
+    p->stack_fcount = 1;
+    return p->stack_bottom;
+}
+
+/* v0.26: 释放已映射的用户栈页（槽底守卫页永不映射，无需释放） */
+static void stack_free(pcb_t *p) {
+    for (uint32_t i = 0; i < p->stack_fcount && i < USER_STACK_PAGES; i++)
+        frame_free(p->stack_frames[i]);
+    p->stack_fcount = 0;
+    p->stack_bottom = 0;
 }
 
 static void memcpy8(void *dst, const void *src, uint32_t n) {
@@ -163,23 +182,22 @@ int sched_spawn(uint32_t entry_off, const char *name) {
     memset8((uint8_t *)p, 0, sizeof(pcb_t));
 
     p->kstack_frame = frame_alloc();   /* 独立内核栈 */
-    p->stack_frame  = frame_alloc();   /* 独立用户栈 */
+    p->stack_frames[0] = frame_alloc();   /* 独立用户栈（初始页） */
     p->page_dir     = addr_space_create();   /* v0.11: 独立地址空间 */
-    if (!p->kstack_frame || !p->stack_frame || !p->page_dir) {
-        if (p->kstack_frame) frame_free(p->kstack_frame);
-        if (p->stack_frame)  frame_free(p->stack_frame);
-        if (p->page_dir)     addr_space_destroy(p->page_dir);
+    if (!p->kstack_frame || !p->stack_frames[0] || !p->page_dir) {
+        if (p->kstack_frame)     frame_free(p->kstack_frame);
+        if (p->stack_frames[0])  frame_free(p->stack_frames[0]);
+        if (p->page_dir)         addr_space_destroy(p->page_dir);
         serial_printf("[sched] spawn %s FAILED (OOM)\n", name);
         return -1;
     }
 
     p->kstack_top = p->kstack_frame + KSTACK_SIZE;
-    uint32_t usv = user_stack_vbase(pid);         /* 栈区基址（守卫页） */
-    uint32_t stk = usv + USER_STACK_GUARD;        /* 栈页（守卫页之后） */
-    p->user_esp_top = usv + USER_STACK_SLOT;      /* 栈区顶 */
-    /* v0.11: 共享代码页映射；v0.13: 只映射栈页，守卫页不映射（栈溢出陷阱） */
+    /* v0.26: 栈初始页在槽顶下方一页（槽底守卫页为硬底，永不映射） */
+    uint32_t stk = stack_init(p, pid, p->stack_frames[0]);
+    /* v0.11: 共享代码页映射；守卫页不映射（栈溢出陷阱），栈页按需生长（v0.26） */
     map_page_in(p->page_dir, USER_CODE_BASE, user_code_phys, 0x7);
-    map_page_in(p->page_dir, stk, p->stack_frame, 0x7);
+    map_page_in(p->page_dir, stk, p->stack_frames[0], 0x7);
 
     p->pid = pid;
     p->parent_pid = current_pid;   /* v0.14: 记录父进程（boot 演示为 idle=0） */
@@ -188,7 +206,7 @@ int sched_spawn(uint32_t entry_off, const char *name) {
     p->state = PROC_READY;
     /* v0.16: 入口统一为 cdecl——esp 落在栈页顶下方 12B（[esp]=ret,[esp+4]=argc,[esp+8]=argv 全在已映射栈页内），
      * 使 CRT 的 _start 能安全读取 argc/argv，无参数启动用 argc=0/argv=0 */
-    uint32_t entry_esp = entry_block(p->stack_frame, stk, p->user_esp_top);
+    uint32_t entry_esp = entry_block(p->stack_frames[0], stk, p->user_esp_top);
     frame_build(p, SEL_UCODE_R3, SEL_UDATA_R3,
                 USER_CODE_BASE + entry_off, entry_esp);
 
@@ -208,20 +226,18 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
     memset8((uint8_t *)p, 0, sizeof(pcb_t));
 
     p->kstack_frame = frame_alloc();   /* 独立内核栈 */
-    p->stack_frame  = frame_alloc();   /* 独立用户栈 */
+    p->stack_frames[0] = frame_alloc();   /* 独立用户栈（初始页） */
     p->page_dir     = pd;              /* v0.11: 由调用方建好的地址空间 */
-    if (!p->kstack_frame || !p->stack_frame || !pd) {
-        if (p->kstack_frame) frame_free(p->kstack_frame);
-        if (p->stack_frame)  frame_free(p->stack_frame);
+    if (!p->kstack_frame || !p->stack_frames[0] || !pd) {
+        if (p->kstack_frame)     frame_free(p->kstack_frame);
+        if (p->stack_frames[0])  frame_free(p->stack_frames[0]);
         serial_printf("[sched] spawn_at %s FAILED (OOM)\n", name);
         return -1;
     }
 
     p->kstack_top = p->kstack_frame + KSTACK_SIZE;
-    uint32_t usv = user_stack_vbase(pid);         /* 栈区基址（守卫页） */
-    uint32_t stk = usv + USER_STACK_GUARD;        /* 栈页 */
-    p->user_esp_top = usv + USER_STACK_SLOT;      /* 栈区顶 */
-    map_page_in(pd, stk, p->stack_frame, 0x7);    /* 独立用户栈页（守卫页不映射） */
+    uint32_t stk = stack_init(p, pid, p->stack_frames[0]); /* v0.26: 槽顶下方一页 */
+    map_page_in(pd, stk, p->stack_frames[0], 0x7);    /* 独立用户栈页（守卫页不映射） */
 
     p->pid = pid;
     p->parent_pid = current_pid;   /* v0.14: 记录父进程 */
@@ -233,7 +249,7 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
     for (uint32_t i = 0; i < fcount && i < 8; i++) p->own_frames[i] = frames[i];
 
     /* v0.16: 同 sched_spawn——无参数启动（argc=0/argv=0）的 cdecl 入口块 */
-    uint32_t entry_esp = entry_block(p->stack_frame, stk, p->user_esp_top);
+    uint32_t entry_esp = entry_block(p->stack_frames[0], stk, p->user_esp_top);
     frame_build(p, SEL_UCODE_R3, SEL_UDATA_R3, entry, entry_esp);
 
     policy_readyq_push(&readyq, pid);
@@ -257,7 +273,7 @@ static void release_priv_frames(pcb_t *p) {
     p->map_fcount = 0;
     for (uint32_t i = 0; i < p->fork_fcount && i < 24; i++) frame_free(p->fork_frames[i]);
     p->fork_fcount = 0;
-    if (p->stack_frame) { frame_free(p->stack_frame); p->stack_frame = 0; }
+    stack_free(p);   /* v0.26: 释放已映射的用户栈页 */
 }
 
 int sched_fork(registers_t *r) {
@@ -312,6 +328,8 @@ int sched_fork(registers_t *r) {
     c->entry_off = 0;
     c->kernel_esp = faddr;
     c->user_esp_top = p->user_esp_top;
+    c->stack_bottom = p->stack_bottom;   /* v0.26: 子进程已深拷贝全部栈页，栈底保持一致；
+                                            后续再生长的新页记入 stack_frames（回收用） */
     c->own_vbase = p->own_vbase;
     c->block_reason = BLOCK_NONE;
     /* own_frames/map_frames 已清零：深拷贝出的帧统一记在 fork_frames，退出时回收 */
@@ -364,8 +382,8 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
                uint32_t entry, const uint32_t *frames, uint32_t fcount, uint32_t vbase,
                const char (*argv)[64], uint32_t argc) {
     pcb_t *p = &procs[current_pid];
-    uint32_t usv = user_stack_vbase(p->pid);      /* 栈区基址（守卫页） */
-    uint32_t stk = usv + USER_STACK_GUARD;        /* 栈页 */
+    /* v0.26: 新栈初始页 = 本进程槽顶下方一页（槽底守卫页为硬底，永不映射） */
+    uint32_t stk = user_stack_vbase(p->pid) + USER_STACK_SLOT - 0x1000u;
 
     /* name 可能指向当前进程用户内存（如 shell 栈上的参数字符串），
      * 而下面会释放旧地址空间，故先拷贝进 PCB 的 name_buf。 */
@@ -384,7 +402,10 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
     switch_page_dir(pd);                     /* 立即切到新地址空间（旧 pd 已释放） */
 
     /* PCB 换成新程序（pid 与内核栈 kstack_frame 不变） */
-    p->stack_frame = sframe;
+    p->user_esp_top = stk + 0x1000u;         /* v0.26: 栈槽顶 */
+    p->stack_frames[0] = sframe;
+    p->stack_fcount = 1;
+    p->stack_bottom = stk;
     p->own_fcount = fcount;
     for (uint32_t i = 0; i < fcount && i < 8; i++) p->own_frames[i] = frames[i];
     p->own_vbase = vbase;
@@ -468,7 +489,7 @@ void sched_start(void) {
 static void reap_process(uint32_t i) {
     pcb_t *p = &procs[i];
     frame_free(p->kstack_frame);
-    frame_free(p->stack_frame);
+    stack_free(p);                       /* v0.26: 释放已映射的用户栈页 */
     addr_space_destroy(p->page_dir);   /* v0.11: 释放进程独占页表 + 页目录 */
     p->page_dir = 0;
     serial_printf("[sched] reap pid=%u name=%s code=%u\n",
@@ -607,6 +628,9 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
         if (q->state != PROC_BLOCKED || q->block_reason != BLOCK_WAIT) continue;
         if (q->block_arg != p->pid && q->block_arg != (uint32_t)-1) continue;
         uint32_t *status = (uint32_t *)q->block_arg2;
+        serial_printf("[dbg] deliver pid=%u -> waiter %u status=%x exit=%u pd=%x curpd=%x\n",
+                      p->pid, q->pid, (uint32_t)status, p->exit_code,
+                      q->page_dir, mem_current_pd());
         if (status) {
             uint32_t saved_pd = mem_current_pd();
             if (q->page_dir && q->page_dir != saved_pd)

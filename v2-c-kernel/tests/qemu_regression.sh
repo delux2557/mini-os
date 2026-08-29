@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.25: DHCP gets dynamic IP/gateway"
+"      "Mini-OS v0.26: user stack grows on demand"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -107,6 +107,9 @@ cmd "exec args"      "exec args alpha beta gamma
 # ---- v0.13 栈守卫页 ----
 cmd "run stackovf"   "run stackovf
 "      "\[stackovf\] pid=.* starting" "\[user\] STACK OVERFLOW pid=" "\[shell\] 'stackovf' exited code="
+# ---- v0.26 用户栈按需生长 ----
+cmd "run deep"       "run deep
+"      "\[deep\] pid=.* recursing 12\*1KB on a 4KB start stack" "\[stack\] grow pid=" "\[deep\] survived 12KB recursion via stack growth" "\[shell\] 'deep' exited code=0"
 # ---- v0.14 文件系统增强：shell 目录命令 + fsdemo ----
 # 注意：QEMU HMP sendkey 不支持 '/'（斜杠会静默丢弃），此处用平铺名；
 # 带斜杠路径的交互验证走串口通道（test_serial.sh）。
@@ -244,6 +247,10 @@ check "initramfs 写入 stackovf" "\[ramdisk\] 'stackovf'"
 check "stackovf 启动"           "\[stackovf\] pid=.* starting"
 check "栈溢出被检测"             "\[user\] STACK OVERFLOW pid="
 check "stackovf 被终止"          "\[sched\] kill pid=.* name=stackovf"
+# ---- v0.26 用户栈按需生长 ----
+check "initramfs 写入 deep"     "\[ramdisk\] 'deep'"
+check "deep 栈按需生长"          "\[stack\] grow pid=.* pages="
+check "deep 存活"                "\[deep\] survived 12KB recursion via stack growth"
 # ---- v0.14 文件系统增强 ----
 check "initramfs 写入 fsdemo"   "\[ramdisk\] 'fsdemo'"
 check "fsdemo 建目录 /etc"       "\[fsdemo\] mkdir /etc -> [0-9][0-9]*"

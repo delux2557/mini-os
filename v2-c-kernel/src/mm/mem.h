@@ -31,22 +31,30 @@ uint32_t mem_kernel_pd(void);           /* 内核页目录物理地址 */
 uint32_t addr_space_create(void);       /* 新建页目录：克隆内核共享 PDE + 清零用户区，返回物理地址 */
 void addr_space_destroy(uint32_t pd);   /* 释放该页目录独占的页表帧 + 页目录帧 */
 
-/* ---- 用户地址空间布局 ----
- * 用户栈区 [USER_STACK_AREA_BASE, USER_STACK_AREA_END)：每进程 8KB 槽
- *   = [守卫页 4KB（不映射） | 栈页 4KB（映射）]；栈从槽顶向下增长，
- *   下溢越过栈页底部即进入守卫页 -> 触发页错误 -> 内核判定栈溢出（v0.13）。
+/* ---- 用户地址空间布局（v0.26：槽从 8KB 扩到 32KB，栈可按需生长） ----
+ * 用户栈区 [USER_STACK_AREA_BASE, USER_STACK_AREA_END)：每进程 32KB 槽
+ *   = [守卫页 4KB（不映射，槽底硬底，永不映射） | 可生长栈区 28KB（初始仅顶页映射）]
+ * 栈从槽顶向下增长：ESP 下溢到"当前栈页下方 1 页"即命中守卫页 -> 页错误 ->
+ * 内核判 STACK_GROWTH（补映射一页、守卫页随之下移）或 STACK_BOOM（深越界，栈溢出）。
+ * 布局（v0.26 迁址）：栈区 [0x80010000, 0x80090000) -> shell 0x80090000 ->
+ * app 0x800A0000 -> 共享内存 0x800A4000（全部 < USER_SPACE_END 0x80100000）。
  * 共享内存区 [SHMEM_VBASE, +SLOTS*4K)：与 usermode.c 的 sys_shmem 严格一致，
  * 所有进程映射到同一物理帧，fork 时保持共享（不深拷贝，v0.12）。 */
 #define USER_STACK_AREA_BASE  0x80010000u
-#define USER_STACK_SLOT       0x2000u     /* 每进程栈区大小（守卫页 + 栈页） */
-#define USER_STACK_GUARD      0x1000u     /* 守卫页大小（槽内低半页） */
+#define USER_STACK_SLOT       0x8000u     /* 每进程栈区大小（守卫页 + 可生长栈区） */
+#define USER_STACK_GUARD      0x1000u     /* 守卫页大小（槽内最低一页，永不映射） */
+#define USER_STACK_PAGES      7           /* 可生长栈页数（SLOT/GUARD - 1，初始只映射 1 页） */
 #define USER_STACK_MAX_PROCS  16          /* 用户进程槽数上限（与 MAX_PROCS 一致） */
 #define USER_STACK_AREA_END   (USER_STACK_AREA_BASE + USER_STACK_MAX_PROCS * USER_STACK_SLOT)
-#define SHMEM_VBASE   0x80044000u         /* 栈区/shell/app 槽之后 */
+#define SHMEM_VBASE   0x800A4000u         /* 栈区/shell/app 槽之后 */
 #define SHMEM_SLOTS   4
 
-/* 用户态页错误时判定：fault 是否落在"pid 本进程"的用户栈守卫页（未映射陷阱页） */
-int stack_guard_hit(uint32_t fault, uint32_t pid);
+/* 用户态页错误时的"栈事件"判定（guard.c 实现，纯逻辑可宿主单测）：
+ *  - STACK_OK:     与"本进程栈"无关（fault 不在本进程槽内，或在已映射栈页内）
+ *  - STACK_GROWTH: 命中"当前守卫页"（当前栈页下方 1 页，槽内还有空间）-> 可生长
+ *  - STACK_BOOM:   深越界（越过当前守卫页再往下 / 已生长到上限）-> 栈溢出 */
+typedef enum { STACK_OK = 0, STACK_GROWTH, STACK_BOOM } stack_evt_t;
+stack_evt_t stack_guard_hit(uint32_t fault, uint32_t pid, uint32_t stack_bottom);
 
 /* 物理帧分配器：返回物理地址（4KB 对齐） */
 uint32_t frame_alloc(void);

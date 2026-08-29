@@ -586,9 +586,11 @@ void syscall_dispatch(registers_t *r) {
             for (uint32_t i = 1; i < MAX_PROCS; i++) {
                 pcb_t *c = sched_get(i);
                 if (!c || c->state != PROC_ZOMBIE || c->parent_pid != cur) continue;
-                uint32_t code = c->exit_code;
-                if (status) *status = code;      /* 当前地址空间即父进程，直接写 */
-                sched_reap(i);
+            uint32_t code = c->exit_code;
+            serial_printf("[dbg] fastpath pid=%u st=%u ppid=%u exit=%u\n",
+                          i, c->state, c->parent_pid, c->exit_code);
+            if (status) *status = code;      /* 当前地址空间即父进程，直接写 */
+            sched_reap(i);
                 serial_printf("[user] wait any -> pid=%u code=%u (reaped)\n", i, code);
                 r->eax = i;
                 return;

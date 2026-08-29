@@ -2,20 +2,71 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## \[v0.26] - 2026-08-29 · 容量三连#1：用户栈按需生长
+
+**Added**
+
+* **用户栈按需生长**（v0.26「容量三连」第一项）：每进程用户栈槽由 8KB 固定
+  （守卫页 4K + 栈页 4K）扩展为 **32KB 槽 = 槽底硬底守卫页 4K（永不映射）+ 28KB
+  可生长栈区**，栈从槽顶向下增长、初始仅映射顶页；命中守卫页时内核补映射新栈页、
+  守卫页随栈底下移，直到槽底硬底（此时深越界才判溢出）
+
+* **三态栈事件判定**（`src/kernel/guard.c` `stack_guard_hit`，纯逻辑可宿主单测）：
+  由 v0.13 二态（0/1）扩为 `STACK_OK / STACK_GROWTH / STACK_BOOM`
+
+  * `STACK_GROWTH`：fault 命中当前守卫页（= 当前栈页 `stack_bottom` 下方一页）
+    且槽内仍有生长空间 → `pf_handler` 补映射、守卫页下移，指令重试
+
+  * `STACK_BOOM`：fault 越过当前守卫页深越界，或已生长到槽底硬底仍下探 → 栈溢出
+
+  * `STACK_OK`：fault 不在本进程槽内，或落在已映射栈页内（非栈事件，走原路径）
+
+* **PCB 栈帧记账**（`src/kernel/sched.h` `pcb_t`）：`stack_frame` 单字段改为
+  `stack_frames[]` 数组 + `stack_fcount` 计数 + `stack_bottom` 最低栈页地址；
+  `sched.c` 统一经 `stack_init`（初始化槽顶/底/首页）与 `stack_free`（批量释放）
+  管理，覆盖 spawn / exec / fork / reap 全路径
+
+* **页错误栈生长处理**（`src/mm/mem.c` `pf_handler`）：用户态缺页命中
+  `STACK_GROWTH` 时分配物理帧、映射到新栈页、更新 PCB 记账并打印
+  `[stack] grow pid=… @… pages=…`，重试原指令；无帧/到硬底则转 `STACK_BOOM` 隔离终止
+
+* **地址空间重布局**：栈区上移扩为 0x80010000-0x80090000，shell 迁至 0x80090000、
+  app 槽迁至 0x800A0000、共享内存迁至 0x800A4000，避开扩展后的栈区
+
+* **`deep` 演示程序**（`src/app/deep.c`）：递归分配 1KB 局部数组 ×12 层，在 4KB
+  初始栈上触发 3 次按需生长后存活（`survived 12KB recursion via stack growth`）
+
+**Engineering**
+
+* 宿主单测 `tests/test_guard.c` 重写（34 断言）：覆盖三态边界——槽外/已映射页内
+  → OK、当前守卫页（有空间）→ GROWTH、深越界/到硬底 → BOOM、生长后守卫页下移
+
+* 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 `deep` 用例
+  （启动日志 → `[stack] grow` → 存活 → 退出码 0）
+
+* 版本横幅与 motd 更新为 v0.26；roadmap 勾选该项
+
+**Fixed**
+
+* `deep` 演示程序尾递归被 `-O2` 改写为循环、栈占用不足 4KB 不触发生长（见 BUG-024）
+
 ## \[v0.25] - 2026-08-29 · DHCP 客户端：动态获取 IP/网关（静态可配置化）
 
 **Added**
 
 * **DHCP 协议**（`src/net/dhcp.c/h` 纯逻辑，可宿主单测）：BOOTP 固定头 + 选项
   （RFC 2131/2132）
+
   * `dhcp_build_discover`：0.0.0.0:68 → 广播 255.255.255.255:67，携带参数请求列表
     （option 55: 1 子网掩码 / 3 路由器 / 51 租期），flags=0x8000 请求广播应答
+
   * `dhcp_build_request`：携带 server id(54) + 请求 IP(50)
+
   * `dhcp_parse_reply`：校验 xid / magic cookie / 消息类型(53)，提取分配 IP(yiaddr)、
     server id(54)、网关(3)、租期(51)；xid 不匹配/缺 cookie/无消息类型/过短 → 拒绝
 
-* **`e1000_dhcp_run` 开机动态取 IP**：DISCOVER → OFFER → REQUEST → ACK 四步状态机
-  （忙等超时 ~2s，不依赖 timer），NAK/超时自动重试，失败回退静态地址——
+* **`e1000_dhcp_run`** **开机动态取 IP**：DISCOVER → OFFER → REQUEST → ACK 四步状态机
+  （忙等超时 \~2s，不依赖 timer），NAK/超时自动重试，失败回退静态地址——
   静态兜底收敛为单一配置点 `NET_STATIC_IP` / `NET_STATIC_GW`（10.0.2.15 / 10.0.2.2）
 
 * **e1000 提供 IP 访问器**：`e1000_my_ip()` / `e1000_gw_ip()`；ARP / UDP / ICMP

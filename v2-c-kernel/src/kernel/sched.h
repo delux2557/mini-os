@@ -9,6 +9,7 @@
 #define _SCHED_H
 #include <stdint.h>
 #include "idt.h"
+#include "mem.h"   /* v0.26: USER_STACK_PAGES（PCB.stack_frames 长度） */
 
 #define MAX_PROCS       16
 #define PID_KERNEL_IDLE 0     /* 进程 0 固定为内核空闲进程 */
@@ -42,7 +43,12 @@ typedef struct {
     uint32_t kernel_esp;     /* 保存的中断现场指针（指向 gs 槽） */
     uint32_t kstack_top;     /* 本进程内核栈顶（写 tss.esp0 用） */
     uint32_t kstack_frame;   /* 内核栈占用的物理帧（回收用） */
-    uint32_t stack_frame;    /* 用户栈占用的物理帧（回收用） */
+    /* v0.26 用户栈按需生长：槽 32KB = 槽底守卫页（永不映射）+ 可生长栈区。
+     * stack_frames[] 记已映射栈页的物理帧（回收用，不含守卫页）；
+     * stack_bottom 为最低已映射栈页的虚拟地址（守卫页在其下 4K，随生长下移）。 */
+    uint32_t stack_frames[USER_STACK_PAGES];
+    uint32_t stack_fcount;   /* 上表有效项数 */
+    uint32_t stack_bottom;   /* 最低已映射栈页的虚拟地址（栈向下生长） */
     uint32_t entry_off;      /* 用户入口在 userprog.bin 中的偏移 */
     uint32_t user_esp_top;   /* 本进程用户栈顶（iret 帧的 esp） */
     uint32_t exit_code;

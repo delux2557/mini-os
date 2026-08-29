@@ -80,13 +80,13 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 	    print "#define USER_" toupper(sym) "_OFF 0x" substr($$1,5) }' > $@
 
 # ---- v0.9 应用：独立 ELF，链接到固定地址，整体（含 ELF 头）内嵌到内核 ----
-#  - 普通应用链接到 APP_ADDR（0x80040000，app 槽），退出即回收
-#  - shell 链接到 SHELL_ADDR（0x80030000），内核启动时加载常驻
+#  - 普通应用链接到 APP_ADDR（0x800A0000，app 槽），退出即回收
+#  - shell 链接到 SHELL_ADDR（0x80090000），内核启动时加载常驻
 #  - 注意：嵌入的是 ELF 文件本身（用 ld -r -b binary），不能用 objcopy -O binary
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
-APP_ADDR   = 0x80040000
-SHELL_ADDR = 0x80030000
-APPS       = hello echo crash isol forkdemo args stackovf fsdemo waitdemo abuse sockdemo
+APP_ADDR   = 0x800A0000
+SHELL_ADDR = 0x80090000
+APPS       = hello echo crash isol forkdemo args stackovf deep fsdemo waitdemo abuse sockdemo
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -108,6 +108,8 @@ $(BUILD)/apps/forkdemo.elf: $(BUILD)/apps/forkdemo.o $(BUILD)/apps/crt.o
 $(BUILD)/apps/args.elf: $(BUILD)/apps/args.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/stackovf.elf: $(BUILD)/apps/stackovf.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/deep.elf: $(BUILD)/apps/deep.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/fsdemo.elf: $(BUILD)/apps/fsdemo.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<

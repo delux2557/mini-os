@@ -57,7 +57,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS v0.25  (DHCP: dynamic IP via DISCOVER/OFFER/REQUEST/ACK)\n");
+    vga_puts("Micro-OS v0.26  (user stack on-demand growth: 32KB slot = guard + grow)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
