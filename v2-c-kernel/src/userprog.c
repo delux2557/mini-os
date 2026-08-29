@@ -216,13 +216,17 @@ void user_msg_c(void) {
     syscall3(SYS_EXIT, 0, 0, 0);
 }
 
-/* procMsgP：生产者。快速发送 0..19，缓冲满时阻塞，由消费者消费后唤醒。 */
+/* procMsgP：生产者。快速发送 0..19，缓冲满时阻塞，由消费者消费后唤醒。
+ * 首发前先睡 12 tick：确保消费者（先创建、先运行，但可能被抢占）在空缓冲上
+ * recv 阻塞后再开始生产，演示交错确定化（否则生产者在消费者 recv 前先 send，
+ * 消费者就不会 recv-block）。12 tick 足够轮转调度把每个就绪进程跑一遍。 */
 __attribute__((section(".text.msg")))
 void user_msg_p(void) {
     syscall3(SYS_MSG_CREATE, MSG_PIPE, 4, 0);
     sys_print("[MP] producer started, pid=");
     putdec(syscall3(SYS_GET_PID, 0, 0, 0));
     sys_print("\n");
+    syscall3(SYS_SLEEP, 12, 0, 0);       /* 等消费者先 recv 阻塞 */
     for (int i = 0; i < MSG_N; i++) {
         syscall3(SYS_MSG_SEND, MSG_PIPE, (uint32_t)i, 0);
         sys_print("[MP] sent val=");

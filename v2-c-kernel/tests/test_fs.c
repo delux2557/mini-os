@@ -72,13 +72,24 @@ int main(void) {
         for (uint32_t k = 0; k < 500; k++) CHECK_EQ((unsigned char)big[k], (unsigned char)'Y');
     }
 
-    /* 5) 写超上限：截断到最大文件大小；越界写返回 -1 */
+    /* 5) v0.14 跨入间接块 + 超上限边界 */
     int i2 = fs_create(&bd, "big.txt");
     CHECK(i2 >= 0);
-    uint32_t cap = FS_DIRECT_BLOCKS * BLOCK_SIZE;
-    CHECK_EQ(fs_write(&bd, (uint32_t)i2, buf, cap - 10, 100), 10);   /* 只写进去 10 字节 */
-    CHECK_EQ(fs_size(&bd, (uint32_t)i2), cap);
-    CHECK_EQ(fs_write(&bd, (uint32_t)i2, buf, cap, 100), -1);        /* 越界 */
+    {
+        uint32_t cap = FS_DIRECT_BLOCKS * BLOCK_SIZE;
+        char z[100];
+        memset(z, 'Z', sizeof(z));
+        CHECK_EQ(fs_write(&bd, (uint32_t)i2, z, cap - 10, 100), 100);  /* 跨入间接块 */
+        CHECK_EQ(fs_size(&bd, (uint32_t)i2), cap - 10 + 100);
+        memset(big, 0, sizeof(big));
+        CHECK_EQ(fs_read(&bd, (uint32_t)i2, big, cap - 10, 100), 100); /* 跨块界读回 */
+        for (uint32_t k = 0; k < 100; k++)
+            CHECK_EQ((unsigned char)big[k], (unsigned char)'Z');
+        CHECK_EQ(fs_write(&bd, (uint32_t)i2, buf, FS_MAX_FILE_SIZE, 1), -1);        /* 越界 */
+        /* 文件块号 1035（间接块末）：len 被截断到上限，恰写 1 字节 */
+        CHECK_EQ(fs_write(&bd, (uint32_t)i2, buf, FS_MAX_FILE_SIZE - 1, 2), 1);
+        CHECK_EQ(fs_size(&bd, (uint32_t)i2), FS_MAX_FILE_SIZE);
+    }
     CHECK_EQ(fs_delete(&bd, "big.txt"), 0);
     CHECK_EQ(fs_lookup(&bd, "big.txt"), -1);
 
@@ -86,7 +97,7 @@ int main(void) {
     int i3 = fs_create(&bd, "x.txt");
     int i4 = fs_create(&bd, "y.txt");
     CHECK(i3 >= 0 && i4 >= 0);
-    int n = fs_list(&bd, ents, FS_MAX_INODES);
+    int n = fs_list(&bd, "/", ents, FS_MAX_INODES);
     CHECK(n >= 3);
     int seen_a = 0, seen_x = 0, seen_y = 0;
     for (int k = 0; k < n; k++) {
@@ -100,6 +111,101 @@ int main(void) {
     CHECK_EQ(fs_delete(&bd, "a.txt"), 0);
     CHECK_EQ(fs_lookup(&bd, "a.txt"), -1);
     CHECK_EQ(fs_delete(&bd, "a.txt"), -1);               /* 再删报错 */
+
+    /* ---- v0.14 目录层级 ---- */
+    {
+        /* 建 /d1/d2/f.txt，写入后列出验证类型 */
+        int d1 = fs_mkdir(&bd, "/d1");
+        int d2 = fs_mkdir(&bd, "/d1/d2");
+        CHECK(d1 >= 0 && d2 >= 0);
+        CHECK_EQ(fs_mkdir(&bd, "/d1"), -1);              /* 重名 */
+        CHECK_EQ(fs_mkdir(&bd, "/none/x"), -1);          /* 父目录不存在 */
+        int f = fs_create(&bd, "/d1/../d1/d2/f.txt");    /* ".." 解析后仍指向 /d1/d2 */
+        CHECK(f >= 0);
+        CHECK_EQ(fs_write(&bd, (uint32_t)f, "hi", 0, 2), 2);
+        CHECK_EQ(fs_size(&bd, (uint32_t)f), 2);
+        CHECK(fs_lookup(&bd, "/d1/d2/f.txt") >= 0);
+        CHECK_EQ(fs_lookup(&bd, "/d1"), d1);
+        CHECK_EQ(fs_lookup(&bd, "/d1/d2"), d2);
+        CHECK_EQ(fs_lookup_in(&bd, (uint32_t)d2, "f.txt"), f);
+        CHECK_EQ(fs_lookup(&bd, "/d1/nope"), -1);
+
+        /* 非空/类型错误 */
+        CHECK_EQ(fs_rmdir(&bd, "/d1/d2"), -1);           /* 非空目录 */
+        CHECK_EQ(fs_delete(&bd, "/d1/d2"), -1);          /* 目录不可 delete */
+        CHECK_EQ(fs_rmdir(&bd, "/d1/d2/f.txt"), -1);     /* rmdir 非目录 */
+        CHECK_EQ(fs_mkdir(&bd, "/d1/d2/f.txt/x"), -1);   /* 中间组件是文件 */
+
+        /* list：类型标记（目录带 DIR） */
+        fs_dir_entry_t sub[8];
+        int sn = fs_list(&bd, "/d1/d2", sub, 8);
+        CHECK_EQ(sn, 1);
+        CHECK(strcmp(sub[0].name, "f.txt") == 0);
+        CHECK_EQ(sub[0].type, FS_TYPE_FILE);
+        int sn2 = fs_list(&bd, "/d1", sub, 8);
+        CHECK_EQ(sn2, 1);
+        CHECK(strcmp(sub[0].name, "d2") == 0);
+        CHECK_EQ(sub[0].type, FS_TYPE_DIR);
+        CHECK_EQ(fs_list(&bd, "/d1/d2/f.txt", sub, 8), -1); /* 列出文件 -> 错误 */
+
+        /* 清理 */
+        CHECK_EQ(fs_delete(&bd, "/d1/d2/f.txt"), 0);
+        CHECK_EQ(fs_rmdir(&bd, "/d1/d2"), 0);
+        CHECK_EQ(fs_rmdir(&bd, "/d1"), 0);
+        CHECK_EQ(fs_lookup(&bd, "/d1"), -1);
+
+        /* ".." 与重复斜杠、根目录 ".." 仍为根 */
+        CHECK(fs_mkdir(&bd, "/a") >= 0);
+        CHECK(fs_mkdir(&bd, "/a/b") >= 0);
+        CHECK(fs_mkdir(&bd, "/a/b/../c") >= 0);          /* 在 /a 下建 c */
+        CHECK(fs_lookup(&bd, "/a/c") >= 0);
+        CHECK_EQ(fs_lookup(&bd, "/a/b/../c"), fs_lookup(&bd, "/a/c"));
+        CHECK(fs_mkdir(&bd, "//dup") >= 0);              /* 重复斜杠建 /dup */
+        CHECK(fs_mkdir(&bd, "//dup//x") >= 0);
+        CHECK(fs_lookup(&bd, "/dup/x") >= 0);
+        CHECK(fs_mkdir(&bd, "/../root2") >= 0);          /* 根目录 .. 仍是根 */
+        CHECK(fs_lookup(&bd, "/root2") >= 0);
+        CHECK_EQ(fs_rmdir(&bd, "/a/c"), 0);
+        CHECK_EQ(fs_rmdir(&bd, "/a/b"), 0);
+        CHECK_EQ(fs_rmdir(&bd, "/a"), 0);
+        CHECK_EQ(fs_rmdir(&bd, "/dup/x"), 0);
+        CHECK_EQ(fs_rmdir(&bd, "/dup"), 0);
+        CHECK_EQ(fs_rmdir(&bd, "/root2"), 0);
+    }
+
+    /* ---- v0.14 间接块：100000 字节大文件（25 块 > 12 直接块） ---- */
+    {
+        int ib = fs_create(&bd, "/big.bin");
+        CHECK(ib >= 0);
+        uint8_t chunk[128];
+        uint32_t total = 100000;
+        uint32_t off = 0;
+        while (off < total) {
+            uint32_t n = total - off; if (n > 128) n = 128;
+            for (uint32_t k = 0; k < n; k++) chunk[k] = (uint8_t)((off + k) & 0xFF);
+            CHECK_EQ(fs_write(&bd, (uint32_t)ib, chunk, off, n), (int)n);
+            off += n;
+        }
+        CHECK_EQ(fs_size(&bd, (uint32_t)ib), total);
+        /* 抽查：偏移 0 / 直接块末 / 间接块首 / 文件末 */
+        uint32_t spots[4];
+        spots[0] = 0; spots[1] = 12 * 4096 - 1; spots[2] = 12 * 4096; spots[3] = total - 1;
+        for (int s = 0; s < 4; s++) {
+            uint8_t c = 0xAA;
+            CHECK_EQ(fs_read(&bd, (uint32_t)ib, &c, spots[s], 1), 1);
+            CHECK_EQ((unsigned)c, (unsigned)(uint8_t)(spots[s] & 0xFF));
+        }
+        /* 全量一致性：997 步长抽样读回 */
+        for (uint32_t off2 = 0; off2 < total; off2 += 997) {
+            uint32_t n = total - off2; if (n > 64) n = 64;
+            memset(big, 0, sizeof(big));
+            CHECK_EQ(fs_read(&bd, (uint32_t)ib, big, off2, n), (int)n);
+            for (uint32_t k = 0; k < n; k++)
+                CHECK_EQ((unsigned char)big[k], (unsigned char)(uint8_t)((off2 + k) & 0xFF));
+        }
+        CHECK_EQ(fs_delete(&bd, "/big.bin"), 0);
+        CHECK_EQ(fs_lookup(&bd, "/big.bin"), -1);
+    }
 
     /* 8) inode 耗尽：用完剩余 inode 后创建失败（x.txt/y.txt 已占 2 个，
      *    加上根目录共 3 个已占用，故最多再建 FS_MAX_INODES-3 个） */

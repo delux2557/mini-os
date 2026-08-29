@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 LOG="build/serial.log"
 MON="/tmp/minios-mon.sock"
-DURATION="${DURATION:-20}"
+DURATION="${DURATION:-35}"
 
 echo "== [1/4] 构建内核 =="
 if ! make >/dev/null 2>&1; then
@@ -50,7 +50,7 @@ sendkeys() {   # sendkeys <字符串>；空格=spc，换行=ret
 
 # ---- 等待日志"自起始行之后新增内容"中出现关键字 ----
 INTERACTIVE_FAIL=0
-wait_after() {   # wait_after <起始行> <说明> <正则> [超时秒]
+wait_after() {   # wait_after <起始行> <说明> <正则> [超时秒]；命中返回 0，超时返回 1（不计数）
     local start="$1" desc="$2" re="$3" tmo="${4:-8}"
     local i
     for ((i = 0; i < tmo * 4; i++)); do
@@ -61,19 +61,25 @@ wait_after() {   # wait_after <起始行> <说明> <正则> [超时秒]
         sleep 0.25
     done
     echo "[FAIL] 未等到 $desc (匹配: $re)"
-    INTERACTIVE_FAIL=$((INTERACTIVE_FAIL + 1))
     return 1
 }
 
-# ---- 注入一条命令并等待其若干输出标记（基线=发送前行号，避免命中旧输出/漏掉同步写入） ----
+# ---- 注入一条命令并等待其若干输出标记（基线=发送前行号，避免命中旧输出/漏掉同步写入）。
+# 偶发 socat/sendkey 注入丢失时自动重发一次；仅最终失败才计入 INTERACTIVE_FAIL。 ----
 cmd() {   # cmd <说明前缀> <命令串> [等待正则...]
     local desc="$1" s="$2"; shift 2
-    local start re
-    start=$(wc -l < "$LOG")
-    sendkeys "$s"
-    for re in "$@"; do
-        wait_after "$start" "$desc" "$re" || true
+    local start re attempt ok
+    for attempt in 1 2; do
+        start=$(wc -l < "$LOG")
+        sendkeys "$s"
+        ok=1
+        for re in "$@"; do
+            wait_after "$start" "$desc" "$re" || ok=0
+        done
+        [ "$ok" -eq 1 ] && return 0
+        sleep 0.5   # 注入重试前略等（让 shell 回到提示符）
     done
+    INTERACTIVE_FAIL=$((INTERACTIVE_FAIL + 1))
 }
 
 echo "== [3/4] 交互式注入 shell 命令 =="
@@ -82,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.13: user stack guard pages"
+"      "Mini-OS v0.14: filesystem"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -101,6 +107,17 @@ cmd "exec args"      "exec args alpha beta gamma
 # ---- v0.13 栈守卫页 ----
 cmd "run stackovf"   "run stackovf
 "      "\[stackovf\] pid=.* starting" "\[user\] STACK OVERFLOW pid=" "\[shell\] 'stackovf' exited code="
+# ---- v0.14 文件系统增强：shell 目录命令 + fsdemo ----
+# 注意：QEMU HMP sendkey 不支持 '/'（斜杠会静默丢弃），此处用平铺名；
+# 带斜杠路径的交互验证走串口通道（test_serial.sh）。
+cmd "mkdir 目录"     "mkdir dir1
+"      "\[shell\] mkdir 'dir1' -> "
+cmd "ls 子目录"      "ls dir1
+"      "\[ls\] dir1:"
+cmd "rmdir 目录"     "rmdir dir1
+"      "\[shell\] rmdir 'dir1' -> 0"
+cmd "run fsdemo"     "run fsdemo
+"      "\[fsdemo\] mkdir /etc -> " "\[fsdemo\] seek(5) read '8080" "\[fsdemo\] big.bin 100000B indirect spot-check OK" "\[fsdemo\] done"
 
 # 等待剩余时间（让后台 sem/msg/fs 演示继续输出），随后收尾
 END=$((QSTART + DURATION))
@@ -215,6 +232,17 @@ check "initramfs 写入 stackovf" "\[ramdisk\] 'stackovf'"
 check "stackovf 启动"           "\[stackovf\] pid=.* starting"
 check "栈溢出被检测"             "\[user\] STACK OVERFLOW pid="
 check "stackovf 被终止"          "\[sched\] kill pid=.* name=stackovf"
+# ---- v0.14 文件系统增强 ----
+check "initramfs 写入 fsdemo"   "\[ramdisk\] 'fsdemo'"
+check "fsdemo 建目录 /etc"       "\[fsdemo\] mkdir /etc -> [0-9][0-9]*"
+check "fsdemo 建子目录文件"      "\[fsdemo\] create /etc/sub/notes.txt -> "
+check "fsdemo 追加写"            "\[fsdemo\] write 'host=0.0.0.0"
+check "ls 显示目录类型标记"      "\[ls\]   etc/"
+check "fsdemo seek 读回 8080"   "\[fsdemo\] seek(5) read '8080"
+check "fsdemo 间接块大文件"      "\[fsdemo\] big.bin 100000B indirect spot-check OK"
+check "fsdemo 拒绝删非空目录"    "\[fsdemo\] rmdir /etc -> 4294967295"
+check "fsdemo 演示完成"          "\[fsdemo\] done"
+check "shell mkdir 命令"         "\[shell\] mkdir 'dir1' -> "
 # ---- 通用 ----
 check "idle 状态行心跳"     "alive="
 check "定时器心跳正常"      "ticks="

@@ -428,23 +428,23 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)ino;
         return;
     }
-    case 14: { /* sys_fs_open(slot, name, mode)：mode 0=只读 1=只写 */
+    case 14: { /* sys_fs_open(slot, name, mode)：mode 0=只读 1=只写 2=追加(v0.14) */
         if (a == 0 || a >= FS_MAX_OBJ || fs_files[a].used) { r->eax = (uint32_t)-1; return; }
         int ino = fs_lookup(fs_device(), (const char *)b);
         if (ino < 0) { r->eax = (uint32_t)-1; return; }
         fs_files[a].used  = 1;
         fs_files[a].inode = (uint32_t)ino;
-        fs_files[a].pos   = 0;
+        fs_files[a].pos   = (c == 2) ? fs_size(fs_device(), (uint32_t)ino) : 0;
         fs_files[a].mode  = c;
-        serial_printf("[fs] open slot=%u '%s' inode=%u mode=%u\n",
-                      a, (const char *)b, ino, c);
+        serial_printf("[fs] open slot=%u '%s' inode=%u mode=%u pos=%u\n",
+                      a, (const char *)b, ino, c, fs_files[a].pos);
         r->eax = 0;
         return;
     }
     case 15: { /* sys_fs_write(slot, buf, len)：从当前位置写 */
         if (a == 0 || a >= FS_MAX_OBJ || !fs_files[a].used) { r->eax = (uint32_t)-1; return; }
         fs_file_t *f = &fs_files[a];
-        if (f->mode != 1) { r->eax = (uint32_t)-1; return; }
+        if (f->mode == 0) { r->eax = (uint32_t)-1; return; }   /* 只读槽不可写 */
         int n = fs_write(fs_device(), f->inode, (const void *)b, f->pos, c);
         if (n > 0) f->pos += (uint32_t)n;
         serial_printf("[fs] write slot=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
@@ -468,22 +468,27 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
-    case 18: { /* sys_fs_ls()：打印根目录列表 */
+    case 18: { /* sys_fs_ls(path)：列出目录内容（v0.14 路径化；path 空/0=根目录） */
+        const char *path = a ? (const char *)a : "";
         fs_dir_entry_t ents[FS_MAX_INODES];
-        int n = fs_list(fs_device(), ents, FS_MAX_INODES);
-        vga_puts("[ls] /:\n");
-        serial_puts("[ls] /:\n");
+        int n = fs_list(fs_device(), path, ents, FS_MAX_INODES);
+        if (n < 0) { r->eax = (uint32_t)-1; return; }
+        vga_printf("[ls] %s:\n", path[0] ? path : "/");
+        serial_printf("[ls] %s:\n", path[0] ? path : "/");
         for (int i = 0; i < n; i++) {
             uint32_t sz = fs_size(fs_device(), ents[i].inode);
-            vga_printf("  %s (inode=%u size=%u)\n", ents[i].name, ents[i].inode, sz);
-            serial_printf("[ls]   %s inode=%u size=%u\n", ents[i].name, ents[i].inode, sz);
+            const char *mark = ents[i].type == FS_TYPE_DIR ? "/" : "";
+            vga_printf("  %s%s (inode=%u size=%u)\n", ents[i].name, mark,
+                       ents[i].inode, sz);
+            serial_printf("[ls]   %s%s inode=%u size=%u\n", ents[i].name, mark,
+                          ents[i].inode, sz);
         }
         vga_printf("[ls] %d entries\n", n);
         serial_printf("[ls] %d entries\n", n);
         r->eax = (uint32_t)n;
         return;
     }
-    case 19: { /* sys_fs_delete(name)：删除根目录文件 */
+    case 19: { /* sys_fs_delete(name)：删除文件（v0.14 支持路径；目录用 sys_fs_rmdir） */
         int rc = fs_delete(fs_device(), (const char *)a);
         serial_printf("[fs] delete '%s' rc=%d\n", (const char *)a, rc);
         r->eax = (uint32_t)rc;
@@ -515,7 +520,15 @@ void syscall_dispatch(registers_t *r) {
         if (a == 0 || a >= MAX_PROCS) { r->eax = (uint32_t)-1; return; }
         pcb_t *ch = sched_get(a);
         if (!ch || ch->state == PROC_FREE) { r->eax = (uint32_t)-1; return; }
-        if (ch->state == PROC_ZOMBIE) { r->eax = ch->exit_code; return; }  /* 已退出 */
+        if (ch->state == PROC_ZOMBIE) {
+            /* v0.14: 子进程已退出且保留为僵尸——回收其资源并返回退出码。
+             * （此前由心跳抢先回收导致 wait 返回 -1 的竞态，见 bugs.md） */
+            uint32_t code = ch->exit_code;
+            sched_reap(a);
+            serial_printf("[user] wait pid=%u -> reaped code=%u\n", a, code);
+            r->eax = code;
+            return;
+        }
         serial_printf("[user] wait pid=%u -> block\n", a);
         sched_block(r, BLOCK_WAIT, a);
         __asm__ volatile ("cli; hlt");           /* 不可达 */
@@ -597,6 +610,25 @@ void syscall_dispatch(registers_t *r) {
         }
         load_fcount = 0;
         __asm__ volatile ("cli; hlt");   /* 不可达 */
+        return;
+    }
+    case 26: { /* sys_fs_seek(slot, off)：定位读写位置，返回新位置或 -1 */
+        if (a == 0 || a >= FS_MAX_OBJ || !fs_files[a].used) { r->eax = (uint32_t)-1; return; }
+        fs_files[a].pos = b;
+        serial_printf("[fs] seek slot=%u -> pos=%u\n", a, fs_files[a].pos);
+        r->eax = fs_files[a].pos;
+        return;
+    }
+    case 27: { /* sys_fs_mkdir(path)：建目录（父目录须存在），返回 inode 或 -1 */
+        int ino = fs_mkdir(fs_device(), (const char *)a);
+        serial_printf("[fs] mkdir '%s' inode=%d\n", (const char *)a, ino);
+        r->eax = (uint32_t)ino;
+        return;
+    }
+    case 28: { /* sys_fs_rmdir(path)：删空目录（非空/非目录返回 -1） */
+        int rc = fs_rmdir(fs_device(), (const char *)a);
+        serial_printf("[fs] rmdir '%s' rc=%d\n", (const char *)a, rc);
+        r->eax = (uint32_t)rc;
         return;
     }
     default:

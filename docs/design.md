@@ -152,6 +152,38 @@ boot.s(multiboot 头 + 进入内核) → kernel_main
   - **procFSA**：create hello.txt → 写 8000 字节（跨块）→ close → 读回逐字节校验 → verify OK
   - **procFSB**：create alpha.txt/beta.txt → 写 alpha.txt → 内核 ls 打印根目录 → 完成
 
+### 文件系统增强（v0.14 核心）
+
+#### 目录层级与路径解析
+- 目录操作全部泛化为"指定目录 inode"：`fs_lookup_in(bd, dir, name)` /
+  `fs_list_dir(bd, dir, out, max)` / `dir_add / dir_remove(bd, dir, ...)`，不再写死根目录。
+- `fs_mkdir` / `fs_rmdir`：建/删目录；`fs_rmdir` 仅允许**空目录**（扫描条目，非空/非目录拒绝）。
+- 路径解析器 `fs_walk(path, &dirout, leaf, ...)`：
+  - 按 `/` 拆分组件逐级下钻；支持 `.`（当前）、`..`（父目录，用**显式目录栈**回退；
+    根目录的 `..` 仍是根）、重复/结尾斜杠。
+  - 输出 `*dirout`=叶子所在目录、`*leaf`=叶子名（路径以 `/` 结尾时为空串）。
+  - 返回叶子 inode；叶子缺失 / 中间组件不存在或非目录 / 层级过深均返回 -1，
+    **且失败路径也保证写出 leaf/dirout**（否则调用方读未初始化栈值，见 bugs.md BUG-015）。
+- `fs_create / fs_lookup / fs_delete / fs_list` 全部路径化（平铺名即根目录文件，向后兼容）。
+
+#### 间接块（inode 扩展）
+- `fs_inode_t` 增加 `indirect` 字段 + pad 对齐到 64B（仍 64 个/块）。
+- `file_block(bd, in, b, create)`：块号 `< 12` 走直接块；`>= 12` 走间接块
+  （`indirect` 指向一块存 1024 个块号，惰性分配）。单文件上限 12+1024 块 ≈ 4.1MB。
+- `fs_write` 先确保覆盖范围块已分配（`file_block(create=1)` 对新块清零），
+  `fs_read` 用 `file_block(create=0)` 按块寻址，跨块自动切块。
+- `free_inode_blocks`：删除/rmdir 时释放直接块 + 间接块指向的全部数据块 + 间接块本身。
+
+#### 偏移定位 / 追加写
+- `sys_fs_open(slot, name, mode)`：mode 0=只读 1=只写 2=**追加**（`pos=文件尾`）。
+- 新增 `sys_fs_seek(slot, off)`（SYS_FS_SEEK=26）定位读写位置；
+  `sys_fs_mkdir`(27) / `sys_fs_rmdir`(28)。
+- `sys_fs_ls(path)`：路径化并按 `type` 打印，目录带 `/` 标记；shell 新增
+  `mkdir / rmdir / rm` 命令，`ls [path]` / `cat <path>` 路径化。
+- 演示 `fsdemo`：mkdir /etc、/etc/sub → 子目录建文件 → 追加两段配置 → seek 读回校验
+  "8080" → 100000B 大文件（跨入间接块）4 处偏移抽查 → rmdir 拒绝非空 → 逐级清理。
+  输出约定：**每行单次 `sys_print`**（原子行），避免被抢占时其它进程输出拆断日志行。
+
 ## 7. 可执行程序加载与 Shell（v0.9 核心）
 
 ### 应用构建与内嵌（initramfs）
@@ -363,6 +395,10 @@ v0.12 fork/exec 已能创建任意进程，但用户栈只有 4KB 且没有任�
 | 共享页每次 sys_shmem 重映射进当前页目录 | 各进程页表不再共享后，重映射保证所有进程都能访问同一共享物理帧 |
 | 栈槽固定 8KB（守卫页 4K + 栈页 4K）、按 pid 错开 | 守卫页=未映射陷阱页实现栈下溢检测，零运行时开销；栈页仍可深拷贝/fork，槽位索引 = pid 使栈区定位 O(1) |
 | `stack_guard_hit` 抽成纯逻辑文件 guard.c | 只依赖布局常量、可宿主单测边界；pf_handler 只做"命中即 kill"的组合动作 |
+| 目录操作泛化为"指定目录 inode" + 绝对路径解析 | 目录层级是"目录即数据块集合"的自然扩展；路径解析保持单一职责（解析器只管下钻与 .. 回退） |
+| inode 直接块 + 单级间接块 | 布局简单、可穷举边界、可宿主单测；单文件 4.1MB 对演示充足；多级间接块/索引节点留待后续 |
+| 僵尸延迟回收（父进程存活时保留） | 修复 sys_wait 在"spawn 后、wait 前被心跳抢先回收"导致返回 -1 的竞态；boot/孤儿进程仍由心跳回收防泄漏 |
+| fsdemo 每行单次 sys_print（原子行） | 多进程并发输出共享串口，拆行会破坏回归关键字匹配；拼一行再打印天然原子 |
 | fork 用"立即深拷贝"而非写时复制(COW) | 教学内核聚焦 fork 语义本身；COW 需额外缺页处理 + 帧引用计数，留待后续 |
 | 共享内存区在 fork 时保持共享 | 符合共享内存语义：fork 只隔离"私有"内存，共享页父子继续互通 |
 | pid 槽位扫描重用（alloc_pid） | 并发演示（fork/isol 等）会耗尽单调递增的 next_pid；退出后复用槽位让 MAX_PROCS 够用 |

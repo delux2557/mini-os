@@ -2,6 +2,40 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## [v0.14] - 2026-08-29 · 文件系统增强：目录层级 / 间接块 / 偏移定位与追加写
+
+**Added**
+- **目录层级**：`fs_mkdir` / `fs_rmdir`（仅空目录，非空/非目录拒绝）/
+  `fs_lookup_in` / `fs_list_dir`；目录操作泛化为"指定目录 inode"，不再写死根目录
+- **路径解析器 `fs_walk`**：绝对路径 `/a/b/c`，支持 `.`、`..`（显式目录栈回退）、
+  重复/结尾斜杠；根目录的 `..` 仍是根。`fs_create/lookup/delete/list` 全部路径化
+- **间接块**：inode 增加 `indirect` 字段（存 1024 个块号的块），
+  单文件上限从 12 块(48KB) 提升到 12+1024 块 ≈ 4.1MB；`fs_read/fs_write` 支持惰性
+  分配间接块与数据块，删除时递归释放间接块及其指向的所有数据块
+- **文件偏移定位与追加写**：`sys_fs_open` mode=2 追加（pos=文件尾）、
+  新增 `sys_fs_seek(slot, off)`（SYS_FS_SEEK=26）/ `sys_fs_mkdir`(27) / `sys_fs_rmdir`(28)
+- 目录条目增加 `type` 字段；`sys_fs_ls(path)` 路径化并按类型打印（目录带 `/` 标记）
+- shell 新增命令：`mkdir <path>` / `rmdir <path>` / `rm <path>` / `ls [path]` / `cat <path>`（路径化）
+- 演示应用 `src/apps/fsdemo.c`（原子行输出）：mkdir /etc、/etc/sub → 子目录建文件 →
+  追加写两段配置 → seek 读回校验 "8080" → 100000 字节大文件（间接块）4 处偏移抽查 →
+  rmdir 拒绝非空目录 → 逐级清理
+- 宿主单测 test_fs 新增 v0.14 用例：目录层级（嵌套/类型标记/非空拒绝/.. 与 // 解析）、
+  间接块（100000B 写入/4 处抽查/997 步长全量抽样/超上限边界）——1182 → 8686 断言
+
+**Fixed**
+- BUG-014：`sys_wait` 的 spawn 后、wait 前竞态——子进程退出后被 `sched_tick` 抢先回收，
+  父进程 wait 拿到 -1 而非真实退出码（v0.12 遗留，v0.14 修复）
+- `fs_walk` 中间组件缺失时未写 leaf/dirout 导致调用方读取未初始化栈值（BUG-015）
+
+**Engineering**
+- 修复测试/演示的确定性：
+  - msg 演示生产者首发前睡 12 tick，保证消费者先 recv 阻塞（否则交错依赖时序）
+  - fsdemo 每行单次 `sys_print`（原子行），避免被抢占时其它进程输出拆断日志行
+  - QEMU HMP `sendkey` 不支持 `/`（静默丢弃）——交互注入用平铺名，路径验证走串口通道
+  - `cmd()` 偶发注入丢失时自动重发一次；DURATION 20→35s 给 fsdemo 负载留余量
+- QEMU 回归新增 v0.14 检查项：fsdemo 全流程、ls 目录类型标记、shell mkdir/rmdir
+- 串口终端回归补 `mkdir /sd1` / `ls /sd1` / `run fsdemo` / `rmdir /sd1` 用例
+
 ## [v0.13] - 2026-08-29 · 用户栈守卫页与栈溢出检测
 
 **Added**

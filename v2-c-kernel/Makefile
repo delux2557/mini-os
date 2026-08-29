@@ -76,7 +76,7 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
 APP_ADDR   = 0x80040000
 SHELL_ADDR = 0x80030000
-APPS       = hello echo crash isol forkdemo args stackovf
+APPS       = hello echo crash isol forkdemo args stackovf fsdemo
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -98,6 +98,8 @@ $(BUILD)/apps/forkdemo.elf: $(BUILD)/apps/forkdemo.o
 $(BUILD)/apps/args.elf: $(BUILD)/apps/args.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
 $(BUILD)/apps/stackovf.elf: $(BUILD)/apps/stackovf.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
+$(BUILD)/apps/fsdemo.elf: $(BUILD)/apps/fsdemo.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e app_main -o $@ $<
 $(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o
 	$(LD) -m elf_i386 -Ttext $(SHELL_ADDR) -e app_main -o $@ $<

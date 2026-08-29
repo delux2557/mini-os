@@ -47,15 +47,48 @@ static int tokenize(char *line, char *tok[], uint32_t max) {
 static void cmd_help(void) {
     sys_print("mini-os shell commands:\n");
     sys_print("  help            show this help\n");
-    sys_print("  ls              list files in ramdisk\n");
-    sys_print("  cat <file>      print file content\n");
+    sys_print("  ls [path]       list directory (default /)\n");
+    sys_print("  cat <path>      print file content\n");
+    sys_print("  mkdir <path>    create directory\n");
+    sys_print("  rmdir <path>    remove empty directory\n");
+    sys_print("  rm <path>       delete file\n");
     sys_print("  run <prog>      load and run ELF app (hello/echo/crash/isol/forkdemo)\n");
     sys_print("  exec <prog> [a] fork + exec app with argv (forkdemo/args)\n");
     sys_print("  exit            quit shell\n");
 }
 
-static void cmd_ls(void) {
-    syscall3(SYS_FS_LS, 0, 0, 0);   /* 内核直接打印目录列表 */
+static void cmd_ls(char *path) {
+    syscall3(SYS_FS_LS, (uint32_t)path, 0, 0);   /* 内核按路径打印目录列表 */
+}
+
+static void cmd_mkdir(char *path) {
+    if (!path[0]) { sys_print("usage: mkdir <path>\n"); return; }
+    int rc = (int)syscall3(SYS_FS_MKDIR, (uint32_t)path, 0, 0);
+    sys_print("[shell] mkdir '");
+    sys_print(path);
+    sys_print("' -> ");
+    user_putdec((uint32_t)rc);
+    sys_print("\n");
+}
+
+static void cmd_rmdir(char *path) {
+    if (!path[0]) { sys_print("usage: rmdir <path>\n"); return; }
+    int rc = (int)syscall3(SYS_FS_RMDIR, (uint32_t)path, 0, 0);
+    sys_print("[shell] rmdir '");
+    sys_print(path);
+    sys_print("' -> ");
+    user_putdec((uint32_t)rc);
+    sys_print("\n");
+}
+
+static void cmd_rm(char *path) {
+    if (!path[0]) { sys_print("usage: rm <path>\n"); return; }
+    int rc = (int)syscall3(SYS_FS_DELETE, (uint32_t)path, 0, 0);
+    sys_print("[shell] rm '");
+    sys_print(path);
+    sys_print("' -> ");
+    user_putdec((uint32_t)rc);
+    sys_print("\n");
 }
 
 static void cmd_cat(char *name) {
@@ -146,7 +179,7 @@ void app_main(int argc, char **argv) {
     char cmd[ARG_MAX];
     char arg[ARG_MAX];
 
-    sys_print("\n=== Mini-OS v0.12 shell ===\n");
+    sys_print("\n=== Mini-OS v0.14 shell ===\n");
     sys_print("type 'help' for commands\n");
 
     for (;;) {
@@ -159,8 +192,11 @@ void app_main(int argc, char **argv) {
         split_arg(line, arg);
 
         if (user_strcmp(cmd, "help") == 0)      cmd_help();
-        else if (user_strcmp(cmd, "ls") == 0)   cmd_ls();
+        else if (user_strcmp(cmd, "ls") == 0)   cmd_ls(arg);
         else if (user_strcmp(cmd, "cat") == 0)  cmd_cat(arg);
+        else if (user_strcmp(cmd, "mkdir") == 0) cmd_mkdir(arg);
+        else if (user_strcmp(cmd, "rmdir") == 0) cmd_rmdir(arg);
+        else if (user_strcmp(cmd, "rm") == 0)   cmd_rm(arg);
         else if (user_strcmp(cmd, "run") == 0)  cmd_run(arg);
         else if (user_strcmp(cmd, "exec") == 0) cmd_exec(arg);
         else if (user_strcmp(cmd, "exit") == 0) {

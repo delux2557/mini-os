@@ -196,6 +196,36 @@
   逐条验证后再跑通。
 - **回归**：`make test` 全绿（test_guard 15 条断言 + QEMU/串口回归 stackovf 用例）。
 
+## BUG-014 [已修复] v0.14 sys_wait 的 spawn 后、wait 前竞态：wait 返回 -1
+
+- **版本**：v0.12（引入 sys_wait/alloc_pid 后遗留），v0.14 修复
+- **现象**：shell `run hello` / `run isol` / `run forkdemo` / `exec args` 偶发打印
+  `exited code=4294967295`（-1）而非真实退出码 0；随负载增大（v0.14 加入 fsdemo）复现变频繁。
+- **根因**：`sched_tick` 心跳**无条件回收所有僵尸进程**。shell 的 `sys_spawn_file` 之后
+  紧接着 `sys_wait`，但两次系统调用之间可能发生两次定时器抢占：子进程被调度运行并退出
+  （置 ZOMBIE）→ 下一次心跳把它**回收为 FREE** → shell 的 `sys_wait` 才执行，
+  `sched_get(pid)` 看到 `PROC_FREE` 直接返回 -1（"已回收，退出码丢失"）。
+- **修复**：**僵尸延迟回收**——PCB 增加 `parent_pid`：
+  - `sched_tick` 只回收"没有父进程会 wait"的僵尸：`parent_pid==0`（boot 演示/孤儿）
+    或父进程已 FREE；父进程存活时**保留僵尸**。
+  - `sys_wait` 发现子进程 ZOMBIE 时 `sched_reap(pid)` 回收资源并返回其退出码；
+  - `terminate_current` 唤醒等待中的父进程后把该子进程置 `parent_pid=0`（退出码已交付，
+    僵尸交心跳回收），避免"父进程已唤醒、无人再 reap"的泄漏。
+- **回归**：QEMU 回归交互命令恢复严格断言 `exited code=0`，连续 8 次复跑全绿。
+
+## BUG-015 [已修复] v0.14 fs_walk 失败路径未写 leaf/dirout，调用方读未初始化栈值
+
+- **版本**：v0.14（引入路径解析器时）
+- **现象**：`fs_mkdir("/none/x")`（父目录不存在）意外返回成功并创建了一个 inode。
+- **根因**：`fs_walk` 在"中间组件不存在 / 中间组件非目录 / 层级过深"三种失败路径上
+  **直接 `return -1` 而未写 `*leaf`/`*dirout`**；调用方 `fs_make` 读到栈上未初始化的
+  `leaf[0]`（非零）误判为"叶子缺失可创建"，用垃圾 `dir`/`leaf` 执行 `dir_add`，
+  可能污染目录结构（本应返回 -1 的调用返回了成功）。
+- **修复**：`fs_walk` 的所有失败路径统一先写 `leaf[0]=0` 与 `*dirout=dir` 再返回 -1，
+  使"叶子缺失"（leaf 非空）与"非法路径"（leaf 空）可区分；`fs_lookup` 直接返回 walk 结果，
+  `fs_make`/`fs_list` 依据 leaf 是否为空判断。
+- **回归**：test_fs 新增 `/none/x` 等非法路径断言（8686 条全绿）。
+
 ## 未解决问题（观察记录）
 
 | 编号 | 现象 | 结论 |

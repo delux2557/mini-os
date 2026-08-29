@@ -170,6 +170,7 @@ int sched_spawn(uint32_t entry_off, const char *name) {
     map_page_in(p->page_dir, stk, p->stack_frame, 0x7);
 
     p->pid = pid;
+    p->parent_pid = current_pid;   /* v0.14: 记录父进程（boot 演示为 idle=0） */
     set_name(p, name);
     p->entry_off = entry_off;
     p->state = PROC_READY;
@@ -208,6 +209,7 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
     map_page_in(pd, stk, p->stack_frame, 0x7);    /* 独立用户栈页（守卫页不映射） */
 
     p->pid = pid;
+    p->parent_pid = current_pid;   /* v0.14: 记录父进程 */
     set_name(p, name);
     p->entry_off = 0;
     p->state = PROC_READY;
@@ -287,6 +289,7 @@ int sched_fork(registers_t *r) {
     ((registers_t *)faddr)->eax = 0;
 
     c->pid = pid;
+    c->parent_pid = p->pid;   /* v0.14: fork 子进程的父进程 = 当前（父）进程 */
     c->state = PROC_READY;
     set_name(c, p->name);
     c->entry_off = 0;
@@ -442,6 +445,25 @@ void sched_start(void) {
     __asm__ volatile ("cli; hlt");       /* 不可达 */
 }
 
+/* ---- 僵尸回收 ----
+ * 回收僵尸进程的内核栈/用户栈/页目录并置 FREE。父进程 sys_wait 拿到退出码后
+ * 调 sched_reap；无父进程的僵尸由 sched_tick 心跳回收。 */
+static void reap_process(uint32_t i) {
+    pcb_t *p = &procs[i];
+    frame_free(p->kstack_frame);
+    frame_free(p->stack_frame);
+    addr_space_destroy(p->page_dir);   /* v0.11: 释放进程独占页表 + 页目录 */
+    p->page_dir = 0;
+    serial_printf("[sched] reap pid=%u name=%s code=%u\n",
+                  p->pid, p->name ? p->name : "?", p->exit_code);
+    p->state = PROC_FREE;
+}
+
+void sched_reap(uint32_t pid) {
+    if (pid >= MAX_PROCS || procs[pid].state != PROC_ZOMBIE) return;
+    reap_process(pid);
+}
+
 /* 定时器心跳：唤醒到期阻塞进程 -> 回收僵尸 -> 抢占切换 */
 void sched_tick(registers_t *r) {
     for (uint32_t i = 1; i < MAX_PROCS; i++) {
@@ -456,17 +478,19 @@ void sched_tick(registers_t *r) {
             serial_printf("[sched] wake pid=%u at tick=%u\n", p->pid, (uint32_t)ticks);
         }
     }
-    /* 回收僵尸进程资源（不会回收当前运行进程） */
+    /* 回收僵尸进程资源（不会回收当前运行进程）。
+     * v0.14 延迟回收：只有"没有父进程会 wait"的僵尸才由心跳回收——
+     *   父进程为 0（boot 演示/孤儿），或父进程已 FREE。
+     * 否则保留僵尸，等父进程 sys_wait 时回收并取得退出码，
+     * 修复"spawn 后、父进程 wait 前被抢先回收"导致 wait 返回 -1 的竞态。 */
     for (uint32_t i = 1; i < MAX_PROCS; i++) {
         pcb_t *p = &procs[i];
         if (p->state != PROC_ZOMBIE) continue;
-        frame_free(p->kstack_frame);
-        frame_free(p->stack_frame);
-        addr_space_destroy(p->page_dir);   /* v0.11: 释放进程独占页表 + 页目录 */
-        p->page_dir = 0;
-        serial_printf("[sched] reap pid=%u name=%s code=%u\n",
-                      p->pid, p->name ? p->name : "?", p->exit_code);
-        p->state = PROC_FREE;
+        if (p->parent_pid != 0) {
+            pcb_t *par = &procs[p->parent_pid];
+            if (par->pid == p->parent_pid && par->state != PROC_FREE) continue;
+        }
+        reap_process(i);
     }
     /* schedule() 仅在"当前为 idle 且就绪队列为空"时返回；
      * 此时必须正常返回（不可 cli;hlt），让 iret 回到 idle 循环
@@ -560,6 +584,7 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
             sched_wake_with(q->pid, p->exit_code);
             serial_printf("[sched] wake waiter pid=%u (child %u exit code=%u)\n",
                           q->pid, p->pid, p->exit_code);
+            p->parent_pid = 0;   /* v0.14: 退出码已交付给父进程，僵尸交心跳回收 */
             break;
         }
     }

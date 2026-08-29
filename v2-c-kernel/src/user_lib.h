@@ -34,6 +34,9 @@
 #define SYS_MAP_PAGE   23   /* v0.11: 在当前进程地址空间映射一张私有页 */
 #define SYS_FORK       24   /* v0.12: 复制当前进程（地址空间深拷贝，共享内存共享） */
 #define SYS_EXEC       25   /* v0.12: 加载 ELF 替换当前进程（可传 argv） */
+#define SYS_FS_SEEK    26   /* v0.14: 定位打开文件槽的读写位置 */
+#define SYS_FS_MKDIR   27   /* v0.14: 建目录（父目录须存在） */
+#define SYS_FS_RMDIR   28   /* v0.14: 删空目录 */
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {

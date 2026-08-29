@@ -1,8 +1,8 @@
 /* mini-os/v2-c-kernel/fs.h
- * 极简文件系统（v0.8）：类 Unix 磁盘布局
+ * 极简文件系统（v0.8，v0.14 增强）：类 Unix 磁盘布局
  *   超级块 / inode 位图 / 数据块位图 / inode 表 / 数据区
- *  - 只支持根目录，文件名 <= 23 字符
- *  - 直接块映射：单文件最大 FS_DIRECT_BLOCKS * 块大小
+ *  - v0.14 起支持目录层级（绝对路径 /a/b/c、. 与 ..、重复斜杠）
+ *  - v0.14 起支持间接块：单文件 12 直接块 + 1 间接块（1024 个块号）
  *  - 纯逻辑（只依赖 blockdev），可在宿主环境单元测试（tests/test_fs.c）
  */
 #ifndef _FS_H
@@ -20,15 +20,23 @@
 #define FS_ROOT_INODE   0
 #define FS_DATA_START   4u            /* 数据块起始块号 */
 
+/* v0.14 间接块：一块存 4096/4=1024 个块号；单文件上限 12+1024 块 ≈ 4.1MB */
+#define FS_INDIRECT_BLOCKS (BLOCK_SIZE / 4u)
+#define FS_MAX_FILE_SIZE  ((FS_DIRECT_BLOCKS + FS_INDIRECT_BLOCKS) * BLOCK_SIZE)
+
 typedef struct {
     uint32_t size;
     uint16_t type;
     uint16_t links;
-    uint32_t blocks[FS_DIRECT_BLOCKS];  /* 数据块号，0=未分配 */
+    uint32_t blocks[FS_DIRECT_BLOCKS];  /* 直接数据块号，0=未分配 */
+    uint32_t indirect;                  /* v0.14 间接块号（指向存块号的块），0=无 */
+    uint32_t pad;                       /* 补齐到 64B，保持每块 64 个 inode */
 } fs_inode_t;
 
 typedef struct {
     char     name[FS_MAX_NAME];
+    uint16_t type;      /* v0.14：条目类型（FS_TYPE_FILE/DIR） */
+    uint16_t pad;
     uint32_t inode;
 } fs_dir_entry_t;
 
@@ -38,12 +46,20 @@ blockdev_t *fs_device(void);
 
 /* 格式化内存盘：写超级块、清位图、建根目录 */
 int  fs_init(blockdev_t *bd);
-int  fs_create(blockdev_t *bd, const char *name);      /* 根目录建文件，返回 inode 或 -1 */
-int  fs_lookup(blockdev_t *bd, const char *name);      /* 返回 inode 或 -1 */
-int  fs_delete(blockdev_t *bd, const char *name);      /* 0 或 -1 */
+
+/* 文件操作（name 或绝对路径，v0.14 起支持路径） */
+int  fs_create(blockdev_t *bd, const char *path);      /* 建文件，返回 inode 或 -1 */
+int  fs_lookup(blockdev_t *bd, const char *path);      /* 返回 inode 或 -1 */
+int  fs_delete(blockdev_t *bd, const char *path);      /* 删文件（目录用 fs_rmdir） */
 uint32_t fs_size(blockdev_t *bd, uint32_t inode);
 int  fs_read (blockdev_t *bd, uint32_t inode, void *buf, uint32_t off, uint32_t len);
 int  fs_write(blockdev_t *bd, uint32_t inode, const void *buf, uint32_t off, uint32_t len);
-int  fs_list (blockdev_t *bd, fs_dir_entry_t *out, uint32_t max);
+int  fs_list (blockdev_t *bd, const char *path, fs_dir_entry_t *out, uint32_t max);
+
+/* v0.14 目录层级 */
+int  fs_mkdir(blockdev_t *bd, const char *path);    /* 建目录（父目录须存在，返回 inode 或 -1） */
+int  fs_rmdir(blockdev_t *bd, const char *path);    /* 删空目录（非空/非目录返回 -1） */
+int  fs_lookup_in(blockdev_t *bd, uint32_t dir, const char *name);  /* 在指定目录查条目 */
+int  fs_list_dir(blockdev_t *bd, uint32_t dir, fs_dir_entry_t *out, uint32_t max);
 
 #endif

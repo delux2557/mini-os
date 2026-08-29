@@ -33,6 +33,8 @@ typedef enum {
 
 typedef struct {
     uint32_t pid;
+    uint32_t parent_pid;     /* v0.14: 父进程 pid（0=无父进程/boot 演示，僵尸由心跳回收；
+                                否则父进程存活时保留僵尸，等父进程 sys_wait 回收并取退出码） */
     pstate_t state;
     const char *name;
     char name_buf[16];     /* v0.11: 进程名拷贝到内核内存（父进程字符串在其地址空间，
@@ -88,6 +90,9 @@ void sched_wake_with(uint32_t pid, uint32_t eax); /* 唤醒并指定其系统调
 void sched_wake_keyboard(void);                   /* v0.9: 键盘行完成时唤醒 readline 等待者 */
 void sched_exit(registers_t *r, uint32_t code);    /* 正常退出当前进程（不返回） */
 void sched_kill(registers_t *r, uint32_t code);    /* 故障终止当前进程（不返回） */
+/* v0.14: 立即回收指定僵尸进程的资源并置 FREE（父进程 sys_wait 时调用）。
+ * 普通退出仍由 sched_tick 心跳回收；本函数供 wait 路径"拿到退出码后及时释放"。 */
+void sched_reap(uint32_t pid);
 
 uint32_t sched_current_pid(void);
 pcb_t   *sched_get(uint32_t pid);
