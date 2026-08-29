@@ -1,0 +1,15 @@
+# 构建产物
+v2-c-kernel/build/
+v2-c-kernel/tests/build/
+
+# 运行日志
+*.log
+
+# 历史版本的二进制产物（v1-floppy 已冻结，可保留；若不想入库可取消注释）
+# v1-floppy/*.bin
+# v1-floppy/*.img
+
+# 常见编辑器/系统文件
+.DS_Store
+*.swp
+*~
