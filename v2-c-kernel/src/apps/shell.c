@@ -227,7 +227,7 @@ void app_main(int argc, char **argv) {
     char cmd[ARG_MAX];
     char arg[ARG_MAX];
 
-    sys_print("\n=== Mini-OS v0.15 shell ===\n");
+    sys_print("\n=== Mini-OS v0.18 shell ===\n");
     sys_print("type 'help' for commands\n");
 
     for (;;) {

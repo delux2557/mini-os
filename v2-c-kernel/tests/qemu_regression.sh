@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.17: syscall boundary"
+"      "Mini-OS v0.18: e1000 NIC + ARP"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo

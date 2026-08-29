@@ -263,6 +263,61 @@
 - **回归**：serial/qemu 回归 shell 提示符、`run hello`、`exec args` argv 校验全部通过。
 - **教训**：更换入口约定时，必须核对"新入口会读哪些栈上参数、这些地址是否已映射"。
 
+## BUG-018 [已修复] v0.18 e1000 TX 轮询被编译器优化掉（描述符环非 volatile）
+
+- **版本**：v0.18（e1000 驱动开发期）
+- **现象**：`e1000_tx` 填好描述符、写 TDT 后，轮询描述符 `status.DD` 3M 次总超时
+  返回 -1；pcap（filter-dump）只有 24 字节头部、**没有任何包发出**。
+- **排查**：反汇编发现等待循环被优化成**单次判断**（`testb $0x1; jne` 后直接 ret）——
+  编译器把 `d->status` 的读取当循环不变量提升到循环外。因为 `tx_ring` 是普通数组，
+  编译器"看不到"设备会异步改写 status，认为循环内读值不变，直接摊平。
+- **根因**：描述符环（设备 DMA 写 status/DD 位）**必须 volatile**，否则 GCC -O2 会把
+  轮询读提升/缓存，等待循环形同虚设。
+- **修复**：
+  1. `rx_ring/tx_ring` 声明为 `volatile`；
+  2. **关键**：局部指针也要带 volatile——`struct e1000_tx_desc *d = &tx_ring[idx]`
+     取地址会**丢弃 volatile 限定符**（`volatile struct*` → `struct*`），`d->status`
+     又变回普通读，循环再次被优化。改为 `volatile struct e1000_tx_desc *d` 后才真正恢复。
+- **回归**：pcap 出现完整 ARP 请求/回复；`make test-net` 通过。
+- **教训**：轮询 DMA 完成位时，**数组和取地址后的指针都要 volatile**；用 objdump
+  核对关键轮询循环是否真的在循环体内重读内存。
+
+---
+
+## BUG-019 [已修复] v0.18 e1000 TCTL/RCTL 使能位写错（EN 是 bit1 不是 bit0）
+
+- **版本**：v0.18（e1000 驱动开发期）
+- **现象**：volatile 修复后 TX 仍超时：`TDH=0 TDT=1 TCTL=9 TPT=0`——QEMU 收到了 TDT=1
+  （读回正确）但**从未处理描述符**（TDH 不动、TPT 不增），pcap 依旧无包。
+- **根因**：驱动里 `TCTL_EN = 1u<<0`、`RCTL_EN = 1u<<0`，但 **e1000 的使能位是 bit1**：
+  - QEMU 定义 `E1000_TCTL_EN = 0x00000002`、`E1000_RCTL_EN = 0x00000002`
+  - 我们写出的 `TCTL = EN(0x1)|PSP(0x8) = 0x9`，bit1=0 → QEMU `start_xmit` 第一行
+    `if (!(TCTL & EN)) return;` 判定 **TX 未使能**，直接返回，TDH 恒 0。
+- **修复**：`TCTL_EN = 1u<<1`、`RCTL_EN = 1u<<1`（对齐 Intel 手册与 QEMU 定义）。
+- **回归**：ARP 请求发出、SLIRP 回复收到，自检通过；`make test-net` 全绿。
+- **教训**：寄存器使能位务必对照手册/模拟器定义，不要凭"通常从 bit0 起"猜测；
+  TDH 不动 + TPT=0 是"设备根本没使能"的典型信号。
+
+---
+
+## BUG-020 [已修复] v0.18 QEMU 特例：RCTL 触发 1000ms 收包排队窗口
+
+- **版本**：v0.18（e1000 驱动开发期；**QEMU 模拟器行为**，非真实硬件缺陷）
+- **现象**：TX 打通后自检仍要**重发 4~5 次**才收到 ARP 回复；pcap 显示 5 个请求都有回复，
+  但驱动前 4 次轮询期间 RX 环里**一个包都没有**。
+- **根因**：QEMU e1000 的 `set_rx_control`（写 RCTL）会
+  `timer_mod(flush_queue_timer, now+1000ms)`；而 `e1000_can_receive` 与
+  `e1000_receive_iov` 都检查 `!timer_pending(flush_queue_timer)`——**写 RCTL 后 1000ms 内
+  收到的包被排队、不进 RX 环**，直到 flush 定时器到期才批量写入。驱动自检恰好在
+  使能 RX 后立即收发，头 1 秒自然什么都收不到。
+- **修复**：`e1000_init` 末尾等 flush 窗口过期（300M 次 volatile 空转）再返回；
+  自检重试循环（5 次）仍保留兜底。
+- **回归**：自检**一次**通过（`selftest: rx ARP reply` 出现在 attempt=0）；`make test-net` 全绿。
+- **教训**：模拟器行为可能与真机不同（真实 82540EM 无此 1 秒排队窗口）；
+  跨模拟器/真机调试时，先确认"包是否真的进了驱动可见的队列"，再怀疑驱动收发逻辑。
+
+---
+
 ## 未解决问题（观察记录）
 
 | 编号 | 现象 | 结论 |

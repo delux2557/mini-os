@@ -26,6 +26,7 @@ $(shell mkdir -p $(BUILD) $(BUILD)/apps)
 OBJS = $(addprefix $(BUILD)/, \
        boot.o kernel.o vga.o serial.o idt.o isr.o timer.o kb.o mem.o guard.o heap.o \
        usermode.o sched.o sched_policy.o sem.o msg.o blockdev.o fs.o elf.o userptr.o \
+       pci.o e1000.o netutil.o \
        ata.o storage.o userprog_bin.o) \
        $(APP_ELFOBJS) $(SHELL_ELFOBJ)
 
@@ -141,10 +142,14 @@ test-serial:
 test-persist:
 	bash tests/test_persist.sh
 
+# QEMU 网络回归：e1000 驱动 + ARP 与 SLIRP 网关端到端互通（串口日志 + pcap 独立核验）
+test-net:
+	bash tests/test_net.sh
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist
+test: test-host test-qemu test-serial test-persist test-net
 
 clean:
 	rm -rf build tests/build
 
-.PHONY: run run-serial test test-host test-qemu test-serial clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net clean

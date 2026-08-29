@@ -24,6 +24,7 @@
 | v0.15 | 补全 wait 语义与孤儿清理 | `sys_wait(pid,*status)` 升级经典 wait/waitpid（`pid=-1` 等任意子进程、返回 pid、退出码走 status 出参、只回收自己的子进程）；父进程退出时子进程孤儿化（防 pid 槽复用后的孤儿泄漏）；`waitdemo` 演示（fork 3 子不同退出码，`wait(-1)` 依次回收 + verify + 无子返回 -1）；shell run/exec 适配；`exec <不存在程序>` 失败反馈用例 |
 | v0.16 | 用户态 CRT 收口 + ATA 真盘持久化 + 单行自检 | ① CRT 收口：ELF 入口改为 `_start`（app_main 返回即 `sys_exit(0)`），根治 fsdemo 类"忘写 sys_exit 栈顶 ret 崩溃"（BUG-016，guard.c 同时改为按 pid 判定守卫页）；② ATA PIO 驱动（LBA28 轮询）+ 存储子系统：真盘整盘读入 ramdisk、magic 有效即挂载（用户数据跨重启存活）、`save` 命令全量写回；③ shell `selftest` 单行结构化自检（`[selftest] PASS (5 checks)`）；回归升级四层（+`tests/test_persist.sh` 两次 QEMU 共享镜像验证持久化） |
 | v0.17 | syscall 边界校验（copyin/copyout） | `userptr.c/h` 校验层（`user_ptr_valid`/`copyin`/`copyout`/`copyin_str`，纯逻辑可宿主单测）；全部涉用户指针的 syscall（print/readline/spawn/wait/exec/FS 全链路）先校验再使用；`abuse` 演示应用（内核低地址/回绕地址全部被拒、合法路径正常）；宿主单测 test_userptr + serial/qemu 双通道 `run abuse` 回归 |
+| v0.18 | 网络：e1000 + 极简协议栈 | PCI type-1 配置空间（枚举 + BAR 自分配 + MEM/BUSMASTER）；e1000 驱动（MMIO + 描述符环轮询收发 + ARP 自检）；极简以太网/ARP 帧（netutil 纯逻辑 44 断言）；QEMU 与 SLIRP 网关端到端 ARP 交换 + pcap 独立核验；回归升级五层（+`make test-net`） |
 
 ## 下一步规划
 
@@ -35,9 +36,12 @@
 - ~~补全 fork/exec 的 wait 语义（wait/waitpid、孤儿清理）~~ ✅ v0.15 已完成
 - ~~用户态 CRT 收口（app_main 返回即 exit）+ ATA 真盘持久化 + 单行自检~~ ✅ v0.16 已完成
 - ~~syscall 边界校验（copyin/copyout）~~ ✅ v0.17 已完成
+- ~~网络：e1000 驱动 + 极简协议栈（ARP，QEMU/SLIRP 端到端）~~ ✅ v0.18 已完成
 - 候选下一步（按价值排序）：
-  - 网络：NIC 驱动（e1000）+ 极简协议栈（TCP/IP 或先 UDP）
-  - 真实硬件引导（GRUB/ISO）——串口终端（v0.10）已就绪，届时可直接在真机串口上交互调试
+  - **网络加厚**：极简 IP/UDP（纯逻辑可宿主单测）→ 用户态 socket 式 syscall → 经 SLIRP
+    `-hostfwd` 打通到宿主 UDP 回环验证；TCP 状态机暂缓（复杂度高，非"最小可演进"核心）
+  - 真实硬件引导（GRUB/ISO）——串口终端（v0.10）已就绪，届时可直接在真机串口上交互调试；
+    注意真机网卡/磁盘与模拟器不同（非 82540EM / 多为 AHCI），网络与持久化验证以模拟器为准
   - 可选：多级间接块/索引节点、mmap/写时复制(COW) fork、信号与信号处理、进程槽扩容
 
 ### 支线 B：为移植 ARM 预留架构（HAL 抽象层）
@@ -49,8 +53,9 @@
 - 风险提示：这是较大重构，**届时必须在独立分支上做**（如 `git switch -c feature/hal`），
   HAL 落地 + 回归全绿后再合并回主线，避免破坏 x86 主线可运行状态
 
-> 建议顺序：先按支线 A 把 x86 内核做扎实（v0.16 ATA 持久化 + CRT 收口已完成，
-> 建议继续 v0.17 syscall 边界校验，再考虑网络），
+> 建议顺序：继续按支线 A 把 x86 内核做扎实（v0.16 ATA 持久化 + CRT 收口、v0.17 syscall 边界校验、
+> v0.18 e1000 + ARP 网络已先后完成），下一步优先"极简 IP/UDP + 用户态 socket"把网络做成可用的
+> 用户能力，再考虑真机 GRUB/ISO 冒烟（以模拟器验证驱动为准）。
 > 等 x86 特性攒够、且真有 ARM 目标时再启动 HAL 重构——因为独立地址空间已牵动页表/切换，
 > 届时抽象 HAL 收益最大、返工最少。HAL 属破坏性重构，需开分支。
 

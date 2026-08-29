@@ -12,6 +12,7 @@
 #include "sched.h"
 #include "storage.h"
 #include "ata.h"
+#include "e1000.h"
 #include "userprog_offsets.h"
 #include <stdint.h>
 
@@ -56,7 +57,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS v0.17  (syscall boundary check / copyin-copyout)\n");
+    vga_puts("Micro-OS v0.18  (e1000 NIC + minimal ARP stack)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
@@ -81,6 +82,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
 
     ata_init();       /* v0.16：探测 IDE 真盘（无盘则纯内存盘） */
     storage_init();   /* v0.16：ramdisk + 真盘加载/格式化 + initramfs */
+    e1000_init();     /* v0.18：PCI + e1000 网卡（无网卡则跳过） */
+    e1000_selftest(); /* v0.18：ARP 请求/应答自检（验证 TX+RX） */
 
     timer_init(100);      /* 100 Hz 心跳 */
     kb_init();

@@ -42,6 +42,7 @@ run_test test_fs    "src/blockdev.c src/fs.c tests/test_fs.c"
 run_test test_elf   "src/elf.c tests/test_elf.c"
 run_test test_guard "src/guard.c tests/test_guard.c"
 run_test test_userptr "src/userptr.c tests/test_userptr.c"
+run_test test_netutil "src/netutil.c tests/test_netutil.c"
 
 echo
 echo "宿主测试汇总: pass=$PASS fail=$FAIL"

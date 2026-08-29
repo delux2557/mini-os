@@ -2,6 +2,46 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## [v0.18] - 2026-08-29 · e1000 网卡驱动 + 极简网络栈（PCI/ARP）
+
+**Added**
+- **PCI type-1 配置空间访问**（`src/pci.c/h`）：`pci_config_read/write`（端口 0xCF8/0xCFC）、
+  `pci_find(vendor, device)` 扫描总线 0 找到网卡、`pci_bar_alloc_mem`——探测 BAR 大小
+  （全 1 写回再读）、在 PCI MMIO 洞（0xFEB00000 起）分配地址并写回、使能 MEM|BUSMASTER
+  （QEMU `-kernel` 不经 SeaBIOS，BAR 须驱动自分配）
+- **e1000 驱动**（`src/e1000.c/h`，Intel 82540EM / QEMU 默认网卡）：
+  - MMIO BAR0 恒等映射进内核页目录；软复位（CTRL.RST）→ 强制链路（CTRL.SLU）→ 轮询 STATUS.LU
+  - MAC 从 RAL0/RAH0 读取；legacy 16B 描述符环（RX16/TX8），轮询收发（无中断/DMA 中断）
+  - `e1000_tx`：填描述符（EOP|IFCS|RS 等）→ 写 TDT 触发 → 轮询 status.DD 确认发送完成
+  - `e1000_rx`：轮询当前描述符 DD → 拷贝缓冲 → 归还 RDT
+  - 启动自检 `e1000_selftest()`：发 ARP 请求（who has 10.0.2.2）→ 收 SLIRP 网关回复，
+    端到端验证 TX+RX；配合 QEMU `filter-dump` pcap 独立核验线上包
+- **极简以太网/ARP 帧**（`src/netutil.c/h`，纯逻辑可宿主单测）：
+  `net_build_arp_request`（广播帧构建）/ `net_eth_type` / `net_parse_arp_reply`
+- kernel.c 接入：`e1000_init()` + `e1000_selftest()`（无网卡自动跳过，真机/无网环境不受影响）
+
+**Fixed**
+- BUG-018：`e1000_tx` 等待 DD 位 3M 次轮询总超时、pcap 无包——**描述符环非 volatile，
+  GCC -O2 把 status 读提升到循环外**，轮询循环被优化成单次判断直接返回 -1；
+  `tx_ring/rx_ring` 声明 volatile 且局部指针 `d` 带 volatile（仅数组 volatile 而指针
+  丢弃限定符仍会复发）后恢复（见 bugs.md）
+- BUG-019：TCTL/RCTL 的 **EN 位是 bit1（0x2）不是 bit0（0x1）**——`TCTL_EN=1` 写出的
+  TCTL=0x9 的 bit1=0，QEMU `start_xmit` 判定"TX 未使能"直接返回（TDH 恒 0、TPT=0、pcap 空）。
+  对齐 Intel 手册与 QEMU 定义（`E1000_TCTL_EN=0x2`）后 TX/RX 打通
+- BUG-020：QEMU 特例——写 RCTL 会启动 1000ms 的 `flush_queue_timer`，期间收到的包
+  被排队、不进 RX 环，自检前 1 秒轮询什么都收不到（多次重发才偶中）。e1000_init 末尾
+  等 flush 窗口过期再收发，自检一次通过（重试循环仍兜底）
+
+**Engineering**
+- 宿主单测 `tests/test_netutil.c`（44 条断言）：ARP 请求构建（广播/字段/长度）、
+  ethertype 提取、ARP 回复解析（op/sha/spa）、畸形帧拒绝——纯逻辑与硬件解耦
+- 回归升级为**四层 + 网络**：新增 `make test-net`（`tests/test_net.sh`）——
+  QEMU `-device e1000` + SLIRP + `filter-dump` pcap；校验串口日志里程碑
+  （e1000 探测+链路 / ARP 请求 / 收到 SLIRP 回复），并用 python 解析 pcap
+  独立核验线上确有 ARP 双向交换（req≥1 且 reply≥1）
+- 版本横幅与 motd 更新为 v0.18；Makefile 接入 `pci.o`/`e1000.o`/`netutil.o` 与 `test-net`
+- 全量回归（宿主 + qemu + serial + persist + net）五层全绿
+
 ## [v0.17] - 2026-08-29 · syscall 边界校验（copyin/copyout）
 
 **Added**

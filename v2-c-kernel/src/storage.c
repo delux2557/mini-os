@@ -85,7 +85,7 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
 
 static void initramfs_setup(void) {
     static const char motd[] =
-        "Mini-OS v0.17: syscall boundary check (copyin/copyout). Try: run abuse\n"
+        "Mini-OS v0.18: e1000 NIC + ARP. Try: run abuse\n"
         "Commands: help ls cat mkdir rmdir rm run exec save selftest exit\n";
     initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
     initramfs_file("hello",
