@@ -86,7 +86,7 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
 
 static void initramfs_setup(void) {
     static const char motd[] =
-        "Mini-OS v0.24: UDP checksum verified on rx. Try: run abuse\n"
+        "Mini-OS v0.25: DHCP gets dynamic IP/gateway. Try: run abuse\n"
         "Commands: help ls cat mkdir rmdir rm run exec save selftest exit netping\n";
     initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
     initramfs_file("hello",

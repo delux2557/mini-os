@@ -174,6 +174,76 @@ static void print_ip(uint32_t ip) {
                   (unsigned)(ip >> 8), (unsigned)ip);
 }
 
+/* v0.25 DHCP 客户端：DISCOVER->OFFER->REQUEST->ACK 从 SLIRP DHCP 服务器动态获取
+ * IP/网关；失败回退静态地址（NET_STATIC_IP/NET_STATIC_GW）。
+ * 须在 timer_init 之前调用（本函数用忙等计时，不依赖 ticks）。
+ * 轮询 RX：slirp 对 flags=0x8000 的广播请求回广播应答，e1000 RX 已开广播接收。 */
+void e1000_dhcp_run(void) {
+    if (!ready) { serial_puts("[dhcp] skipped (e1000 not ready)\n"); return; }
+    uint32_t xid = 0x4D484350u | (uint32_t)mac[5];   /* 事务 ID（"MHCP"+MAC 末字节，非零即可） */
+    uint8_t frame[512];
+    int state = 0;                       /* 0:DISCOVER 1:REQUEST */
+    uint32_t server_ip = 0, req_ip = 0;
+    serial_puts("[dhcp] running...\n");
+
+    for (int attempt = 0; attempt < 4; attempt++) {   /* 至多 4 轮收发（含超时重试） */
+        /* 1) 按当前状态发一帧 */
+        uint32_t flen = (state == 0)
+            ? dhcp_build_discover(frame, mac, xid)
+            : dhcp_build_request(frame, mac, xid, server_ip, req_ip);
+        if (e1000_tx(frame, flen) < 0) { serial_puts("[dhcp] tx fail\n"); return; }
+        serial_puts(state == 0 ? "[dhcp] sent DISCOVER\n" : "[dhcp] sent REQUEST\n");
+
+        /* 2) 等应答：16 轮 x 忙等 ~125ms ≈ 2s 窗口 */
+        int got = 0;
+        for (int round = 0; round < 16 && !got; round++) {
+            for (int i = 0; i < 6000; i++) {
+                uint8_t rxb[1600]; uint32_t rlen = 0;
+                if (e1000_rx(rxb, sizeof(rxb), &rlen) == 1) {
+                    uint32_t sip = 0; uint16_t sp = 0, dp = 0;
+                    const uint8_t *pay = 0; uint32_t plen = 0;
+                    if (udp_parse(rxb, rlen, &sip, &sp, &dp, &pay, &plen) != 0 ||
+                        sp != DHCP_SERVER_PORT || dp != DHCP_CLIENT_PORT)
+                        continue;                        /* 只收 DHCP 67->68 */
+                    uint8_t mt = 0; uint32_t yi = 0, si = 0, rt = 0, ls = 0;
+                    if (dhcp_parse_reply(pay, plen, xid, &mt, &yi, &si, &rt, &ls) != 0)
+                        continue;                        /* 非本事务的应答 */
+                    if (mt == DHCP_MSG_OFFER) {
+                        serial_puts("[dhcp] OFFER: ip ");
+                        print_ip(yi);
+                        serial_puts(", gw ");
+                        print_ip(rt);
+                        serial_printf(", lease %us\n", (unsigned)ls);
+                        server_ip = si;
+                        req_ip = yi;
+                        state = 1;                       /* 下一轮发 REQUEST */
+                        got = 1;
+                    } else if (mt == DHCP_MSG_ACK) {
+                        my_ip = yi;
+                        gw_ip = rt;
+                        serial_puts("[dhcp] ACK: ip ");
+                        print_ip(my_ip);
+                        serial_puts(", gw ");
+                        print_ip(gw_ip);
+                        serial_printf(", lease %us\n", (unsigned)ls);
+                        return;                          /* DHCP 成功 */
+                    } else if (mt == DHCP_MSG_NAK) {
+                        serial_puts("[dhcp] NAK received\n");
+                        state = 0;                       /* 回到 DISCOVER 重来 */
+                    }
+                }
+                for (volatile uint32_t d = 0; d < 1000; d++) ;
+            }
+        }
+        if (!got && state == 1) state = 0;               /* REQUEST 超时则从 DISCOVER 重来 */
+    }
+    serial_puts("[dhcp] failed, falling back to static ");
+    print_ip(my_ip);
+    serial_puts(" / ");
+    print_ip(gw_ip);
+    serial_puts("\n");
+}
+
 int e1000_tx(const uint8_t *data, uint32_t len) {
     if (!ready || len == 0 || len > BUF_SIZE) return -1;
     uint32_t idx = tx_cur % TX_N;
@@ -216,8 +286,8 @@ int e1000_rx(uint8_t *buf, uint32_t max, uint32_t *len) {
 
 void e1000_selftest(void) {
     if (!ready) { serial_puts("[net] selftest skipped (no e1000)\n"); return; }
-    uint32_t my_ip  = 0x0A00020Fu;   /* 10.0.2.15 (SLIRP 分配给客户机的地址) */
-    uint32_t gw_ip  = 0x0A000202u;   /* 10.0.2.2  (SLIRP 的 DNS/主机别名) */
+    uint32_t my_ip = e1000_my_ip();   /* v0.25：DHCP 学得或静态兜底 */
+    uint32_t gw_ip = e1000_gw_ip();
     uint8_t frame[64];
     for (int attempt = 0; attempt < 5; attempt++) {
         int flen = net_build_arp_request(frame, mac, my_ip, gw_ip);
@@ -246,8 +316,8 @@ void e1000_selftest(void) {
 
 void e1000_udp_selftest(void) {
     if (!ready || !gw_known) { serial_puts("[net] udp selftest skipped (no gw)\n"); return; }
-    uint32_t my_ip = 0x0A00020Fu;    /* 10.0.2.15 */
-    uint32_t gw_ip = 0x0A000202u;    /* 10.0.2.2  -> 宿主 127.0.0.1（SLIRP 别名） */
+    uint32_t my_ip = e1000_my_ip();   /* v0.25：DHCP 学得或静态兜底 */
+    uint32_t gw_ip = e1000_gw_ip();   /* 10.0.2.2 -> 宿主 127.0.0.1（SLIRP 别名） */
     uint8_t frame[BUF_SIZE];
     /* 向宿主 UDP echo 服务（127.0.0.1:7777）发 PING；echo server 回 PONG+原载荷 */
     int flen = udp_build_frame(frame, gw_mac, mac, my_ip, gw_ip, 7777, 7777,
@@ -279,8 +349,8 @@ void e1000_udp_selftest(void) {
 
 void e1000_icmp_selftest(void) {
     if (!ready || !gw_known) { serial_puts("[net] icmp selftest skipped (no gw)\n"); return; }
-    uint32_t my_ip = 0x0A00020Fu;    /* 10.0.2.15 */
-    uint32_t gw_ip = 0x0A000202u;    /* 10.0.2.2  SLIRP 网关（内置 ICMP 回显） */
+    uint32_t my_ip = e1000_my_ip();   /* v0.25：DHCP 学得或静态兜底 */
+    uint32_t gw_ip = e1000_gw_ip();   /* SLIRP 网关（内置 ICMP 回显） */
     uint8_t frame[BUF_SIZE];
     /* 发 Echo 请求（id=0x4242, seq=1, 载荷 "PING"）；SLIRP 回 Echo 应答（type=0） */
     int flen = icmp_build_frame(frame, gw_mac, mac, my_ip, gw_ip,

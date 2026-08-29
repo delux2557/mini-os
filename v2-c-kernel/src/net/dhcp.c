@@ -5,7 +5,6 @@
  * 帧由 udp_build_frame 组装（0.0.0.0:68 -> 255.255.255.255:67，广播 MAC）。 */
 #include "dhcp.h"
 #include "udp.h"
-#include <string.h>
 
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
 static void put32(uint8_t *p, uint32_t v) {
@@ -20,7 +19,7 @@ static uint32_t get32(const uint8_t *p) {
 /* 构建 BOOTP 报文（固定头 + 选项），返回总长 */
 static uint32_t build_bootp(uint8_t *bootp, const uint8_t *mac, uint32_t xid,
                             uint8_t msg_type, uint32_t server_ip, uint32_t req_ip) {
-    memset(bootp, 0, 240);
+    for (int i = 0; i < 240; i++) bootp[i] = 0;   /* 固定头 + cookie 清零 */
     bootp[0] = 1;                 /* op = BOOTREQUEST */
     bootp[1] = 1;                 /* htype = Ethernet */
     bootp[2] = 6;                 /* hlen = MAC 6B */

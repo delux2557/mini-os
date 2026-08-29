@@ -31,6 +31,7 @@
 | v0.22 | 网络交互化：shell `netping` 命令      | shell 内建 `netping [ip] [port]`（默认 10.0.2.2:7777）：开 UDP socket 发 PING、轮询收 PONG，单行原子打印 `[netping] <ip>:<port> PONG +<N>B rtt=<T> ticks`（IP 大端序正确显示）；把"演示程序"升级为"交互命令"，agent 可在会话中一键验证网络连通性；test\_net 六层 + HMP sendkey 交互注入 netping 断言（pcap UDP 4→6）                                                                                                   |
 | v0.23 | ICMP Echo：PING 通宿主                | `net/icmp.c/h` 纯逻辑（Ethernet+IPv4+ICMP Echo 请求/应答，校验和只覆盖 ICMP 报文 RFC 792、无伪头）+ 宿主单测 test\_icmp（22 断言）；`e1000_icmp_selftest` 开机自检：发 Echo 请求到 SLIRP 网关 10.0.2.2，收其回显应答（`[icmp] echo reply from 10.0.2.2 OK (rtt=N ticks)`）；test\_net 串口断言 + pcap 独立核验 IPv4/ICMP 双向 ≥2；补上"ping 即网络活"的经典语义 |
 | v0.24 | UDP 校验和错误路径                    | `udp_parse` 接收端校验 UDP 校验和（RFC 768：伪头+UDP 头+载荷重算须折叠为 0），坏包一律拒绝、netsock 分发据此静默丢包；校验和字段 0 = 发送端未计算 → 接受，发送端算得 0 以 0xFFFF 发送（两者不混淆）；宿主单测 test\_udp 追加 6 条（24→30，载荷/校验和字段/伪头 srcIP 篡改全拒、=0 接受）；test\_net 全绿（真实 SLIRP PONG 校验和有效不受影响）             |
+| v0.25 | DHCP 客户端：动态获取 IP/网关             | `net/dhcp.c/h` 纯逻辑（BOOTP 固定头+选项，RFC 2131/2132）+ 宿主单测 test\_dhcp（38 断言）；`e1000_dhcp_run` 开机四步状态机（DISCOVER→OFFER→REQUEST→ACK，忙等超时 ~2s、NAK/超时重试），失败回退静态——静态兜底收敛为单一配置点 `NET_STATIC_IP`/`NET_STATIC_GW`；`e1000_my_ip()`/`e1000_gw_ip()` 访问器，ARP/UDP/ICMP 三自检改取动态 IP；test\_net 新增 DHCP 四项断言全绿                                     |
 
 ## 下一步规划
 
@@ -62,9 +63,11 @@
 
 * ~~UDP 校验和错误路径~~ ✅ v0.24 已完成
 
+* ~~DHCP 静态 IP 可配置化（动态获取，失败回退单一静态配置点）~~ ✅ v0.25 已完成
+
 * 候选下一步（按价值排序）：
 
-  * **网络进一步可用化**：DHCP 静态 IP 可配置化；
+  * **网络进一步可用化**：DHCP 租期续约（T1/T2 定时 renew）；
     TCP 状态机暂缓（复杂度高，非"最小可演进"核心）
 
   * 真实硬件引导（GRUB/ISO）——串口终端（v0.10）已就绪，届时可直接在真机串口上交互调试；
@@ -88,9 +91,10 @@
 
 > 建议顺序：继续按支线 A 把 x86 内核做扎实（v0.16 ATA 持久化 + CRT 收口、v0.17 syscall 边界校验、
 > v0.18 e1000 + ARP、v0.19 极简 IP/UDP、v0.20 用户态 UDP socket、v0.21 内核自审计 + syscall 契约化、
-> v0.22 shell `netping` 交互命令、v0.23 ICMP Echo（PING 通宿主）、v0.24 UDP 校验和错误路径已先后完成），
-> 网络已从"驱动"一路做到"用户可交互验证 + 经典 ping 语义 + 坏包校验防线"。
-> 下一步可做 DHCP 静态 IP 配置化，再考虑真机 GRUB/ISO 冒烟（以模拟器验证驱动为准）。
+> v0.22 shell `netping` 交互命令、v0.23 ICMP Echo（PING 通宿主）、v0.24 UDP 校验和错误路径、
+> v0.25 DHCP 动态取 IP/网关已先后完成），
+> 网络已从"驱动"一路做到"用户可交互验证 + 经典 ping 语义 + 坏包校验防线 + 动态地址配置"。
+> 下一步可做 DHCP 租期续约（T1/T2 renew），再考虑真机 GRUB/ISO 冒烟（以模拟器验证驱动为准）。
 > 等 x86 特性攒够、且真有 ARM 目标时再启动 HAL 重构——因为独立地址空间已牵动页表/切换，
 > 届时抽象 HAL 收益最大、返工最少。HAL 属破坏性重构，需开分支。
 

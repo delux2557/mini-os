@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # mini-os/v2-c-kernel/tests/test_net.sh
-# v0.18/v0.19/v0.23 网络回归：e1000 驱动 + 极简协议栈（ARP + IPv4/UDP + ICMP）。
+# v0.18/v0.19/v0.23/v0.25 网络回归：e1000 驱动 + 极简协议栈（ARP + IPv4/UDP + ICMP + DHCP）。
 #   1) QEMU `-device e1000` + SLIRP user 网络；宿主起 UDP echo 服务(0.0.0.0:7777)
 #   2) 串口日志校验：
-#      - 驱动探测 e1000、ARP 请求发出、收到 SLIRP 网关回复（v0.18）
+#      - 驱动探测 e1000、DHCP DISCOVER/OFFER/REQUEST/ACK 动态取 IP（v0.25）
+#      - ARP 请求发出、收到 SLIRP 网关回复（v0.18）
 #      - UDP 回环：发 PING -> SLIRP -> 宿主 echo -> PONG 返回（v0.19）
 #      - ICMP Echo：发请求到网关 10.0.2.2 -> SLIRP 回显 -> 收到应答（v0.23）
 #   3) filter-dump pcap 独立核验：线上确有 ARP 双向交换 与 IPv4/UDP、IPv4/ICMP 包
@@ -120,6 +121,11 @@ check() {   # check "<说明>" "<正则>"
 }
 
 check "e1000 探测 + MMIO + 链路"   "\[net\] e1000: MAC .* bar=.* link=1"
+# ---- v0.25 DHCP：DISCOVER->OFFER->REQUEST->ACK 动态获取 IP/网关 ----
+check "DHCP DISCOVER 发出"         "\[dhcp\] sent DISCOVER"
+check "DHCP 收到 OFFER"            "\[dhcp\] OFFER: ip [0-9]"
+check "DHCP REQUEST 发出"          "\[dhcp\] sent REQUEST"
+check "DHCP 收到 ACK（动态取 IP）" "\[dhcp\] ACK: ip [0-9].*gw [0-9]"
 check "ARP 请求发出"               "selftest: tx ARP req (who has 10.0.2.2)"
 check "收到 SLIRP ARP 回复"        "selftest: rx ARP reply 10.0.2.2 @ .* -> OK"
 check "UDP 发送 PING"              "udp: tx .*B -> 10.0.2.2:7777 (PING)"

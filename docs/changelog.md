@@ -2,6 +2,37 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## \[v0.25] - 2026-08-29 · DHCP 客户端：动态获取 IP/网关（静态可配置化）
+
+**Added**
+
+* **DHCP 协议**（`src/net/dhcp.c/h` 纯逻辑，可宿主单测）：BOOTP 固定头 + 选项
+  （RFC 2131/2132）
+  * `dhcp_build_discover`：0.0.0.0:68 → 广播 255.255.255.255:67，携带参数请求列表
+    （option 55: 1 子网掩码 / 3 路由器 / 51 租期），flags=0x8000 请求广播应答
+  * `dhcp_build_request`：携带 server id(54) + 请求 IP(50)
+  * `dhcp_parse_reply`：校验 xid / magic cookie / 消息类型(53)，提取分配 IP(yiaddr)、
+    server id(54)、网关(3)、租期(51)；xid 不匹配/缺 cookie/无消息类型/过短 → 拒绝
+
+* **`e1000_dhcp_run` 开机动态取 IP**：DISCOVER → OFFER → REQUEST → ACK 四步状态机
+  （忙等超时 ~2s，不依赖 timer），NAK/超时自动重试，失败回退静态地址——
+  静态兜底收敛为单一配置点 `NET_STATIC_IP` / `NET_STATIC_GW`（10.0.2.15 / 10.0.2.2）
+
+* **e1000 提供 IP 访问器**：`e1000_my_ip()` / `e1000_gw_ip()`；ARP / UDP / ICMP
+  三个 selftest 由硬编码 IP 改为取动态 IP（DHCP 学得或静态兜底），开机顺序为
+  `e1000_init → e1000_dhcp_run → e1000_selftest → udp/icmp selftest`
+
+**Engineering**
+
+* 宿主单测 `tests/test_dhcp.c`（38 断言）：DISCOVER/REQUEST 帧结构/字段、UDP
+  round-trip、OFFER/ACK 解析、网关提取、xid/缺 cookie/无消息类型/过短/op 错误全拒绝
+
+* `make test-net` 回归升级：串口断言新增 DHCP 四项
+  （DISCOVER 发出 / OFFER 收到 / REQUEST 发出 / ACK 收到），与 ARP/UDP/ICMP/
+  sockdemo/netping 全链路端到端互通
+
+* 版本横幅与 motd 更新为 v0.25；roadmap 勾选该项
+
 ## \[v0.24] - 2026-08-29 · UDP 校验和错误路径
 
 **Added**

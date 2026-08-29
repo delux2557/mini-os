@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.24: UDP checksum verified on rx"
+"      "Mini-OS v0.25: DHCP gets dynamic IP/gateway"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo

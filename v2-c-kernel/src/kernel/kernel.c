@@ -57,7 +57,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS v0.24  (UDP checksum error path: drop bad frames)\n");
+    vga_puts("Micro-OS v0.25  (DHCP: dynamic IP via DISCOVER/OFFER/REQUEST/ACK)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
@@ -83,6 +83,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     ata_init();       /* v0.16：探测 IDE 真盘（无盘则纯内存盘） */
     storage_init();   /* v0.16：ramdisk + 真盘加载/格式化 + initramfs */
     e1000_init();     /* v0.18：PCI + e1000 网卡（无网卡则跳过） */
+    e1000_dhcp_run(); /* v0.25：DISCOVER->OFFER->REQUEST->ACK 动态取 IP/网关（失败回退静态） */
     e1000_selftest(); /* v0.18：ARP 请求/应答自检（验证 TX+RX） */
     e1000_udp_selftest(); /* v0.19：经 SLIRP 网关回环到宿主 UDP echo（PING/PONG） */
     e1000_icmp_selftest(); /* v0.23：ICMP Echo 自检——PING 通宿主（SLIRP 网关回显） */
