@@ -318,6 +318,67 @@
 
 ---
 
+## BUG-021 [已修复] v0.25 DHCP 接口签名三处不一致（缺 router 出参）
+
+- **版本**：v0.25（新增 `src/net/dhcp.c/h` + `tests/test_dhcp.c` 开发期）
+- **现象**：
+  1. `make` 内核编译报 `conflicting types for 'dhcp_parse_reply'`：头文件声明 8 参
+     （含 `router` 出参），`dhcp.c` 实现只有 7 参（缺 `router`）；
+  2. `test_dhcp.c` 正/负路径调用只传 7 个实参（正路径漏 `&rt`、负路径漏一个 `0`），
+     且 `mt` 声明为 `uint32_t` 与 `uint8_t *` 出参不匹配，编译报错/警告；
+  3. 修复 1/2 后 `build_reply`（测试手工构造的 DHCP 应答）**未写 option 3（router）**，
+     新增的 `CHECK_EQ(rt, 0x0A000202u)` 必然失败。
+- **根因**：接口签名演进（为取网关新增 `router` 出参）时，**头文件/实现/测试三处没有同步落地**：
+  只改了声明，实现仍按旧 7 参，测试更是在旧签名上编写；
+  测试构造的应答又与"解析器应提取 option 3"这一新契约脱节。
+- **修复**：三处对齐为 8 参（`dhcp_parse_reply(…, router, lease)`）；
+  `build_reply` 补写 option 3；`mt` 改 `uint8_t`。
+- **回归**：宿主单测 14/14（test_dhcp 38 断言，含网关提取与全部拒绝路径）；
+  QEMU 网络回归 DHCP 四项断言全绿（OFFER/ACK 真实带 router）。
+- **教训**：跨文件接口变更要"一处声明、多处实现"同步落地；C 的 `conflicting types`
+  与单测是把"实现/测试与声明不一致"兜出来的第一道防线——尽早编译、尽早跑单测，
+  比写完再统一检查成本低得多。
+
+---
+
+## BUG-022 [已修复] v0.25 纯逻辑模块误用 `<string.h>`：宿主单测能编、内核 freestanding 编不过
+
+- **版本**：v0.25（`src/net/dhcp.c` 引入时）
+- **现象**：宿主单测（test_dhcp）编译运行全绿；但 `make`（内核）编译 dhcp.c 报
+  `fatal error: bits/libc-header-start.h: No such file or directory`，内核链接失败。
+- **根因**：内核以 `-ffreestanding -nostdlib` 编译，**没有 libc 头文件路径**；
+  `dhcp.c` 里 `#include <string.h>` 用了 `memset`。宿主单测走系统 gcc（默认带 glibc），
+  故宿主能编；内核链路无 glibc，`<string.h>` 展开时找不到 `bits/libc-header-start.h`。
+- **修复**：`dhcp.c` 去掉 `#include <string.h>`，`memset(bootp,0,240)` 改手写清零循环。
+- **回归**：`make` 内核构建成功；宿主单测 14/14 不受影响（test_dhcp.c 本身是宿主测试，仍可合法用 libc）。
+- **教训**：可宿主单测的纯逻辑模块**必须同时能在 freestanding 内核下编译**——
+  宿主测试通过 ≠ 内核可编译。`run_host_tests.sh` 只跑宿主 gcc 链路，内核编译需单独 `make`；
+  纯逻辑源文件里禁用 libc 头（`memset/strlen/memcpy` 等），自备小工具或手写循环。
+
+---
+
+## BUG-023 [已修复] v0.21 selftest 检查项 5→6 升级时，多脚本断言漏同步
+
+- **版本**：v0.21（selftest 新增第 6 项"内核自审计"，`PASS (5 checks)` → `PASS (6 checks)`）
+- **现象**：qemu_regression.sh 已更新为 `PASS (6 checks)`，但 `tests/test_serial.sh` 与
+  `tests/test_persist.sh` 仍断言 `PASS (5 checks)`，串口/持久化回归失败。
+- **根因**：同一句"魔法断言字符串"散落在**多个回归脚本**里（qemu/serial/persist 各一份），
+  升级检查项时只改了其中一处，另两处漏改——升级与断言修改不是原子的。
+- **修复**：test_serial.sh / test_persist.sh 同步为 `PASS (6 checks)`。
+- **回归**：`make test` 全绿（host + qemu + serial + persist）。
+- **教训**：跨脚本重复的断言字符串是"升级易漏改"的经典盲区；此类共享期望值
+  （如 selftest 的 `N checks`）应抽成单一来源（共享 shell 变量/文件），或至少用
+  `grep -q "PASS ([0-9]* checks)"` 之类不绑定具体数字的宽松断言。
+
+---
+
+## 工程踩坑（非代码缺陷）
+
+| 编号 | 场景 | 现象 | 处置/教训 |
+|------|------|------|-----------|
+| OPS-001 | git 提交（沙箱环境） | `Author identity unknown`：环境未配置 user.name/user.email | 逐次用 `git -c user.name=… -c user.email=… commit` 指定，不改全局 config；`git log` 历史可溯源 |
+| OPS-002 | 编辑 selftest 日志调用 | 改 ARP 自检日志时把 `serial_printf("… #%d", attempt)` 误改为 `serial_puts("… #%d")` | `serial_puts` 单参、`%d` 只是普通字符 → **编译不报错、输出丢参数**；且现有断言 `selftest: tx ARP req` 不校验 `#N` 数字 → 回归抓不到。提交前人工核对日志格式参数；日志格式化参数丢失类问题应靠"打印变量值"的断言或 diff 日志发现 |
+
 ## 未解决问题（观察记录）
 
 | 编号 | 现象 | 结论 |
