@@ -20,6 +20,7 @@
 #include "ip.h"
 #include "udp.h"
 #include "icmp.h"
+#include "dhcp.h"
 #include <stdint.h>
 
 #define E1000_VENDOR 0x8086u
@@ -87,6 +88,9 @@ static uint8_t mac[6];
 static int ready = 0;
 static uint8_t gw_mac[6];      /* 10.0.2.2 网关 MAC（ARP 自检学到） */
 static int gw_known = 0;
+/* v0.25：本机/网关 IP——DHCP 动态学得；失败保持静态兜底（单一配置点 NET_STATIC_*） */
+static uint32_t my_ip = NET_STATIC_IP;
+static uint32_t gw_ip = NET_STATIC_GW;
 
 static inline uint32_t rd(uint32_t off) { return regs[off / 4]; }
 static inline void wr(uint32_t off, uint32_t v) { regs[off / 4] = v; }
@@ -161,6 +165,14 @@ int e1000_init(void) {
 int e1000_ready(void) { return ready ? 0 : -1; }
 const uint8_t *e1000_mac(void) { return mac; }
 const uint8_t *e1000_gw_mac(void) { return gw_known ? gw_mac : 0; }
+uint32_t e1000_my_ip(void) { return my_ip; }
+uint32_t e1000_gw_ip(void) { return gw_ip; }
+
+/* 打印点分十进制 IP（大端序，直接按字节打印） */
+static void print_ip(uint32_t ip) {
+    serial_printf("%u.%u.%u.%u", (unsigned)(ip >> 24), (unsigned)(ip >> 16),
+                  (unsigned)(ip >> 8), (unsigned)ip);
+}
 
 int e1000_tx(const uint8_t *data, uint32_t len) {
     if (!ready || len == 0 || len > BUF_SIZE) return -1;

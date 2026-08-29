@@ -28,4 +28,10 @@ void e1000_udp_selftest(void);
 /* v0.23 ICMP Echo 自检：发 Echo 请求到 SLIRP 网关 10.0.2.2，收其 Echo 应答（PING 通宿主） */
 void e1000_icmp_selftest(void);
 
+/* v0.25 DHCP 客户端：DISCOVER->OFFER->REQUEST->ACK 从 SLIRP DHCP 服务器动态获取
+ * IP/网关；失败回退静态地址（NET_STATIC_IP/NET_STATIC_GW）。须在 ARP/回环自检前调用。 */
+void e1000_dhcp_run(void);
+uint32_t e1000_my_ip(void);   /* 本机 IP（DHCP 学得或静态兜底） */
+uint32_t e1000_gw_ip(void);   /* 网关 IP（DHCP 学得或静态兜底） */
+
 #endif

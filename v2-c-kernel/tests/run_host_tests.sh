@@ -48,6 +48,7 @@ run_test test_netutil "src/net/netutil.c tests/test_netutil.c"
 run_test test_ip      "src/net/ip.c tests/test_ip.c"
 run_test test_udp     "src/net/ip.c src/net/udp.c tests/test_udp.c"
 run_test test_icmp    "src/net/icmp.c src/net/ip.c src/net/udp.c tests/test_icmp.c"
+run_test test_dhcp    "src/net/ip.c src/net/udp.c src/net/dhcp.c tests/test_dhcp.c"
 
 echo
 echo "宿主测试汇总: pass=$PASS fail=$FAIL"

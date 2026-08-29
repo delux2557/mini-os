@@ -39,7 +39,7 @@ $(shell mkdir -p $(BUILD) $(BUILD)/apps)
 OBJS = $(addprefix $(BUILD)/, \
        boot.o kernel.o vga.o serial.o idt.o isr.o timer.o kb.o mem.o guard.o heap.o \
        usermode.o sched.o sched_policy.o sem.o msg.o blockdev.o fs.o elf.o userptr.o \
-       pci.o e1000.o netutil.o ip.o udp.o icmp.o netsock.o \
+       pci.o e1000.o netutil.o ip.o udp.o icmp.o dhcp.o netsock.o \
        ata.o storage.o userprog_bin.o) \
        $(APP_ELFOBJS) $(SHELL_ELFOBJ)
 
