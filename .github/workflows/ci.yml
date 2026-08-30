@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-multilib \
+            nasm \
+            qemu-system-i386 \
+            socat
+
+      - name: 宿主单元测试（纯逻辑，秒级）
+        run: make test-host
+        working-directory: v2-c-kernel
+
+      - name: QEMU 回归（无界面 + 串口关键字校验）
+        run: make test-qemu
+        working-directory: v2-c-kernel
+
+      - name: QEMU 串口终端回归
+        run: make test-serial
+        working-directory: v2-c-kernel
+
+      - name: QEMU ATA 真盘持久化回归
+        run: make test-persist
+        working-directory: v2-c-kernel
+
+      - name: QEMU 网络回归（e1000 + SLIRP）
+        run: make test-net
+        working-directory: v2-c-kernel
+
+      - name: 清理构建产物
+        run: make clean
+        working-directory: v2-c-kernel
