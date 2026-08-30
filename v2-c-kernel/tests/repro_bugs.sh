@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 实锤复现 BUG-A（文件槽泄漏毒化工具链）与 BUG-B（cc500 产物丢失 exec argv）
 set -u
-cd /workspace/mini-os/v2-c-kernel || exit 1
+cd "$(dirname "$0")/.." || exit 1   # 相对路径定位到 v2-c-kernel/，任意机器可跑
 make >/dev/null 2>&1
 LOG=build/repro.log
 TIN=build/repro_in.fifo
