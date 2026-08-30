@@ -16,8 +16,10 @@ uint32_t free_memory_kb(void);
 
 /* 分页 */
 void paging_init(void);
-/* 映射一页到指定页目录（v0.11 每进程地址空间用） */
-void map_page_in(uint32_t pd, uint32_t virt, uint32_t phys, uint32_t flags);
+/* 映射一页到指定页目录（v0.11 每进程地址空间用）。
+ * v0.30（BUG-033）：返回 0 成功 / -1 失败（页表帧 OOM 时未建立映射，不写物理 0）。
+ * 调用方应检查返回值，失败时降级处理（如 pf_handler 栈生长转 STACK_BOOM）。 */
+int  map_page_in(uint32_t pd, uint32_t virt, uint32_t phys, uint32_t flags);
 /* 映射一页到"当前活动"页目录（读 CR3；启动/懒分配/当前进程用） */
 void map_page(uint32_t virt, uint32_t phys, uint32_t flags);
 int  is_mapped(uint32_t virt);          /* 检查当前活动页目录 */

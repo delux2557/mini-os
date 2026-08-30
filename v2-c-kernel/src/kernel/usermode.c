@@ -56,8 +56,21 @@ typedef struct {
     uint32_t inode;
     uint32_t pos;      /* 当前读写位置 */
     uint32_t mode;     /* 0=只读 1=只写 */
+    uint32_t pid;      /* v0.29（BUG-031）：打开槽的进程 pid（退出时按归属清理） */
 } fs_file_t;
 static fs_file_t fs_files[FS_MAX_OBJ];
+
+/* v0.29（BUG-031）：进程退出时归还其占用的文件槽。
+ * fs_files 是全局表、无进程归属；cc500 等程序在 parse error 等异常退出路径
+ * （裸 exit/kill）不归还槽，泄漏的槽会毒化后续所有编译/文件操作。
+ * 只清理"该 pid 打开"的槽，不误伤并发进程（boot 演示进程与 shell 的编译并存）。 */
+void fs_files_close_pid(uint32_t pid) {
+    for (uint32_t i = 1; i < FS_MAX_OBJ; i++)
+        if (fs_files[i].used && fs_files[i].pid == pid) {
+            fs_files[i].used = 0;
+            serial_printf("[fs] close slot=%u (proc %u exit cleanup)\n", i, pid);
+        }
+}
 
 /* ---- v0.9 从文件系统加载 ELF 应用 ----
  * 应用链接到 APP_LINK（0x800A0000，v0.26#3 app 区扩到 1MB），加载时用 mapfn
@@ -276,12 +289,14 @@ void usermode_init(void) {
 void usermode_set_esp0(uint32_t esp0) { tss.esp0 = esp0; }
 
 /* ---- v0.21 内核自审计 ----
- * 由 selftest 一键触发：物理帧配平（mem_audit）+ 信号量不变量（sem_invariant_ok）
- * + PCB 状态机（sched_audit）。各子系统打印一行 [audit] 日志（serial+vga），
+ * 由 selftest 一键触发：物理帧配平（mem_audit）+ 堆完整性（heap_audit）
+ * + 信号量不变量（sem_invariant_ok）+ PCB 状态机（sched_audit）。
+ * 各子系统打印一行 [audit] 日志（serial+vga），
  * 本函数汇总返回失败检查项总数（0=全部通过）。 */
 static uint32_t kern_audit(void) {
     uint32_t bad = 0;
     bad += mem_audit();
+    bad += heap_audit();
     bad += sched_audit();
     uint32_t objs = 0;
     for (uint32_t i = 1; i < SEM_MAX_OBJ; i++) {
@@ -484,6 +499,7 @@ void syscall_dispatch(registers_t *r) {
         fs_files[a].inode = (uint32_t)ino;
         fs_files[a].pos   = (c == 2) ? fs_size(fs_device(), (uint32_t)ino) : 0;
         fs_files[a].mode  = c;
+        fs_files[a].pid   = sched_current_pid();   /* v0.29（BUG-031）：记归属，退出时清理 */
         serial_printf("[fs] open slot=%u '%s' inode=%u mode=%u pos=%u\n",
                       a, path, ino, c, fs_files[a].pos);
         r->eax = 0;
@@ -593,11 +609,11 @@ void syscall_dispatch(registers_t *r) {
             for (uint32_t i = 1; i < MAX_PROCS; i++) {
                 pcb_t *c = sched_get(i);
                 if (!c || c->state != PROC_ZOMBIE || c->parent_pid != cur) continue;
-            uint32_t code = c->exit_code;
-            serial_printf("[dbg] fastpath pid=%u st=%u ppid=%u exit=%u\n",
-                          i, c->state, c->parent_pid, c->exit_code);
-            if (status) *status = code;      /* 当前地址空间即父进程，直接写 */
-            sched_reap(i);
+                uint32_t code = c->exit_code;
+                serial_printf("[dbg] fastpath pid=%u st=%u ppid=%u exit=%u\n",
+                              i, c->state, c->parent_pid, c->exit_code);
+                if (status) *status = code;      /* 当前地址空间即父进程，直接写 */
+                sched_reap(i);
                 serial_printf("[user] wait any -> pid=%u code=%u (reaped)\n", i, code);
                 r->eax = i;
                 return;
@@ -647,13 +663,21 @@ void syscall_dispatch(registers_t *r) {
             return;
         }
         if (is_mapped(a)) { r->eax = (uint32_t)-1; return; }   /* 已映射，拒绝重复 */
+        /* 记账槽满（map_frames[8] 固定）须在分配前拒绝——否则映射后不记账，
+         * 进程退出时该帧永久泄漏（审查 P0-1）。 */
+        pcb_t *p_ = sched_get(sched_current_pid());
+        if (p_ && p_->map_fcount >= 8) {
+            serial_printf("[vm] map_page pid=%u map cap 8 full, reject\n",
+                          sched_current_pid());
+            r->eax = (uint32_t)-1;
+            return;
+        }
         uint32_t phys = frame_alloc();
         if (!phys) { r->eax = (uint32_t)-1; return; }
         uint32_t *p = (uint32_t *)phys;
         for (int i = 0; i < 1024; i++) p[i] = 0;               /* 清零 */
         map_page(a, phys, 0x7);                                /* 当前进程地址空间 */
-        pcb_t *p_ = sched_get(sched_current_pid());
-        if (p_ && p_->map_fcount < 8) p_->map_frames[p_->map_fcount++] = phys;
+        if (p_) p_->map_frames[p_->map_fcount++] = phys;
         serial_printf("[vm] map_page pid=%u addr=%x phys=%x\n",
                       sched_current_pid(), a, phys);
         r->eax = a;
@@ -703,6 +727,7 @@ void syscall_dispatch(registers_t *r) {
                         names, argc);       /* 成功不返回 */
         if (rc != 0) {
             for (uint32_t i = 0; i < load_fcount; i++) frame_free(load_frames[i]);
+            load_frames_free();        /* v0.28 审查修复：归还 load_frames 数组（P0-2） */
             addr_space_destroy(pd);
             load_fcount = 0;
             __asm__ volatile ("sti");
@@ -710,6 +735,7 @@ void syscall_dispatch(registers_t *r) {
             r->eax = (uint32_t)-1;
             return;
         }
+        /* 成功路径（sched_exec 不返回）里 load_frames 数组已由 sched_exec 复制后释放 */
         load_fcount = 0;
         __asm__ volatile ("cli; hlt");   /* 不可达 */
         return;
@@ -794,9 +820,14 @@ void syscall_dispatch(registers_t *r) {
         }
         uint32_t old = p->heap_brk;
         if (a > old) {
-            if (brk_pages_up(old, a) > USER_HEAP_PAGES - p->heap_fcount) {
-                serial_printf("[heap] brk pid=%u over cap %u+%u pages\n",
-                              p->pid, p->heap_fcount, brk_pages_up(old, a));
+            /* 容量守卫：目标 top 覆盖的堆页数（自 heap_base 起）须 ≤ 堆区总页数。
+             * 不用 brk_pages_up(old,a)（旧 brk→新 brk 的跨度）：收缩后旧映射保留
+             * （heap_fcount 不减、帧从不释放），再涨过同一段会重复计数、在真实预算
+             * 内误拒；而映射页恒为 [base, top) 前缀，所需新帧数 = 目标页数 - 已记账
+             * ≤ 目标页数。单调增长下两式等价；收缩-再涨下本式正确（S8）。 */
+            uint32_t cap = ((a - p->heap_base) + 0xFFFu) >> 12;
+            if (cap > USER_HEAP_PAGES) {
+                serial_printf("[heap] brk pid=%u over cap %u pages\n", p->pid, cap);
                 r->eax = (uint32_t)-1;
                 return;
             }

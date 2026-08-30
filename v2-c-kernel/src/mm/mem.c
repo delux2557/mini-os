@@ -142,14 +142,18 @@ void map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
 
 /* v0.11：把一页映射到"指定页目录"（每进程地址空间用）。
  * pd 为目标页目录物理地址；页表帧/页目录帧都落在低 16MB 恒等映射区，
- * 当前地址空间（无论哪个进程）都能直接写入，故可在任意上下文安全调用。 */
-void map_page_in(uint32_t pd, uint32_t virt, uint32_t phys, uint32_t flags) {
+ * 当前地址空间（无论哪个进程）都能直接写入，故可在任意上下文安全调用。
+ * v0.30（BUG-033）：返回 0 成功 / -1 失败（页表帧 OOM 时静默返回，不写物理 0）。
+ * 帧池地址从 1MB 起（FRAME_ADDR=1MB+n*4K），0 只代表失败；旧代码继续写
+ * (uint32_t*)0 会破坏低 4KB（虽保护模式后未用），且 iret 重试会假增长死循环。 */
+int map_page_in(uint32_t pd, uint32_t virt, uint32_t phys, uint32_t flags) {
     uint32_t pd_idx = virt >> 22;
     uint32_t pt_idx = (virt >> 12) & 0x3FF;
     uint32_t *dir = (uint32_t *)pd;
 
     if (!(dir[pd_idx] & 1)) {
         uint32_t pt_phys = frame_alloc();
+        if (!pt_phys) return -1;   /* 页表帧 OOM：未建立映射，调用方须降级处理 */
         uint32_t *pt = (uint32_t *)pt_phys;
         for (int i = 0; i < 1024; i++) pt[i] = 0;
         dir[pd_idx] = (pt_phys & ~(PAGE_SIZE - 1)) | (flags & 0xFFF);
@@ -160,6 +164,7 @@ void map_page_in(uint32_t pd, uint32_t virt, uint32_t phys, uint32_t flags) {
      * CPU/QEMU 仍缓存旧 TLB 项（表现为未映射），iret 重试再次 fault 被误杀。
      * invlpg 只刷该线性地址，任何上下文调用均安全（未映射地址也不异常）。 */
     __asm__ volatile ("invlpg %0" : : "m"(*(char *)virt) : "memory");
+    return 0;
 }
 
 /* 切换当前地址空间：写 CR3（写 CR3 自动刷新 TLB）；pd=0 视为内核页目录 */
@@ -255,17 +260,22 @@ void pf_handler(registers_t *r) {
                 uint32_t newb = p->stack_bottom - PAGE_SIZE;
                 uint32_t phys = frame_alloc();
                 if (phys) {
-                    map_page_in(p->page_dir, newb, phys, 0x7);
-                    p->stack_frames[p->stack_fcount++] = phys;
-                    p->stack_bottom = newb;
-                    serial_printf("[stack] grow pid=%u @%x pages=%u\n",
-                                  pid, newb, p->stack_fcount);
-                    vga_printf("[stack] grow pid=%u @%x pages=%u\n",
-                               pid, newb, p->stack_fcount);
-                    return;   /* iret 后自动重试触发异常的指令 */
+                    /* v0.30（BUG-033）：map_page_in 页表帧 OOM 时返回 -1，页未建立映射。
+                     * 此时必须释放刚分配的栈数据帧并转 STACK_BOOM——若仍记账/下移栈底，
+                     * iret 重试会在同一地址再次 fault，反复空耗帧直至耗尽（假增长死循环）。 */
+                    if (map_page_in(p->page_dir, newb, phys, 0x7) == 0) {
+                        p->stack_frames[p->stack_fcount++] = phys;
+                        p->stack_bottom = newb;
+                        serial_printf("[stack] grow pid=%u @%x pages=%u\n",
+                                      pid, newb, p->stack_fcount);
+                        vga_printf("[stack] grow pid=%u @%x pages=%u\n",
+                                   pid, newb, p->stack_fcount);
+                        return;   /* iret 后自动重试触发异常的指令 */
+                    }
+                    frame_free(phys);
                 }
             }
-            ev = STACK_BOOM;   /* 无物理帧 / 已生长到上限 / 无 PCB：视同栈溢出 */
+            ev = STACK_BOOM;   /* 无物理帧 / 页表帧 OOM / 已生长到上限 / 无 PCB：视同栈溢出 */
         }
 
         /* v0.13 栈溢出检测：fault 深越界（越过当前守卫页，或已到槽底硬底） */

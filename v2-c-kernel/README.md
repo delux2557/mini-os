@@ -1,10 +1,10 @@
 # v2-c-kernel（当前版本）
 
-x86 32 位 C 内核，multiboot 引导，运行于 QEMU。当前里程碑：v0.17 syscall 边界校验（copyin/copyout）。
+x86 32 位 C 内核，multiboot 引导，运行于 QEMU。当前里程碑：v0.30 工具链自举 + 加固（cc500 自举闭环、DHCP 租期续约、代码审查修复）。
 
 ```
 src/     内核源代码（.c/.h/.s/.ld）
-tests/   宿主单元测试 + QEMU 回归脚本（四层）
+tests/   宿主单元测试 + QEMU 回归脚本（五层）
 build/   构建产物（gitignore，make clean 清理）
 ```
 
@@ -18,7 +18,8 @@ make test-host  # 宿主单元测试（纯逻辑，秒级）
 make test-qemu  # QEMU 回归（键盘 sendkey 路径）
 make test-serial # QEMU 串口终端回归（模拟外部 agent 经串口驱动 shell）
 make test-persist # QEMU ATA 真盘持久化回归（两次运行共享磁盘镜像）
-make test       # 全部测试（四层）
+make test-net   # QEMU 网络回归（e1000 TX/RX + ARP + UDP + ICMP 与宿主端到端）
+make test       # 全部测试（五层）
 make clean
 ```
 
@@ -41,10 +42,11 @@ qemu-system-i386 -kernel build/kernel.elf -hda disk.img -display none -serial st
 ## 单行结构化自检（agent 可验证）
 
 shell 内置 `selftest` 命令：逐跑 hello/isol/forkdemo/fsdemo/waitdemo 五个代表应用
-（覆盖 spawn / 隔离 / fork / 文件系统 / wait 语义），汇总输出一行：
+（覆盖 spawn / 隔离 / fork / 文件系统 / wait 语义），再追加第 6 项——内核自审计
+（帧配平 / 信号量守恒 / PCB 状态机），汇总输出一行：
 
 ```
-[selftest] PASS (5 checks)
+[selftest] PASS (6 checks)
 ```
 
 外部 agent 只需 grep 这一行即可完成全量确认，无需逐条匹配几十个里程碑。
@@ -58,7 +60,7 @@ shell 内置 `selftest` 命令：逐跑 hello/isol/forkdemo/fsdemo/waitdemo 五�
 
 ## 依赖
 
-gcc(-m32) / nasm / ld / objcopy / qemu-system-i386
+gcc(-m32) / nasm / ld / objcopy / qemu-system-i386 / python3 / socat
 
 ## 文档
 

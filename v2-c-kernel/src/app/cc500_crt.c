@@ -21,6 +21,8 @@ int syscall3(int n, int a, int b, int c) {
 }
 
 void _start(int argc, char **argv) {
-    int rc = cc500_main(argv, argc);
+    /* cc500 把 argv 当"字节地址"读（load_ptr 逐字节拼回指针），
+     * 与 char * 形参语义一致；显式 cast 消掉 char** -> char* 告警 */
+    int rc = cc500_main((char *)argv, argc);
     syscall3(0, (uint32_t)rc, 0, 0);   /* SYS_EXIT */
 }

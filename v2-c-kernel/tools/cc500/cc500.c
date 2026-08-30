@@ -298,9 +298,15 @@ void sym_get_value(char *s)
 }
 
 /* v0.27: 生成 ELF 头（链接基址 0x800A0000，mini-os ABI）+ 唯一 stub syscall3。
- * 布局：0x00 起 96B ELF 头+程序头；0x54 入口 stub；随后 syscall3 stub；
- * 之后（be_start 返回时 codepos 处）才是源文件里第一个函数 app_main。
- * 入口 stub：call app_main; mov %eax,%ebx; xor %eax,%eax; int $0x80（SYS_EXIT=0）*/
+ * 布局：0x00 起 ELF 头+程序头+p_align；0x54 入口 stub（首指令）；0x5E 处 call；
+ * 随后 syscall3 stub；之后（be_start 返回时 codepos 处）才是源文件里第一个函数。
+ * v0.29（BUG-032）：入口 stub 在 call 前把内核 [esp+4]=argc、[esp+8]=argv 编组成
+ *   首函数形参——按 cc500 约定"首参 8(%esp)/末参 4(%esp)"对齐，故首函数须声明为
+ *   (char *argv, int argc)（cc500.c 即如此）。序列：
+ *   mov eax,[esp+8] ; push eax      ; argv -> [esp+8]
+ *   mov eax,[esp+8] ; push eax      ; argc -> [esp+4]
+ *   call <首函数>; mov %eax,%ebx; xor %eax,%eax; int $0x80（SYS_EXIT=返回值）
+ * 旧桩为裸 call（不编组参数），自编译产物 exec 带 argv 时静默丢参（BUG-032）。 */
 void be_start()
 {
   emit(16, "\x7f\x45\x4c\x46\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00");
@@ -312,8 +318,9 @@ void be_start()
   emit(16, "\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0a\x80");
   /* p_paddr=0x800A0000 p_filesz/memsz 由 be_finish 回填 p_flags=RWX */
   emit(16, "\x00\x00\x0a\x80\x10\x4b\x00\x00\x10\x4b\x00\x00\x07\x00\x00\x00");
-  /* p_align=0x1000；入口 stub（见上注释），rel32 由 save_int(code+85) 回填 */
-  emit(16, "\x00\x10\x00\x00\xe8\x00\x00\x00\x00\x89\xc3\x31\xc0\xcd\x80\x00");
+  /* p_align=0x1000；入口 stub（见上注释），call 的 rel32 由 save_int(code+95) 回填 */
+  emit(16, "\x00\x10\x00\x00\x8b\x44\x24\x08\x50\x8b\x44\x24\x08\x50\xe8\x00");
+  emit(9,  "\x00\x00\x00\x89\xc3\x31\xc0\xcd\x80");
 
   /* int syscall3(int n,int a,int b,int c)
    * CC500 调用方从左到右压参，故首个参数 n 位于 16(%esp)：
@@ -327,7 +334,7 @@ void be_start()
   emit(2, "\xcd\x80");
   emit(1, "\xc3");
 
-  save_int(code + 85, codepos - 89); /* entry set to first thing in file */
+  save_int(code + 95, codepos - 99); /* entry stub 的 call rel32 -> 首函数 */
 }
 
 void be_finish()
@@ -823,11 +830,12 @@ int sys_print(char *s)
 }
 
 /* 整读输入文件（in_path 或默认 /cc500.c）进 in_data，返回 0/-1
- * （CC500 子集无 break，用 done 标志退出） */
+ * （CC500 子集无 break，用 done 标志退出；缓冲满后探 1 字节判是否被截断） */
 int open_input()
 {
   int n;
   int done;
+  int full;
   char *p;
   p = "/cc500.c";
   if (in_path != 0)
@@ -839,12 +847,21 @@ int open_input()
     return 0 - 1;
   in_len = 0;
   done = 0;
+  full = 0;
   while (done == 0) {
-    if (32768 <= in_len) done = 1;           /* 缓冲满 */
+    if (32768 <= in_len) { done = 1; full = 1; }  /* 缓冲满 */
     else {
       n = syscall3(16, 1, in_data + in_len, 4096);   /* SYS_FS_READ slot1 */
       if (n <= 0) done = 1;
       else in_len = in_len + n;
+    }
+  }
+  if (full != 0) {
+    n = syscall3(16, 1, in_data, 1);         /* 探 1 字节：>0 说明被截断 */
+    if (n != 0) {                            /* 显式报错，而非静默编半个文件 */
+      syscall3(17, 1, 0, 0);
+      sys_print("cc500: input too big (>32KB)\x0a");
+      return 0 - 1;
     }
   }
   syscall3(17, 1, 0, 0);                     /* SYS_FS_CLOSE slot1（fs 槽全局共享，必须还） */

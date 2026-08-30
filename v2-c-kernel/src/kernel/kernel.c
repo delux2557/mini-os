@@ -14,6 +14,7 @@
 #include "ata.h"
 #include "e1000.h"
 #include "userprog_offsets.h"
+#include "version.h"   /* v0.30（评估 L-4）：版本单一来源，启动横幅取 MINI_OS_VERSION */
 #include <stdint.h>
 
 #define MULTIBOOT_BOOTLOADER_MAGIC 0x2BADB002
@@ -57,7 +58,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS v0.27  (toolchain self-host: cc500 compiles itself in guest)\n");
+    vga_puts("Micro-OS " MINI_OS_VERSION "  (toolchain self-host: cc500 compiles itself in guest)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {

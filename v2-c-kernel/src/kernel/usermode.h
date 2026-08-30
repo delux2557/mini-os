@@ -32,5 +32,7 @@ void usermode_set_esp0(uint32_t esp0);
  *    0 走 app 槽（退出即回收，槽忙会拒绝）。name 为可读字符串指针（内核/用户均可）。
  *  - 返回 pid 或 -1。 */
 int usermode_spawn_elf(const char *name, uint32_t vbase, int resident);
+/* v0.29（BUG-031）：进程退出时归还其占用的文件槽（fs_files 全局表按 pid 归属清理） */
+void fs_files_close_pid(uint32_t pid);
 
 #endif

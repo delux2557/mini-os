@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.27: toolchain self-host (cc500 compiles itself)"
+"      "Mini-OS v0.30: toolchain self-host (cc500 compiles itself)"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -110,15 +110,20 @@ cmd "run stackovf"   "run stackovf
 # ---- v0.26 用户栈按需生长 ----
 cmd "run deep"       "run deep
 "      "\[deep\] pid=.* recursing 12\*1KB on a 4KB start stack" "\[stack\] grow pid=" "\[deep\] survived 12KB recursion via stack growth" "\[shell\] 'deep' exited code=0"
+# ---- v0.29 回归盲区补格：已生长栈 × fork / exec 组合 ----
+cmd "run deepfork"   "run deepfork
+"      "\[deepfork\] pid=.* stack grown ~12KB, forking" "\[deepfork\] CHILD pid=.* inherited grown stack" "\[deepfork\] CHILD pid=.* grew beyond inherited stack" "\[deepfork\] PARENT pid=.* waited child=" "\[deepfork\] fork-of-grown-stack OK" "\[shell\] 'deepfork' exited code=0"
+cmd "run deepexec"   "run deepexec
+"      "\[deepexec\] pid=.* stack grown, exec'ing hello from depth" "Hello from 'hello' app! pid=" "\[shell\] 'deepexec' exited code=0"
 # ---- v0.26#2 用户堆（brk/sbrk）：扩展/写入校验/收缩复用/bump alloc ----
 cmd "run heapdemo"   "run heapdemo
 "      "\[heapdemo\] initial brk=0x801a4000" "\[heapdemo\] sbrk(4096) old=0x801a4000" "\[heapdemo\] 4KB page write+verify OK" "\[heapdemo\] 16KB write+verify OK" "\[heapdemo\] shrink+reuse write+verify OK" "\[heapdemo\] bump alloc 3 blocks write+verify OK" "\[heapdemo\] survived heap brk/sbrk demo" "\[shell\] 'heapdemo' exited code=0"
 # ---- v0.26#3 ELF 加载去上限：>64KB 大 ELF（旧 32KB/8 帧上限会拒绝） ----
 cmd "run bigdemo"    "run bigdemo
 "      "\[bigdemo\] pid=.* blob=70KB size=70000" "\[bigdemo\] 70KB write+verify sum=" "\[bigdemo\] survived big-ELF load" "\[shell\] 'bigdemo' exited code=0"
-# ---- v0.27 工具链自举：cc500 编译自身两次，P1==P2（写-编-跑闭环） ----
+# ---- v0.27 工具链自举：cc500 编译自身两次，P1==P2 逐字节一致（写-编-跑闭环） ----
 cmd "ccboot 自举"     "ccboot
-"      "cc500: compiled OK" "\[ccboot\] sha1=[0-9][0-9]* sha2=[0-9][0-9]* bytes=[0-9][0-9]* PASS"
+"      "cc500: compiled OK" "\[ccboot\] byte-identical PASS"
 # ---- v0.14 文件系统增强：shell 目录命令 + fsdemo ----
 # 注意：QEMU HMP sendkey 不支持 '/'（斜杠会静默丢弃），此处用平铺名；
 # 带斜杠路径的交互验证走串口通道（test_serial.sh）。
@@ -136,9 +141,9 @@ cmd "run waitdemo"   "run waitdemo
 cmd "exec 失败反馈"   "exec nosuchprog
 "      "\[exec\] FAILED to exec '"
 # ---- v0.16 单行结构化自检（agent 可 grep 一行确认全量通过） ----
-# v0.21：第 6 项为内核自审计（帧配平/信号量守恒/PCB 状态机）
+# v0.21：第 6 项为内核自审计（帧配平/堆完整性/信号量守恒/PCB 状态机）
 cmd "selftest 自检"   "selftest
-"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[selftest\] PASS (6 checks)"
+"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] heap ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[selftest\] PASS (6 checks)"
 # ---- v0.17 syscall 边界校验：内核指针全部被拒 ----
 cmd "run abuse"       "run abuse
 "      "\[abuse\] write buf@0xB8000 -> 4294967295" "\[abuse\] verify OK"
@@ -260,6 +265,13 @@ check "stackovf 被终止"          "\[sched\] kill pid=.* name=stackovf"
 check "initramfs 写入 deep"     "\[ramdisk\] 'deep'"
 check "deep 栈按需生长"          "\[stack\] grow pid=.* pages="
 check "deep 存活"                "\[deep\] survived 12KB recursion via stack growth"
+# ---- v0.29 回归盲区：已生长栈 × fork / exec 组合 ----
+check "initramfs 写入 deepfork"  "\[ramdisk\] 'deepfork'"
+check "deepfork 子继承已生长栈"   "\[deepfork\] CHILD pid=.* inherited grown stack"
+check "deepfork 子超越继承栈"     "\[deepfork\] CHILD pid=.* grew beyond inherited stack"
+check "deepfork 组合通过"         "\[deepfork\] fork-of-grown-stack OK"
+check "initramfs 写入 deepexec"  "\[ramdisk\] 'deepexec'"
+check "deepexec exec 后 hello 运行" "Hello from 'hello' app! pid="
 # ---- v0.26#2 用户堆（brk/sbrk） ----
 check "initramfs 写入 heapdemo" "\[ramdisk\] 'heapdemo'"
 check "brk 起始日志"             "\[heap\] brk pid=.* 801a4000 -> 801a5000"
@@ -275,7 +287,9 @@ check "initramfs 写入 cc500"     "\[ramdisk\] 'cc500'"
 check "initramfs 写入 cc500.c"   "\[ramdisk\] 'cc500.c'"
 check "cc500 编译自身成 P1"       "cc500: compiled OK"
 check "P1 被加载运行"             "\[elf\] '/out.elf' loaded.* entry=800a0054"
-check "自举闭环 PASS"            "\[ccboot\] sha1=[0-9][0-9]* sha2=[0-9][0-9]* bytes=[0-9][0-9]* PASS"
+check "cc500 编译退出码"          "name=cc500 code=0"
+check "P1 编译退出码"             "name=/out.elf code=0"
+check "自举闭环 PASS"            "\[ccboot\] byte-identical PASS"
 # ---- v0.14 文件系统增强 ----
 check "initramfs 写入 fsdemo"   "\[ramdisk\] 'fsdemo'"
 check "fsdemo 建目录 /etc"       "\[fsdemo\] mkdir /etc -> [0-9][0-9]*"

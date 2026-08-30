@@ -13,6 +13,8 @@ void irq_install_handler(int irq, isr_t handler) { (void)irq; (void)handler; }
 
 #define SCAN_A   0x1E   /* 'a' 键 */
 #define SCAN_S   0x1F   /* 's' 键 */
+#define SCAN_B   0x30   /* 'b' 键 */
+#define SCAN_C   0x2E   /* 'c' 键 */
 #define SCAN_1   0x02   /* '1' 键 */
 #define SHIFT_L  0x2A   /* 左 Shift 按下 */
 #define SHIFT_R  0x36   /* 右 Shift 按下 */
@@ -123,6 +125,14 @@ int main(void) {
     CHECK_EQ(kb_line_take(line, sizeof(line)), 1);
     CHECK_EQ(line[0], 'a');
     kb_set_line_hook(0);
+
+    /* 13) v0.30（BUG-034）：行就绪未取时，可打印字符不再追加（防两行合并 "a"+"bc" -> "abc"） */
+    kb_feed_scan(SCAN_A);
+    kb_feed_scan(0x1C);                 /* 完成 "a"，行就绪未取 */
+    kb_feed_scan(SCAN_B);               /* 行就绪期间输入 'b'：应被忽略 */
+    kb_feed_scan(SCAN_C);               /* 行就绪期间输入 'c'：应被忽略 */
+    CHECK_EQ(kb_line_take(line, sizeof(line)), 1);
+    CHECK_EQ(line[0] == 'a' && line[1] == 0, 1);
 
     UTEST_SUMMARY("kb");
 }

@@ -1,7 +1,7 @@
 # Bug 记录（Bug Log）
 
 > 记录开发过程中遇到的真实 Bug：现象、根因、修复、回归验证。
-> 编号唯一；状态：`已修复`（当前均如此）。新问题直接追加。
+> 编号唯一；状态：`已修复` 或 `待修复`（已核实、带复现、待排期）。新问题直接追加。
 
 ---
 
@@ -433,6 +433,187 @@
 
 ---
 
+## BUG-027 [已修复] v0.28 sys_map_page 记账槽满时映射帧泄漏
+
+- **版本**：v0.11 引入（v0.28 代码审查发现）
+- **现象**：进程第 9 次调用 `sys_map_page` 时，新帧被映射进地址空间但**未记入**
+  `pcb_t::map_frames[8]`（`if (p_ && p_->map_fcount < 8)` 静默跳过记账）。
+  进程退出时 `release_priv_frames` 只释放 `map_frames[0..map_fcount-1]`，
+  第 9+ 帧永久泄漏。
+- **根因**：`map_frames[8]` 是固定数组，`sys_map_page` 在分配/映射后才发现槽满，
+  没有回滚（unmap）也没有拒绝，账实不符。
+- **修复**：记账槽满在**分配前**拒绝——`map_fcount >= 8` 直接返回 -1，不分配不映射
+  （`usermode.c` case 23）。诚实暴露"每进程至多 8 张私有映射页"的教学上限，
+  而非悄悄泄漏。
+- **回归**：`make test` 全绿；isol 演示（1 张映射页）不受影响。
+
+---
+
+## BUG-028 [已修复] v0.28 exec 路径泄漏 load_frames 记账数组
+
+- **版本**：v0.26#3 引入（`load_frames` 由固定数组改 kmalloc 动态数组时漏了 exec 路径）
+- **现象**：每次成功/失败的 `sys_exec` 都泄漏 `load_frames`（kmalloc 的
+  `load_maxframes × 4` 字节数组）。频繁 exec 会缓慢蚕食内核堆。
+- **根因**：`usermode_spawn_elf`（spawn 路径）在成功/失败后都调 `load_frames_free()`
+  （v0.26#3 补上了），但 **exec 路径（case 25）漏加**：成功路径 `sched_exec` 不返回、
+  失败路径只释放帧没释放数组。`sched_exec` 把 `load_frames` **复制**进 PCB 的
+  `own_frames`（新 kmalloc 数组）后，源数组成了孤儿。
+- **修复**：
+  - `sched_exec` 复制完 `frames` 后 `kfree(frames)`（源数组为调用方临时记账数组，
+    OOM 提前返回时由调用方负责）；
+  - exec 失败路径补 `load_frames_free()`。
+  - 接口：`sched_exec` 的 `frames` 参数由 `const uint32_t *` 改为 `uint32_t *`
+    （语义=调用方移交、sched_exec 复制后释放）。
+- **回归**：`make test` 全绿；`exec args hello world`、`exec nosuchprog` 用例通过
+  （exec 成功与失败两条路径都覆盖）。
+
+---
+
+## BUG-029 [已修复] v0.29 icmp_parse 短帧越界读（宿主 fuzz 抓到）
+
+- **版本**：v0.23 引入（v0.29 宿主 fuzz 发现）
+- **现象**：fuzz 对 `icmp_parse` 注入随机短帧时，ASan 报堆缓冲区越界读。
+- **根因**：`icmp_parse` 开头直接 `ip_parse(frame + 14, len - 14, ...)`：
+  - `len < 14` 时 `frame + 14` 已越过帧尾；
+  - `len - 14` 是无符号下溢成巨大值（约 42 亿），`ip_parse` 按该长度扫描"载荷"
+    → 越界读。
+- **修复**：`icmp_parse` 开头加 `if (len < 14) return -1;`（与 `udp_parse` 同款守卫），
+  杜绝下溢与越界指针（`src/net/icmp.c`）。
+- **回归**：`test_icmp.c` 补 13/0 字节短帧断言（`icmp_parse(frame, 13, ...) == -1` 等）；
+  宿主 fuzz 60k 轮 + 200 万轮复核无崩溃；五层回归全绿。
+
+---
+
+## BUG-030 [已修复] v0.29 fork 子进程在继承的已生长栈上继续递归被误判缺页
+
+- **版本**：v0.12 引入（fork 深拷贝栈）；v0.29 回归盲区补格（deepfork 组合）暴露
+- **现象**：父进程递归 12KB 使栈按需生长后 fork；子进程在继承的已生长栈上继续递归
+  下探时，子进程被以 `code=0xFFFFFFFF` 终止（普通页错误路径），未能触发栈按需生长。
+- **根因**：`sched_fork` 深拷贝父进程全部栈页时，把子进程的 `user_esp_top`/
+  `stack_bottom` **原样继承**——子进程的栈虚拟地址落在**父进程的栈槽**，而非自己的槽
+  （forkdemo 因浅栈不生长而从未触发）。而 `stack_guard_hit` 用**子进程 pid** 反推槽位：
+  子进程下探时 fault 落在"按子 pid 推导的槽外"，被判 `STACK_OK`（非栈事件），
+  走普通缺页路径被隔离终止。
+- **修复**：`stack_guard_hit` 槽位改由**实际栈位置 `stack_bottom`** 推导
+  （`stack_bottom & ~(USER_STACK_SLOT-1)`），而非 pid——普通进程=自身槽、
+  fork 子进程=继承的父槽，两者皆正确；v0.15"下一槽边界不误报"语义由真实栈槽天然保持。
+  `pid` 参数保留但不再参与判定（`src/kernel/guard.c`）。
+- **回归**：`test_guard.c` 补 4 条 fork 继承栈断言（旧逻辑下必失败）；新演示
+  `deepfork`（已生长栈×fork）与 `deepexec`（已生长栈×exec）挂入 qemu_regression.sh /
+  test_serial.sh；串口日志确认子进程在继承栈上继续 `[stack] grow pid=4` 两次并存活，
+  父进程 wait 回收 `code=0`。
+
+---
+
+## BUG-031 [已修复] v0.30 全局文件槽泄漏：一次编译失败毒化整条工具链（=用户报告 BUG-A）
+
+- **版本**：v0.8（固定槽 fs 模型）引入；v0.29 独立实操复现（`tests/repro_bugs.sh`）
+- **现象**：cc500 编译语法被拒的源（parse error → `error()` = 裸 `exit(1)`）之后，
+  再编译与最初**字节级一致**的源也会失败（`cc500: output setup fail` / `[ccrun] compile
+  FAIL code=1`），直至重启。同一输入判若两机。
+- **根因**：`fs_files[8]` 是内核**全局表、无进程归属**（`usermode.c` 的
+  `static fs_file_t fs_files[FS_MAX_OBJ]`）；`terminate_current`/`reap_process`
+  退出路径**不清理**任何槽。cc500 `setup_output` 打开 slot2 后，唯一归还点是成功路径的
+  `flush_output`；parse error 直接 `exit(1)` 跳过它 → slot2 永久占用 → 此后任何 cc500
+  的 `setup_output`（`SYS_FS_OPEN slot2` 因 `fs_files[2].used==1` 失败）→ 工具链被毒化
+  直到重启。
+- **修复**：文件槽记**打开者 pid**（`fs_file_t.pid`，`sys_fs_open` 写入），进程退出时
+  `fs_files_close_pid(pid)` 只归还该进程的槽（`terminate_current` 调用）。首版"关闭全部
+  槽"在 boot 演示进程与 shell 编译并存时会误伤并发进程（repro 抓到：procSemB 退出把
+  P1 正写 /out.elf 的 slot2 也关了）——按 pid 归属清理杜绝此问题。
+- **回归**：`tests/repro_bugs.sh`：bad.c 编译 FAIL 后，字节级同源 good2.c 再编译成功
+  （`[ccrun] '/good2.elf' exited code=0 PASS`）；五层回归全绿（含 ccboot P1==P2）。
+- **后续架构债**：per-process fd 表（打开文件表入 PCB）仍留 roadmap——本修复是
+  "无归属全局表"之上的最小止损。
+
+---
+
+## BUG-032 [已修复] v0.30 cc500 自编译产物静默丢失 exec argv（=用户报告 BUG-B）
+
+- **版本**：v0.27（be_start 入口桩）引入；v0.29 独立实操复现（`tests/repro_bugs.sh`）
+- **现象**：`exec /out.elf /cc500.c /out2.elf`（`/out.elf` = cc500 自编译产物 P1）
+  静默忽略 argv，用默认路径写 `/out.elf` 且退出码 0（不报错）；`/out2.elf` 从未创建。
+- **根因**：cc500 `be_start` 发射的入口桩 = 裸 `call <首函数>; mov %eax,%ebx; xor %eax,
+  %eax; int $0x80`，**不编组 argc/argv**。内核以 `[esp+4]=argc、[esp+8]=argv` 进入桩，
+  `call` 再压一个返回地址 → 首函数读到 `[esp+4]=fake_ret(0)`、`[esp+8]=argc` → 形参
+  全错位（argv 形参读到 argc 值、argc 形参读到 0）→ `main1` 的 `3<=argc` 不成立 →
+  走默认路径。gcc 构建路径的 crt.c / cc500_crt.c 正确编组 argc/argv，故"命令行路径"
+  仅对 **gcc 版 cc500** 成立；ccboot 固定路径、ccrun 用 gcc 版，都在回归矩阵之外，
+  从未触发（v0.27b 的 "✅ 命令行路径" 对自编译产物不成立）。
+- **修复**：`be_start` 入口桩在 `call` 前把内核栈上的 argv/argc 压给首函数：
+  `mov eax,[esp+8]; push eax`（argv）→ `mov eax,[esp+8]; push eax`（argc）→ `call`。
+  与 cc500 约定"首参 8(%esp)/末参 4(%esp)"精确对齐（首函数须声明为 `(char *argv,
+  int argc)`，cc500.c 即如此）；无参首函数不受影响。`e_entry` 不变（0x800A0054，
+  首指令），`call` 的 rel32 回填偏移由 85→95（`save_int(code+95, codepos-99)`）。
+- **回归**：`tests/repro_bugs.sh`：ccboot 产 P1 → `exec /out.elf /cc500.c /out2.elf`
+  → `/out2.elf` 被创建（19217 字节，`[ls] out2.elf size=19217`）；ccboot P1==P2
+  逐字节一致仍成立（新桩在自举两代产物中一致）；五层回归全绿。
+
+---
+
+## BUG-033 [已修复] v0.30 map_page_in 页表帧 OOM 时写物理 0 破坏内核（代码审查发现）
+
+- **版本**：v0.11（`map_page_in` 引入）潜伏；代码审查静态发现（P0）
+- **现象/根因**：新建页表（`dir[pd_idx]&1==0`）时调用 `frame_alloc()` 未检查返回值。帧池
+  地址从 1MB 起，0 只代表 OOM；旧代码拿到 0 仍继续 `(uint32_t*)0` 清零 4096 字节 → 破坏
+  低 4KB（保护模式下虽未映射，但页目录项会被写成 `0x7` 指向物理 0 的"合法"页表），且
+  `pf_handler` 栈生长路径无法感知失败：帧已记账、`stack_bottom` 已下移但页未映射 →
+  iret 重试同地址再次 fault → 反复空耗物理帧（假增长）。
+- **修复**（`src/mm/mem.c` + `src/mm/mem.h`）：`map_page_in` 返回类型 `void`→`int`
+  （0 成功 / -1 页表帧 OOM 未建立映射）；`pf_handler` 栈生长检查返回值，失败时释放刚
+  分配的栈数据帧并转 `STACK_BOOM`（不再假增长）。其余调用方（boot/懒分配/elf 加载/
+  spawn/exec）忽略返回值语义不变。
+- **回归**：全量五层回归绿（宿主 16/16、QEMU、串口、持久化、网络）。
+
+---
+
+## BUG-034 [已修复] v0.30 kb 行缓冲在 line_ready 期间仍追加输入，两行可能合并（代码审查发现）
+
+- **版本**：v0.9（行缓冲引入）潜伏；代码审查静态发现（P2）
+- **现象**：`line_ready==1`（有未取走的行）时，新输入的可打印字符仍追加到 `line_buf`
+  末尾。若外部 agent 高速注入多行（如串口脚本 `"abc\nxyz\n"`），`"xyz"` 追加到
+  `"abc"` 后，`kb_line_take` 取走首行重置 `line_len` → `"xyz"` 丢失。
+- **修复**（`src/drv/kb.c`）：仅当 `!line_ready` 时才把可打印字符入行缓冲。
+- **回归**（`tests/test_kb.c` 用例 13）：行就绪未取时输入 `'b'/'c'` 被忽略，取回首行
+  仍为 `"a"`。
+
+---
+
+## BUG-035 [已修复] v0.30 fork_frames[24] 硬编码上限限制大进程 fork（=OBS-002）
+
+- **版本**：v0.12（`sched_fork` 深拷贝引入）潜伏；代码审查确认 OBS-002 属实（P1）
+- **现象**：`pcb_t::fork_frames[24]` 固定 96KB 记账数组，深拷贝超 24 页即 `goto
+  fork_oom`。用户进程最多可拥有栈 7 + ELF ≤256 + 堆 80 + map 8 ≈ 351 页；bigdemo
+  （21 帧 + 栈 7 = 28）已超上限，大进程 fork 必然失败。
+- **修复**（`src/kernel/sched.h` + `src/kernel/sched.c`）：与 `own_frames` 同策略——
+  `fork_frames` 改 `uint32_t *` 动态数组；`sched_fork` 先数一遍需深拷贝页数再按需
+  `kmalloc`，`release_priv_frames`/`fork_oom` 中 `kfree`。
+- **回归**：全量五层回归绿（宿主 16/16、QEMU、串口、持久化、网络）。
+
+---
+
+## BUG-036 [已修复] v0.30 Makefile cc500 豁免只留 `-w`：GCC 14 下 `-Wint-conversion` permerror 漏网
+
+- **版本**：v0.30（L-5 清理时引入）；评估方 GCC 14 环境实测触发
+- **现象**：L-5 认为 `-w` 全量覆盖、删掉显式 `-Wno-int-conversion` 只留 `-w`。
+  但 GCC 14 把 `-Wint-conversion` 从 warning 升级为 **permerror（硬错误）**，
+  `-w` 只抑制 warning 压不住 error → `make clean && make` 在 cc500.c 编译处
+  报 `-Wint-conversion` ×13、EXIT=2 构建失败。
+  本地 GCC 13 验证通过（`-Wint-conversion` 仍只是普通 warning、`-w` 够用）——
+  是"环境依赖"的验证盲区：L-5 清理只在本机 GCC 13 验证，未覆盖 GCC 14 语义。
+- **修复**（`v2-c-kernel/Makefile` cc500 单文件规则）：恢复 `-Wno-int-conversion`
+  并与 `-w` 并存（GCC 8+ 两者均有效）。GCC 14 需要它压 permerror；`-w` 继续
+  压其余普通警告（`-Wcompare-distinct-pointer-types` 的 `in_data == (0-1)` 惯用法、
+  `-Wmaybe-uninitialized`）。
+- **验证**：用户最小样例三分隔离——`-w`→exit 1、`-w -Wno-int-conversion`→0、
+  `-w -fpermissive`→0；本沙箱 GCC 13 下 `make clean && make` 零告警产出 kernel.elf，
+  宿主 16/16 + QEMU 回归全绿。
+- **教训**：`-w` 不是 `-Werror` 的反义词（只压 warning 不压 permerror）；GCC>=14
+  默认 error 化的诊断（-Wint-conversion、-Wincompatible-pointer-types 等）必须显式
+  `-Wno-*`。跨编译器版本验证时，构建矩阵应至少覆盖"默认 error 化"那一档。
+
+---
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号 | 场景 | 现象 | 处置/教训 |
@@ -447,3 +628,4 @@
 | 编号 | 现象 | 结论 |
 |------|------|------|
 | OBS-001 | 定时器中断内读 PIT 计数器常为 0 | 正常现象：中断发生在计数器回绕时，读到的瞬时值即 0，并非硬件故障 |
+| OBS-002 | ~~`pcb_t::fork_frames[24]` 硬编码 24 帧（96KB）限制大进程 fork~~ | ✅ 已修复（v0.30 BUG-035）：改为 kmalloc 动态数组，`sched_fork` 按需分配、退出 kfree |

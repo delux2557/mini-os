@@ -13,6 +13,7 @@
 #include "mem.h"
 #include "serial.h"
 #include "vga.h"
+#include "version.h"   /* v0.30（评估 L-4）：motd 版本串单一来源 */
 #include <stdint.h>
 
 #define RAMDISK_BLOCKS 256            /* 1MB：数据块 252 个，足够多文件/跨块写 */
@@ -69,6 +70,8 @@ extern char _binary_forkdemo_elf_start[], _binary_forkdemo_elf_end[];
 extern char _binary_args_elf_start[],   _binary_args_elf_end[];
 extern char _binary_stackovf_elf_start[], _binary_stackovf_elf_end[];
 extern char _binary_deep_elf_start[], _binary_deep_elf_end[];
+extern char _binary_deepfork_elf_start[], _binary_deepfork_elf_end[];   /* v0.29 已生长栈×fork */
+extern char _binary_deepexec_elf_start[], _binary_deepexec_elf_end[];   /* v0.29 已生长栈×exec */
 extern char _binary_heapdemo_elf_start[], _binary_heapdemo_elf_end[];
 extern char _binary_fsdemo_elf_start[],  _binary_fsdemo_elf_end[];
 extern char _binary_waitdemo_elf_start[], _binary_waitdemo_elf_end[];
@@ -91,7 +94,7 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
 
 static void initramfs_setup(void) {
     static const char motd[] =
-        "Mini-OS v0.27: toolchain self-host (cc500 compiles itself). Try: ccboot\n"
+        "Mini-OS " MINI_OS_VERSION ": toolchain self-host (cc500 compiles itself). Try: ccboot\n"
         "Commands: help ls cat mkdir rmdir rm run exec save selftest exit netping ccboot\n";
     initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
     initramfs_file("hello",
@@ -118,6 +121,13 @@ static void initramfs_setup(void) {
     initramfs_file("deep",
                    _binary_deep_elf_start,
                    (uint32_t)(_binary_deep_elf_end - _binary_deep_elf_start));
+    /* v0.29 回归盲区：已生长栈 × fork / exec 组合演示 */
+    initramfs_file("deepfork",
+                   _binary_deepfork_elf_start,
+                   (uint32_t)(_binary_deepfork_elf_end - _binary_deepfork_elf_start));
+    initramfs_file("deepexec",
+                   _binary_deepexec_elf_start,
+                   (uint32_t)(_binary_deepexec_elf_end - _binary_deepexec_elf_start));
     initramfs_file("heapdemo",
                    _binary_heapdemo_elf_start,
                    (uint32_t)(_binary_heapdemo_elf_end - _binary_heapdemo_elf_start));

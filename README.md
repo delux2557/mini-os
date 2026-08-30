@@ -1,11 +1,16 @@
 # Micro-OS
 
 一个从零开始、可运行在 QEMU 虚拟机上的微型 x86 操作系统。
-用于学习操作系统核心原理：引导、中断、内存、用户态、进程调度。
+用于学习操作系统核心原理：引导、中断、内存、用户态、进程调度、文件系统、
+网络，以及**自举（guest 内编译并运行程序）**。
 
+> 项目已达成"教学闭环"（进程/内存/文件/网络/工具链全部完成），
+> 进入 **"收尾-加固-沉淀"** 阶段——最终交付物 = 可运行内核 + 工程方法论文档
+> + "AI 辅助系统编程"的实证案例（演进路线见 [docs/roadmap.md](docs/roadmap.md)）。
+>
 > 代码由 AI 辅助编写；每个版本先跑通最小可用目标，再迭代扩展。
-> 历史与路线见 [docs/roadmap.md](docs/roadmap.md)，设计与思路见 [docs/design.md](docs/design.md)，
-> Bug 记录见 [docs/bugs.md](docs/bugs.md)，版本变更见 [docs/changelog.md](docs/changelog.md)。
+> 设计与思路见 [docs/design.md](docs/design.md)，Bug 记录见 [docs/bugs.md](docs/bugs.md)，
+> 版本变更见 [docs/changelog.md](docs/changelog.md)。
 
 ## 版本矩阵
 
@@ -20,6 +25,37 @@
 | v0.7 | `v2-c-kernel/` | IPC：有界消息队列 + 生产者-消费者（阻塞/唤醒） | — |
 | v0.8 | `v2-c-kernel/` | 文件系统：内存盘 + 极简 mini-fs（create/open/read/write/ls/delete） | [v0.8](docs/screenshots/v2_v08.png) |
 | v0.9 | `v2-c-kernel/` | ELF 加载器 + 常驻交互式 Shell（help/ls/cat/run）+ initramfs | [v0.9](docs/screenshots/v2_v09.png) |
+| v0.10 | `v2-c-kernel/` | 串口终端：外部 agent 经 QEMU 串口驱动 shell（`-serial stdio`） | — |
+| v0.11 | `v2-c-kernel/` | 每进程独立地址空间 + 物理内存隔离（isol 演示） | — |
+| v0.12 | `v2-c-kernel/` | fork/exec 进程模型 + argv 参数传递 | — |
+| v0.13 | `v2-c-kernel/` | 用户栈守卫页 + 栈溢出检测 | — |
+| v0.14 | `v2-c-kernel/` | FS 增强：目录层级 / 间接块(4.1MB) / seek / 追加写 | — |
+| v0.15 | `v2-c-kernel/` | 补全 wait/waitpid 语义 + 孤儿清理 | — |
+| v0.16 | `v2-c-kernel/` | 用户态 CRT 收口 + ATA 真盘持久化 + 单行 selftest | — |
+| v0.17 | `v2-c-kernel/` | syscall 边界校验（copyin/copyout）+ abuse 演示 | — |
+| v0.18 | `v2-c-kernel/` | 网络：e1000 网卡驱动 + 极简 ARP（PCI + SLIRP 端到端） | — |
+| v0.19 | `v2-c-kernel/` | 网络加厚：极简 IP/UDP（纯逻辑可宿主单测） | — |
+| v0.20 | `v2-c-kernel/` | 网络可用：用户态 UDP socket（sockdemo 端到端回环） | — |
+| v0.21 | `v2-c-kernel/` | 内核自审计（不变量检查）+ syscall 边界契约化 | — |
+| v0.22 | `v2-c-kernel/` | 网络交互化：shell `netping` 命令 | — |
+| v0.23 | `v2-c-kernel/` | ICMP Echo：PING 通宿主 | — |
+| v0.24 | `v2-c-kernel/` | UDP 校验和错误路径（坏包拒绝） | — |
+| v0.25 | `v2-c-kernel/` | DHCP 客户端：动态获取 IP/网关（失败回退静态） | — |
+| v0.26 | `v2-c-kernel/` | 容量三连：用户栈按需生长 + 用户堆(brk) + ELF 加载去上限 | — |
+| v0.27 | `v2-c-kernel/` | 工具链与自举：cc500 编译器移植 + guest 内写-编-跑闭环（ccboot 自举不动点） | — |
+| v0.27b | `v2-c-kernel/` | cc500 命令行路径 + shell `writefile`/`ccrun`（任意程序写-编-跑） | — |
+| v0.28 | `v2-c-kernel/` | DHCP 租期续约（T1 单播 RENEW / T2 广播 REBIND，RFC 2131） | — |
+| v0.29 | `v2-c-kernel/` | 加固：宿主侧 fuzz + 内核堆审计 | — |
+| v0.30 | `v2-c-kernel/` | 修复工具链恶性 BUG（文件槽泄漏 + 自编译产物丢 argv）+ 代码审查修复 | — |
+
+### cc500 方言边界（guest 内写-编-跑须知）
+
+- **全局数组不支持**：`int arr[4];` 在文法层面被拒（C 子集边界，非缺陷），用局部数组
+  或手动缓冲替代
+- **编译错误零诊断**：语法错误仅 `error()` 裸 `exit(1)`，无出错 token 提示——排错靠
+  二分试错（诊断增强属后续候选）
+- **argv 路径已通**：入口桩自 v0.30 起编组 argc/argv，gcc 版与自编译产物（P1）exec
+  带 argv 均正确（历史 BUG-032 已修复）
 
 ## 目录结构
 
@@ -46,7 +82,7 @@ mini-os/
 
 ## 快速开始
 
-依赖：`gcc`(m32 支持)、`nasm`、`ld`、`objcopy`、`qemu-system-i386`。
+依赖：`gcc`(m32 支持)、`nasm`、`ld`、`objcopy`、`qemu-system-i386`、`python3`、`socat`。
 
 ```bash
 cd v2-c-kernel
@@ -57,7 +93,10 @@ make run-serial # 无图形界面运行，串口日志写到 build/serial.log
 
 make test-host  # 宿主单元测试（纯逻辑，秒级）
 make test-qemu  # QEMU 自动回归（串口日志关键字校验）
-make test       # 以上全部
+make test-serial # QEMU 串口终端回归（模拟外部 agent 经串口驱动 shell）
+make test-persist # QEMU ATA 真盘持久化回归（两次运行共享磁盘镜像）
+make test-net   # QEMU 网络回归（e1000 + ARP + UDP + ICMP 与宿主端到端）
+make test       # 以上全部（五层）
 make clean      # 清理 build/
 ```
 

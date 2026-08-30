@@ -40,7 +40,7 @@ void app_main(int argc, char **argv) {
     report("print@0xFFFFFFF0",     syscall3(SYS_PRINT, 0xFFFFFFF0u, 0, 0));
 
     /* 文件读写缓冲指针：先打开一个合法文件，再用内核地址当缓冲 -> 应被拒 */
-    if (syscall3(SYS_FS_CREATE, (uint32_t)"/abuse.tmp", 0, 0) < 0) {
+    if ((int)syscall3(SYS_FS_CREATE, (uint32_t)"/abuse.tmp", 0, 0) < 0) {
         sys_print("[abuse] create /abuse.tmp failed\n");
     } else if (syscall3(SYS_FS_OPEN, 1, (uint32_t)"/abuse.tmp", 1) != 0) {
         sys_print("[abuse] open /abuse.tmp failed\n");
@@ -51,7 +51,7 @@ void app_main(int argc, char **argv) {
     }
 
     /* 合法路径应正常（不误伤）：建 -> 写 -> 删一个文件 */
-    if (syscall3(SYS_FS_CREATE, (uint32_t)"/ok.tmp", 0, 0) < 0 ||
+    if ((int)syscall3(SYS_FS_CREATE, (uint32_t)"/ok.tmp", 0, 0) < 0 ||
         syscall3(SYS_FS_OPEN, 1, (uint32_t)"/ok.tmp", 1) != 0) {
         sys_print("[abuse] valid-path FAIL\n");
         fail++;

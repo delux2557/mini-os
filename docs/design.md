@@ -27,19 +27,24 @@ boot.s(multiboot 头 + 进入内核) → kernel_main
 |------|------|
 | 0x100000 ~ 内核末尾 | 内核代码/数据（保护页） |
 | 物理帧分配器 | 以 4KB 页为单位，位图/链表式分配 |
-| 0x80000000 | 所有进程共享的用户代码页（映射同一份 userprog.bin） |
-| 0x80010000 + pid*8K | 每进程用户栈 8KB 槽 = [守卫页 4KB(不映射) \| 栈页 4KB(映射)]（v0.13，栈从槽顶向下增长） |
-| 0x80044000 + slot*4K | 共享内存页（v0.13 后移避让栈区；所有进程映射同一物理帧到同一虚拟地址） |
-| 0x80030000 | 常驻 shell 的链接/加载地址（v0.9，resident 帧不随退出回收） |
-| 0x80040000 | 应用槽（v0.9：`run <prog>` 加载的 ELF，退出即回收其代码帧） |
+| 0x80000000 | 用户空间基址（USER_SPACE_BASE）；v0.11 起每进程独立页目录 |
+| 0x80010000 ~ 0x80090000 | 用户栈区：16 槽 × 32KB = [槽底硬底守卫页 4K（永不映射）\| 28KB 可生长栈区]（v0.26 栈按需生长；栈从槽顶向下增长，初始仅顶页映射） |
+| 0x80090000 | 常驻 shell 的链接/加载地址（v0.9 定址，v0.26 随栈区扩迁至此；resident 帧不随退出回收） |
+| 0x800A0000 ~ 0x801A0000 | app 区 1MB（v0.26#3 扩区去上限；`run <prog>` 加载的 ELF 按自身 PT_LOAD 逐页映射，退出回收代码帧；cc500 亦链接到 0x800A0000 基址） |
+| 0x801A0000 + slot*4K | 共享内存页（SHMEM_VBASE=app 区之后；所有进程映射同一物理帧到同一虚拟地址） |
+| 0x801A4000 ~ 0x801F4000 | 用户堆区 320KB = 80 页（v0.26#2 `sys_brk`；扩展按页补映射、收缩保留映射复用） |
+| 0x81000000 | 用户空间上界（USER_SPACE_END，v0.26#3 扩至 16MB） |
 | 每进程 4KB 内核栈 | 中断切换用，TSS.esp0 指向其栈顶 |
 
-- 懒分配：用户/测试页首次访问触发页错误，`pf_handler` 检查懒分配区并补映射，随后重试。
+- 懒分配：用户/测试页首次访问触发页错误，`pf_handler` 检查懒分配区并补映射，随后重试；
+  v0.26 起用户栈按需生长（STACK_GROWTH）与堆页补映射也走这条路径。
 - 内核地址区写保护：ring3 越权写内核页 → 页错误 → 进程被终止（v0.4 起有 crash 演示）。
 - v0.11 起：**每个用户进程持有独立页目录**（见第 9 节），不再共享页表；
   各进程用户半区（≥2GB）映射互不可见，内核半区（低 16MB 恒等映射 + 懒分配区）克隆共享。
 - 共享内存机制（v0.6 设计，v0.11 适配）：物理共享帧只分配一次，但**每次调用 `sys_shmem`**
   都把该帧重新映射进当前进程页目录，保证各进程都能访问同一物理帧。
+- 用户地址空间总上界 `USER_SPACE_END=0x81000000`（16MB）：栈区/共享内存/app 区/堆区
+  全部落在其内（v0.26#3 扩容，各段基址见 [mem.h](../v2-c-kernel/src/mm/mem.h) 布局注释）。
 
 ## 3. 中断与系统调用
 
@@ -48,6 +53,11 @@ boot.s(multiboot 头 + 进入内核) → kernel_main
 - 系统调用分发 `syscall_dispatch`：`eax=号`，参数走 `ebx/ecx/edx`；涉及调度（exit/sleep/yield）的调用不返回。
 - PIC 掩码（v0.10）：允许 IRQ0（定时器）、IRQ1（键盘）、IRQ4（串口 COM1 接收），
   串口中断经 `serial_irq` 读走全部可用字符并转发给注册的接收钩子。
+- **单核假设**（并发模型）：本内核面向**单 CPU**（无 SMP），中断是唯一的抢占源，
+  内核临界段靠"关中断"（`cli`/`sti`）串行化。因此信号量/消息队列的
+  "try + block" 两步虽非原子，在单核 + 中断串行模型下安全（`sched_block` 保存现场后
+  才开中断，无并发交错）；`sem/msg` 模块也据此不额外加锁。若未来引入多核或嵌套中断，
+  需在 `sem_wait_try`+`sched_block`、`msg_send_try`+`msg_send_wake` 之间加 `cli/sti` 保护。
 
 ## 4. 进程调度（v0.5 核心）
 
@@ -282,11 +292,12 @@ v0.5~v0.10 所有进程共享同一页表：任何进程都可访问其他进程
 - 各自写入 `1000+pid` → 睡眠交错 → 读回仍是自己写的值 → `ISOLATED OK`。
 - QEMU 回归用正则统计日志中该虚拟地址对应的不同物理页数量（≥2 即通过）。
 
-## 10. 测试策略（工程化，v0.16 起四层）
+## 10. 测试策略（工程化，v0.18 起五层）
 
 ### 宿主单元测试（tests/run_host_tests.sh）
 - 把无内核依赖的纯逻辑编译成普通 Linux 程序断言：
-  `heap.c`、`kb.c`、`sched_policy.c`、`sem.c`、`msg.c`、`blockdev.c + fs.c`、`elf.c`、`guard.c`。
+  `heap.c`、`kb.c`、`sched_policy.c`、`sem.c`、`msg.c`、`blockdev.c + fs.c`、`elf.c`、
+  `guard.c`、`brk.c`、`userptr.c`、`netutil.c`、`ip.c`、`udp.c`、`icmp.c`、`dhcp.c`。
 - 优点：秒级反馈、可用 ASan/valgrind、无需 QEMU。
 - 用 `-fno-pie -no-pie` 保证 32 位地址假设在宿主环境成立。
 
@@ -298,23 +309,36 @@ v0.5~v0.10 所有进程共享同一页表：任何进程都可访问其他进程
   v0.8 内存盘初始化/文件创建/写模式打开/跨块写入/读回校验通过/多文件创建/ls 列出/演示完成、
   v0.9 initramfs 写入/内核加载 shell/readline 阻塞/交互式注入 shell 命令
   （经 HMP monitor `sendkey` 端到端跑 `help/ls/cat motd/run hello/run echo/run crash`）、
-  v0.12~v0.15 fork/exec/argv/栈守卫/waitdemo/exec 失败反馈，以及 v0.16 的 `selftest` 单行自检。
+  v0.12~v0.15 fork/exec/argv/栈守卫/waitdemo/exec 失败反馈、v0.16 的 `selftest` 单行自检，
+  以及 v0.17~v0.27 的 abuse 边界被拒 / stack 生长 / brk·heapdemo / bigdemo 去上限 /
+  ccboot 自举闭环（P1 被加载运行 + 退出码 + `byte-identical PASS`）。
 
 ### 串口终端回归（tests/test_serial.sh，串口 agent 通道）
 - 以 FIFO 模拟"外部 agent 通道"，经 `qemu -serial stdio` 驱动 shell 逐命令交互，
   校验命令回显与各输出里程碑（help/ls/cat motd/run hello/echo/crash/isol/forkdemo/exec/
   stackovf/fsdemo/waitdemo/selftest）。与键盘路径互补，验证"终端通道"。
+- v0.27b 起新增「写-编-跑」用例：`writefile /hello.c <源码>` → `ccrun /hello.c /hello.elf`
+  → 编译产物被加载运行（`[elf] '/hello.elf' loaded`）→ 退出码 PASS。
 
 ### ATA 持久化回归（tests/test_persist.sh，v0.16 新增）
 - **两次 QEMU 运行共享同一 `-hda` 磁盘镜像**：
   第 1 次格式化空白盘 → `mkdir /persist` → `save` 写回 → 退出；
   第 2 次重启挂载同一镜像 → 校验 `/persist` 仍在、且持久盘上的应用可经 `selftest` 正常运行。
 - 这就是"OS 报告 → agent 修改 → make test → QEMU 重启 → 结构化回归"闭环里的"重启验证"环节。
+- v0.27 起再补「工具链 × 持久化」组合格：`writefile` + `ccrun` 出的编译产物 `/persist/p.elf`
+  经 `save` 落盘，重启后 `run /persist/p.elf` 仍能加载运行（跨子系统回归盲区补格）。
+
+### 网络回归（tests/test_net.sh，v0.18 新增第五层）
+- QEMU `-device e1000` + SLIRP + `filter-dump` 抓包 pcap；校验串口日志里程碑
+  （e1000 探测/链路、DHCP 四步、ARP/UDP/ICMP 自检、`netping`/`recvfrom` 交互），
+  并用 python 解析 pcap 作为**外部预言机**独立核验线上包（ARP 双向 / UDP / ICMP 计数）。
+- 与宿主纯逻辑单测（netutil/ip/udp/icmp/dhcp）配合：协议编解码逻辑在宿主测、线缆语义在 QEMU 测。
 
 ### 单行结构化自检（shell `selftest`，v0.16 新增）
 - shell 内置 `selftest` 命令：逐跑 hello/isol/forkdemo/fsdemo/waitdemo 五个代表应用
-  （覆盖 spawn/隔离/fork/FS/wait），每项打印退出码，最后汇总**一行**：
-  `[selftest] PASS (5 checks)` 或 `[selftest] FAIL: N/5 checks`。
+  （覆盖 spawn/隔离/fork/FS/wait），每项打印退出码；v0.21 追加第 6 项内核自审计
+  （`SYS_KERN_AUDIT`：帧配平/信号量守恒/PCB 状态机）。最后汇总**一行**：
+  `[selftest] PASS (6 checks)` 或 `[selftest] FAIL: N/6 checks`。
 - 外部 agent 只 grep 这一行即可全量确认，避免逐条关键字匹配几十个里程碑。
 
 ### 回归盲区的教训（fsdemo BUG-016）
@@ -526,3 +550,135 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
 | syscall 一律先校验用户指针再使用 | 防恶意/出错应用借 syscall 读写内核内存（copyin/copyout）；大缓冲只校验不搬运，避免 4KB 内核栈溢出（v0.17） |
 | 校验只判"指针落在用户半区"（含上界防回绕） | 内核全部位于低地址、用户位于高半区，该条件即安全边界；END 取宽裕值仅作回绕保护（v0.17） |
 | copyin_str 逐字节拷贝并在越界处 -1 | 防"无 NUL 字符串读到缺页"；路径/名字先拷入内核缓冲再解析（v0.17） |
+
+## 17. 网络子系统（v0.18~v0.28 核心）
+
+### PCI 配置空间 + e1000 驱动（v0.18）
+- **PCI type-1 配置空间**（`src/drv/pci.c/h`）：`pci_config_read/write`（端口 0xCF8/0xCFC）、
+  `pci_find(vendor, device)` 扫描总线 0 找网卡、`pci_bar_alloc_mem`——探测 BAR 大小
+  （全 1 写回再读）、在 PCI MMIO 洞（0xFEB00000 起）分配地址并写回、使能 MEM|BUSMASTER。
+  QEMU `-kernel` 不经 SeaBIOS，BAR 须驱动自分配。
+- **e1000**（`src/drv/e1000.c/h`，Intel 82540EM）：MMIO BAR0 恒等映射进内核页目录；
+  软复位（CTRL.RST）→ 强制链路（CTRL.SLU）→ 轮询 STATUS.LU；MAC 从 RAL0/RAH0 读取；
+  legacy 16B 描述符环（RX16/TX8），**轮询收发**（无 DMA 中断）：`e1000_tx` 填描述符
+  （EOP|IFCS|RS）→ 写 TDT 触发 → 轮询 status.DD 确认；`e1000_rx` 轮询 DD → 拷缓冲 → 归还 RDT。
+- 三条硬件坑（见 bugs.md）：描述符环须 `volatile`（否则 -O2 把 status 读提升到循环外，
+  BUG-018）；TCTL/RCTL 的 EN 位是 bit1（0x2）不是 bit0（BUG-019）；QEMU 写 RCTL 会启动
+  1000ms flush 定时器、期间包进队列不进 RX 环（BUG-020，初始化末尾等窗口过期）。
+- **纯逻辑以太网/ARP 帧**（`src/net/netutil.c/h`，44 断言）：`net_build_arp_request`（广播）、
+  `net_eth_type`、`net_parse_arp_reply`；启动自检 `e1000_selftest` 发 ARP（who has 10.0.2.2）
+  收 SLIRP 网关回复，端到端验证 TX+RX。
+
+### 极简 IP/UDP（v0.19，纯逻辑可宿主单测）
+- `src/net/ip.c/h`：IPv4 头构建/解析 + RFC 1071 16 位校验和（`ip_checksum`）。
+- `src/net/udp.c/h`：完整帧构建（Ethernet+IPv4+UDP，校验和含 12B 伪头）/解析（round-trip + 拒绝路径）。
+- 校验和基准由独立 python 参考实现算得，宿主单测 test_ip(24)/test_udp(24)。
+
+### 用户态 UDP socket（v0.20）
+- `sys_net_socket/sendto/recvfrom/close`（30-33）；内核 `netsock` socket 表 + 网卡轮询分发
+  （recv 先排空 NIC 再取队首，非阻塞与轮询驱动对齐）；`netio.h` 共享 iov 结构
+  （3 参 syscall 承载多参，ABI 与内核一致）。
+- `sockdemo` 用户态端到端回环（socket→sendto PING→轮询 recvfrom PONG）。
+- **坑**：e1000 MMIO 位于高地址（PDE≥512）、进程页目录只克隆低 1GB PDE → syscall 路径缺页；
+  netsock 收发前临时切内核页目录（BUG 见 v0.20 修正）。
+
+### 自审计与边界契约（v0.21）、netping（v0.22）、ICMP（v0.23）、UDP 校验和（v0.24）、DHCP（v0.25）
+- `SYS_KERN_AUDIT`(34)：`sem_invariant_ok`（count+waiters 守恒）、`mem_audit`（used_frames 与
+  帧位图配平）、`sched_audit`（PCB 状态机合法性）；selftest 追加第 6 项。
+- shell `netping [ip] [port]`：开 UDP socket 发 PING、轮询收 PONG，单行原子打印
+  `[netping] <ip>:<port> PONG +<N>B rtt=<T> ticks`。
+- `src/net/icmp.c/h` 纯逻辑：Ethernet+IPv4+ICMP Echo（校验和只覆盖 ICMP 报文，RFC 792 无伪头）；
+  `e1000_icmp_selftest` 发 Echo 到 SLIRP 网关收回显（`[icmp] echo reply … rtt=N ticks`）。
+- UDP 接收端校验和验证（RFC 768）：伪头+UDP 头+载荷重算须折叠为 0 才接受；校验和字段 0=
+  发送端未计算 → 接受；发送端算得 0 以 0xFFFF 发送（两者不混淆）。坏包在 `udp_parse` 即 -1 静默丢弃。
+- `src/net/dhcp.c/h` 纯逻辑（RFC 2131/2132）：`dhcp_build_discover`（0.0.0.0:68 → 广播，option 55
+  参数请求列表 + flags=0x8000）、`dhcp_build_request`（server id 54 + 请求 IP 50）、`dhcp_parse_reply`
+  （校验 xid/magic cookie/消息类型 53，提取 IP/网关/租期）；`e1000_dhcp_run` 开机四步状态机
+  （DISCOVER→OFFER→REQUEST→ACK，忙等超时 ~2s、NAK/超时重试），失败回退静态
+  `NET_STATIC_IP`/`NET_STATIC_GW`；`e1000_my_ip()`/`e1000_gw_ip()` 供 ARP/UDP/ICMP 三自检取动态 IP。
+
+### DHCP 租期续约（v0.28，RFC 2131 §4.4.5）
+- **T1/T2 定时**：ACK 后记录租期并 tick 化 T1=0.5×lease（单播 RENEW）、T2=0.875×lease
+  （广播 REBIND）；`e1000_dhcp_tick()` 由 timer 心跳每 tick 非阻塞驱动（`timer_cb` 里、
+  `sched_tick` 前，保证不被上下文切换跳过）。
+- **状态机**：`RENEW_NONE → RENEW_SENT → REBIND_SENT →（REACQ_OFFER/REACQ_ACK）`；
+  到 T1 发单播 RENEW（ciaddr + 54 + 50），到 T2 未 ACK 升广播 REBIND（仅 50，任意服务器
+  可续）；ACK 重置定时器继续下一租期；NAK / REBIND 超时 → 重新 DISCOVER→OFFER→REQUEST→ACK
+  重新获取 → 彻底失败回静态兜底。每 tick 至多"发一帧 + 收一帧"，绝不在 ISR 忙等。
+- **端口 68 专用接收端点**（`netsock_dhcp_open/recv`）：用户 socket 的 recvfrom 会
+  "排空"网卡（netsock_drain 取走 NIC 环所有帧），无匹配本地端口的 DHCP 应答被抢先丢弃；
+  注册端口 68 的 DHCP socket 后，分发路径把应答入其队列，续约 tick 经它读取。
+- **两条坑**：① e1000 MMIO 位于高地址（PDE≥512），timer ISR 可能在用户进程页目录
+  （只克隆低 1GB PDE）下运行 → 访问设备寄存器缺页；tick 内临时切内核页目录（与 netsock
+  收发同款），用完切回。② `print_ip` 逐字节须 `& 0xFF`（否则 `10.2560.655362...`）。
+- **可测性**：Makefile `DHCP_RENEW_SECS`（缺省用服务器租期，SLIRP 为 24h）编译期覆盖
+  租期为秒级，test_net 短租期内核在秒级窗口断言 RENEW→ACK 续约闭环（pcap UDP 10→12）。
+
+## 18. 容量三连（v0.26 核心）
+
+### #1 用户栈按需生长（`src/kernel/guard.c` + `src/mm/mem.c` pf_handler）
+- 每进程栈槽由 8KB 固定扩为 **32KB 槽 = 槽底硬底守卫页 4K（永不映射）+ 28KB 可生长栈区**，
+  栈从槽顶向下增长、初始仅映射顶页；命中守卫页时内核补映射新栈页、守卫页随栈底下移，
+  直到槽底硬底（此时深越界才判溢出）。
+- `stack_guard_hit` 由 v0.13 二态扩为三态 `STACK_OK / STACK_GROWTH / STACK_BOOM`（纯逻辑宿主单测）：
+  GROWTH=命中当前守卫页且槽内仍有空间 → 补映射重试；BOOM=深越界或已到硬底 → 隔离终止。
+- PCB `stack_frame` → `stack_frames[]` + `stack_fcount` + `stack_bottom`；`stack_init`/`stack_free`
+  统一管理，覆盖 spawn / exec / fork / reap 全路径。
+- `deep` 演示：递归分配 1KB 局部数组 ×12 层，在 4KB 初始栈上触发 3 次按需生长后存活。
+
+### #2 用户堆（brk/sbrk，`src/mm/brk.c/h` + `src/kernel/usermode.c`）
+- `SYS_BRK`(35)：`sys_brk(addr)`（0=查询当前 brk）/ `sys_sbrk(incr)`（相对增长返回旧 brk）；
+  堆区 `[USER_HEAP_BASE=0x801A4000, USER_HEAP_MAX=0x801F4000)` 320KB=80 页，每进程独立隔离。
+- `brk.c` 纯逻辑（`brk_pages_up` / `brk_in_range`）可宿主单测；扩展按页补映射物理帧并记账进
+  PCB `heap_frames[]`+`heap_fcount`，收缩只更新 `heap_brk` 保留映射复用。
+- **容量守卫（S8）**：按"目标 top 自 heap_base 起的页数 ≤ USER_HEAP_PAGES"判定——不用
+  `brk_pages_up(old,a)`（旧 brk→新 brk 跨度），否则收缩后旧映射保留、再涨过同一段会重复计数、
+  在真实预算内误拒；映射页恒为 `[base, top)` 前缀，单调增长下两式等价。
+- **BUG-025**：扩展映射从非页对齐 `old` 起逐 0x1000 上跳，brk 落在页中部时顶部半页未映射
+  → 任意非页对齐 malloc 越界缺页（heapdemo 页对齐侥幸绕过；cc500 任意尺寸命中）。
+  修复：映射 `[old,a)` 相交的所有页（old 下取整、a 上取整），与记账一致。
+
+### #3 ELF 加载去上限（`src/kernel/usermode.c` load_frames + `sched.c` own_frames）
+- `load_frames` 固定 8 项静态数组 → 按需 `kmalloc` 动态列表；`own_frames` 同步动态化
+  （`own_frames_take` 拷入 PCB、`release_priv_frames` 归还），解除 32KB/8 帧约束；
+  `APP_MAXFRAMES`/65536B 旧上限移除（上限改为 app 区同量级 1MB）。
+- 地址空间重布局：用户空间扩至 16MB（`USER_SPACE_END=0x81000000`）、app 区 1MB
+  （0x800A0000-0x801A0000）、共享内存迁至 0x801A0000、堆区 0x801A4000。
+- `bigdemo`：70KB 初值数据（.data 段）使 ELF 78KB > 旧上限，加载需 21 帧（旧 8 帧时代无法加载）。
+
+## 19. 工具链与自举（v0.27 / v0.27b 核心）
+
+### cc500 编译器移植（`tools/cc500/cc500.c`，~877 行）
+- 移植 E. Grimley-Evans 自托管 C 子集编译器（~750 行上游，GPL-2.0 参考/自写）：stdin 读 C →
+  stdout 出 x86-32 ELF，无 libc 依赖；头注释逐条列移植改动、保留原作者声明。
+- 链接基址 `code_offset=0x800A0000`（APP_LINK），ELF 头 e_entry/p_vaddr/p_paddr 同步改址。
+- **唯一机器码 stub = 通用系统调用** `syscall3(n,a,b,c)`（eax=n ebx=a ecx=b edx=c，int $0x80）；
+  `exit/malloc/getchar/putchar/sys_print` 全用 CC500 C 子集实现（malloc 基于 SYS_BRK bump），
+  编译器内部不含平台相关代码；该 stub 同时发射进每个被编译程序，编译器与产物共享同一 ABI 实现。
+- **专用 CRT**（`src/app/cc500_crt.c`）：`_start` 以 `cc500_main()` 返回值 `sys_exit`
+  （普通 crt.o 固定退出 0，无法把编译成败传给 shell）；不 include user_lib.h
+  （其 static inline syscall3 会与外部 syscall3 重名冲突）。
+- **语言子集约束**：无 `break/continue/for/switch/&&/||/!/</>/%/类型转换`，循环用 done 标志退出、
+  `>=` 用操作数交换为 `<=`、换行用 `\x0a`——自举源必须能被自己编译。
+- **I/O 走 mini-fs**：整读输入文件（v0.27b 起 `argv[1]`，缺省 `/cc500.c`）进堆做 getchar 源；
+  `putchar` 为空操作，编译完 `flush_output` 把 code 缓冲写回输出路径（`argv[2]`，缺省 `/out.elf`）
+  ——绕开无 stdin/stdout 重定向限制。
+- **输入大小守卫（S6）**：`in_data=malloc(32768)`；缓冲满后再探 1 字节，仍有数据则显式
+  `input too big (>32KB)` 报错，杜绝静默截半编译。
+- initramfs 嵌入：`cc500`（编译器 ELF）+ `cc500.c`（自举源，objcopy 原始字节）两个文件。
+- **BUG-026**：畸形输入（形参列表 EOF 未闭合）死循环——符号表无界增长；加 EOF 守卫。
+
+### 自举不动点（shell `ccboot`）
+- 步骤：run cc500（gcc 版）编译自身 → `/out.elf`=P1；**快照 P1 到 /p1.elf**（P2 会覆盖 /out.elf，
+  时序处理干净）；run `/out.elf`（=P1）再编译自身 → P2；`file_equal` 对 **/p1.elf 与 /out.elf
+  做真·逐字节比对**（长度 + 内容循环），输出 `[ccboot] byte-identical PASS/FAIL`。
+- 比较对象是"cc500 版 vs cc500 版"（不是 gcc 输出 vs cc 输出）——正确的不动点定义；
+  PASS 仅在两文件等长且逐字节相同时打印（S4 从 FNV 哈希升级为逐字节）。
+
+### 写-编-跑闭环（v0.27b shell 命令）
+- `writefile <path> <content>`：命令行剩余部分（保留空格）写入文件，agent 可在 guest 内经
+  shell 写源码（ARG_MAX 32→128）。
+- `ccrun <src> <out>`：fork+exec cc500 编译 `<src>` 为 `<out>` → `run <out>` → 校验退出码，
+  端到端「写-编-跑」一键。完整剧本：`writefile /hello.c <源码>` → `ccrun /hello.c /hello.elf`
+  → 编译产物被加载运行（`[elf] '/hello.elf' loaded`）→ 退出码 0；cc500 对任意合法源程序
+  编译出可运行 ELF，不再局限于编译自身。

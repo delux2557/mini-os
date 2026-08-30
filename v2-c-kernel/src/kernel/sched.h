@@ -69,8 +69,11 @@ typedef struct {
     uint32_t map_frames[8];  /* v0.11: sys_map_page 用户申请的物理页（退出时回收） */
     uint32_t map_fcount;     /* 上表有效项数 */
     uint32_t page_dir;       /* v0.11: 本进程页目录物理地址；idle 为 0（内核页目录） */
-    uint32_t fork_frames[24];/* v0.12: sys_fork 深拷贝出的用户页物理帧（退出时回收）。
-                                USER_CODE/用户栈/ELF 代码/私有页都深拷贝；共享内存区保持共享不在此列 */
+    uint32_t *fork_frames;   /* v0.30（OBS-002）：sys_fork 深拷贝出的用户页物理帧（退出时回收）。
+                                v0.12 为固定 24 帧数组，大进程（ELF≤256+堆80+栈7+map8≈351 页）会越限失败；
+                                v0.30 改为 kmalloc 动态数组（同 own_frames）：sched_fork 先数需深拷贝页数
+                                再按需分配，release_priv_frames/fork_oom 中 kfree。USER_CODE/用户栈/ELF 代码/
+                                私有页都深拷贝；共享内存区保持共享不在此列 */
     uint32_t fork_fcount;    /* 上表有效项数 */
 } pcb_t;
 
@@ -90,9 +93,11 @@ void sched_start(void);      /* 切入第一个就绪进程（不返回） */
  * 父进程返回子进程 pid；子进程从调用点继续（eax=0）。 */
 int  sched_fork(registers_t *r);
 /* v0.12: 用新程序替换当前进程（exec）。argv 为内核缓冲中的参数字符串数组
- * （argv[0..argc-1] 各以 \0 结尾，最多 8 条）。成功不返回；失败返回 -1（调用方回滚）。 */
+ * （argv[0..argc-1] 各以 \0 结尾，最多 8 条）。成功不返回；失败返回 -1（调用方回滚）。
+ * v0.28 审查修复：frames 为调用方的临时记账数组（exec 的 load_frames，kmalloc），
+ * sched_exec 复制进 PCB 的 own_frames 后自行 kfree——调用方不再持有（P0-2）。 */
 int  sched_exec(registers_t *r, const char *name, uint32_t pd,
-                uint32_t entry, const uint32_t *frames, uint32_t fcount, uint32_t vbase,
+                uint32_t entry, uint32_t *frames, uint32_t fcount, uint32_t vbase,
                 const char (*argv)[64], uint32_t argc);
 void sched_tick(registers_t *r);  /* 定时器心跳：唤醒阻塞 + 抢占 + 回收 */
 void sched_yield(registers_t *r); /* 主动让出（不返回） */

@@ -301,7 +301,9 @@ static void release_priv_frames(pcb_t *p) {
     p->own_fcount = 0;
     for (uint32_t i = 0; i < p->map_fcount && i < 8; i++) frame_free(p->map_frames[i]);
     p->map_fcount = 0;
-    for (uint32_t i = 0; i < p->fork_fcount && i < 24; i++) frame_free(p->fork_frames[i]);
+    for (uint32_t i = 0; i < p->fork_fcount; i++) frame_free(p->fork_frames[i]);
+    if (p->fork_frames) kfree(p->fork_frames);   /* v0.30（OBS-002）：fork 深拷贝动态数组一并归还 */
+    p->fork_frames = NULL;
     p->fork_fcount = 0;
     stack_free(p);   /* v0.26: 释放已映射的用户栈页 */
     for (uint32_t i = 0; i < p->heap_fcount && i < USER_HEAP_PAGES; i++) /* v0.26#2 */
@@ -324,6 +326,25 @@ int sched_fork(registers_t *r) {
     /* 深拷贝父进程用户半区（PDE 512..1023）除共享内存区外的所有映射页。
      * 页表帧/页目录帧都落在低 16MB 恒等映射区，任何地址空间都能直接读写。 */
     uint32_t *dir = (uint32_t *)mem_current_pd();   /* 父进程页目录 = 当前 CR3 */
+
+    /* v0.30（OBS-002）：先数一遍需深拷贝的页数，再按需 kmalloc 记账数组。
+     * 旧实现 fork_frames[24] 硬编码，大进程（ELF≤256+堆80+栈7+map8）必然越限 fork 失败。 */
+    uint32_t deep = 0;
+    for (uint32_t i = 512; i < 1024; i++) {
+        if (!(dir[i] & 1)) continue;
+        uint32_t *pt = (uint32_t *)(dir[i] & ~0xFFFu);
+        for (uint32_t j = 0; j < 1024; j++) {
+            if (!(pt[j] & 1)) continue;
+            uint32_t virt = (i << 22) | (j << 12);
+            if (virt >= SHMEM_VBASE && virt < SHMEM_VBASE + SHMEM_SLOTS * 0x1000u) continue;
+            deep++;
+        }
+    }
+    if (deep) {
+        c->fork_frames = (uint32_t *)kmalloc(deep * sizeof(uint32_t));
+        if (!c->fork_frames) goto fork_oom;
+    }
+
     for (uint32_t i = 512; i < 1024; i++) {
         if (!(dir[i] & 1)) continue;
         uint32_t *pt = (uint32_t *)(dir[i] & ~0xFFFu);
@@ -337,7 +358,6 @@ int sched_fork(registers_t *r) {
                 map_page_in(c->page_dir, virt, phys, flags);
                 continue;
             }
-            if (c->fork_fcount >= 24) goto fork_oom;
             uint32_t nf = frame_alloc();
             if (!nf) goto fork_oom;
             memcpy8((void *)nf, (const void *)phys, 4096);   /* 内容拷贝 */
@@ -376,7 +396,8 @@ int sched_fork(registers_t *r) {
     return (int)pid;
 
 fork_oom:
-    for (uint32_t i = 0; i < c->fork_fcount && i < 24; i++) frame_free(c->fork_frames[i]);
+    for (uint32_t i = 0; i < c->fork_fcount; i++) frame_free(c->fork_frames[i]);
+    if (c->fork_frames) kfree(c->fork_frames);   /* v0.30（OBS-002）：动态数组一并归还 */
     addr_space_destroy(c->page_dir);
     frame_free(c->kstack_frame);
     serial_printf("[fork] pid=%u fork FAILED (OOM)\n", p->pid);
@@ -415,7 +436,7 @@ static uint32_t argv_layout(uint32_t sframe, uint32_t usv,
 }
 
 int sched_exec(registers_t *r, const char *name, uint32_t pd,
-               uint32_t entry, const uint32_t *frames, uint32_t fcount, uint32_t vbase,
+               uint32_t entry, uint32_t *frames, uint32_t fcount, uint32_t vbase,
                const char (*argv)[64], uint32_t argc) {
     pcb_t *p = &procs[current_pid];
     /* v0.26: 新栈初始页 = 本进程槽顶下方一页（槽底守卫页为硬底，永不映射） */
@@ -438,6 +459,10 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
         of = (uint32_t *)kmalloc(fcount * sizeof(uint32_t));
         if (!of) { frame_free(sframe); return -1; }
         for (uint32_t i = 0; i < fcount; i++) of[i] = frames[i];
+        /* v0.28 审查修复：源数组（调用方的 load_frames，kmalloc 临时记账数组）
+         * 复制完即还——否则 exec 每次成功/失败都泄漏该数组（P0-2）。
+         * 注意：OOM 提前返回 -1 时源数组未释放，由调用方失败路径负责。 */
+        kfree(frames);
     }
 
     /* 释放旧用户资源（ELF 代码/私有页/fork 帧/旧栈/旧页目录）；内核栈保留复用 */
@@ -663,6 +688,9 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
     p->state = PROC_ZOMBIE;
     /* v0.9/v0.11/v0.12: 回收本进程私有数据帧（ELF 代码/私有页/fork 深拷贝帧/用户栈） */
     release_priv_frames(p);
+    /* v0.29（BUG-031）：进程退出时归还其占用的文件槽——否则 cc500 等在 parse error
+     * 等异常退出路径泄漏的槽会毒化后续所有编译/文件操作（fs_files 全局表，按 pid 归属） */
+    fs_files_close_pid(p->pid);
     /* v0.15: 父进程退出 -> 子进程孤儿化（parent_pid=0，交心跳回收）。
      * 否则父的 pid 槽被复用后，孤儿永远等不到"父进程 FREE"而被回收。 */
     for (uint32_t i = 1; i < MAX_PROCS; i++)

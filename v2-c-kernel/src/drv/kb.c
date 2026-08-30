@@ -85,8 +85,8 @@ int kb_feed_char(char c) {
             line_ready = 1;
             if (line_hook) line_hook();
         }
-    } else if (c >= 32) {      /* 可打印字符 */
-        if (line_len < KB_LINE_MAX) line_buf[line_len++] = c;
+    } else if (c >= 32) {      /* 可打印字符：行未就绪才入行缓冲（v0.30 防两行合并） */
+        if (!line_ready && line_len < KB_LINE_MAX) line_buf[line_len++] = c;
     }
     /* 字符环形缓冲，供 idle 实时回显（含退格/回车） */
     int next = (head + 1) % KB_BUF;

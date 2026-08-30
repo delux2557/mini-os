@@ -5,6 +5,7 @@
  *  - run <prog> 通过 sys_spawn_file 启动应用，再 sys_wait 等待其退出
  */
 #include "user_lib.h"
+#include "version.h"   /* v0.30（评估 L-4）：banner 版本串单一来源 */
 
 #define CMD_MAX  128
 /* v0.27b: arg 缓冲提升到与命令行同宽，writefile 才能写入接近整行长的源码内容 */
@@ -335,23 +336,47 @@ static void cmd_netping(char *args) {
 }
 
 /* v0.27: 自举闭环验证（写-编-跑）。
- * 步骤：run cc500（gcc 版）编译 /cc500.c -> /out.elf=P1；再 run /out.elf（=P1）
- * 编译 /cc500.c -> /out.elf=P2；校验 P1 与 P2 的 FNV-1a 校验和与字节数一致。
- * 一致 => 编译器对自身源码是"不动点"，自举成立。单行原子输出供回归 grep。 */
-static uint32_t file_fnv(const char *path, uint32_t *size_out) {
-    uint32_t h = 0x811C9DC5u;
-    uint32_t sz = 0;
-    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 0) != 0) { *size_out = 0; return 0; }
+ * 步骤：run cc500（gcc 版）编译 /cc500.c -> /out.elf=P1；快照 P1 到 /p1.elf；
+ * 再 run /out.elf（=P1）编译 /cc500.c -> /out.elf=P2；逐字节比对 P1 与 P2。
+ * 一致 => 编译器对自身源码是"不动点"，自举成立（v0.27b：FNV 哈希升级为真·逐字节比对）。
+ * 单行原子输出供回归 grep。 */
+/* 逐字节拷贝文件（快照 P1 用）。占用全局 fs 槽 1/2——shell 串行执行下安全；
+ * 全局 fs 槽表在多应用并发时会互踩（见 roadmap 支线 C 的 per-process fd 表 TODO）。 */
+static int file_copy(const char *src, const char *dst) {
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)src, 0) != 0) return -1;
+    syscall3(SYS_FS_DELETE, (uint32_t)dst, 0, 0);
+    if ((int)syscall3(SYS_FS_CREATE, (uint32_t)dst, 0, 0) < 0) { syscall3(SYS_FS_CLOSE, 1, 0, 0); return -1; }
+    if (syscall3(SYS_FS_OPEN, 2, (uint32_t)dst, 1) != 0) { syscall3(SYS_FS_CLOSE, 1, 0, 0); return -1; }
     for (;;) {
         char buf[64];
         int n = (int)syscall3(SYS_FS_READ, 1, (uint32_t)buf, 64);
         if (n <= 0) break;
-        for (int i = 0; i < n; i++) { h ^= (uint8_t)buf[i]; h *= 0x01000193u; }
-        sz += (uint32_t)n;
+        int w = (int)syscall3(SYS_FS_WRITE, 2, (uint32_t)buf, (uint32_t)n);
+        if (w != n) { syscall3(SYS_FS_CLOSE, 1, 0, 0); syscall3(SYS_FS_CLOSE, 2, 0, 0); return -1; }
     }
     syscall3(SYS_FS_CLOSE, 1, 0, 0);
-    *size_out = sz;
-    return h;
+    syscall3(SYS_FS_CLOSE, 2, 0, 0);
+    return 0;
+}
+
+/* 逐字节比对两个文件（长度 + 内容）；1=相同 0=不同 */
+static int file_equal(const char *a, const char *b) {
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)a, 0) != 0) return 0;
+    if (syscall3(SYS_FS_OPEN, 2, (uint32_t)b, 0) != 0) { syscall3(SYS_FS_CLOSE, 1, 0, 0); return 0; }
+    int eq = 1;
+    for (;;) {
+        char ba[64], bb[64];
+        int na = (int)syscall3(SYS_FS_READ, 1, (uint32_t)ba, 64);
+        int nb = (int)syscall3(SYS_FS_READ, 2, (uint32_t)bb, 64);
+        if (na != nb) { eq = 0; break; }
+        if (na <= 0) break;                 /* 两文件同时到 EOF */
+        for (int i = 0; i < na; i++)
+            if (ba[i] != bb[i]) { eq = 0; break; }
+        if (!eq) break;
+    }
+    syscall3(SYS_FS_CLOSE, 1, 0, 0);
+    syscall3(SYS_FS_CLOSE, 2, 0, 0);
+    return eq;
 }
 
 static void cmd_ccboot(void) {
@@ -360,20 +385,20 @@ static void cmd_ccboot(void) {
     if (pid <= 0) { sys_print("[ccboot] cannot spawn cc500\n"); return; }
     int code = 0;
     (void)sys_wait((uint32_t)pid, &code);
-    uint32_t s1, n1;
-    s1 = file_fnv("/out.elf", &n1);
-    /* 第 2 步：P1 再编译 /cc500.c -> /out.elf = P2 */
+    /* 第 2 步：快照 P1 -> /p1.elf（随后 /out.elf 会被 P2 覆盖） */
+    if (file_copy("/out.elf", "/p1.elf") != 0) { sys_print("[ccboot] snapshot fail\n"); return; }
+    /* 第 3 步：P1 再编译 /cc500.c -> /out.elf = P2 */
     pid = sys_spawn_file("/out.elf");
     if (pid <= 0) { sys_print("[ccboot] cannot spawn /out.elf (P1)\n"); return; }
     code = 0;
     (void)sys_wait((uint32_t)pid, &code);
-    uint32_t s2, n2;
-    s2 = file_fnv("/out.elf", &n2);
-    /* 汇总单行：[ccboot] sha1=.. sha2=.. bytes=.. PASS/FAIL */
+    /* 第 4 步：逐字节比对 P1 与 P2 */
     nl_reset();
-    nl_s("[ccboot] sha1="); nl_u(s1); nl_s(" sha2="); nl_u(s2);
-    nl_s(" bytes="); nl_u(n1);
-    nl_s((n1 > 0 && n1 == n2 && s1 == s2) ? " PASS\n" : " FAIL\n");
+    nl_s("[ccboot] ");
+    if (file_equal("/p1.elf", "/out.elf"))
+        nl_s("byte-identical PASS\n");
+    else
+        nl_s("P1 != P2 FAIL\n");
     nl_end();
 }
 
@@ -443,7 +468,7 @@ void app_main(int argc, char **argv) {
     char cmd[ARG_MAX];
     char arg[ARG_MAX];
 
-    sys_print("\n=== Mini-OS v0.27 shell ===\n");
+    sys_print("\n=== Mini-OS " MINI_OS_VERSION " shell ===\n");
     sys_print("type 'help' for commands\n");
 
     for (;;) {

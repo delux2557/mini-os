@@ -1,7 +1,9 @@
 # 演进路线（Roadmap）
 
 > 目标：以"最小可用、逐步增量"的方式，把一台裸机从零变成一个
-> 具备多任务、文件系统、可执行程序加载的微型操作系统。
+> 具备多任务、文件系统、网络、可执行程序加载与**自举能力**的微型操作系统。
+> 项目已越过"功能积累期"（教学闭环达成），进入 **"收尾-加固-沉淀"** 阶段——
+> 最终交付物 = 可运行内核（五层回归全绿）+ 工程方法论文档 + "AI 能写操作系统"的实证案例。
 
 ## 已完成里程碑
 
@@ -35,10 +37,89 @@
 | v0.26 | 容量三连#1：用户栈按需生长                | 每进程栈槽 8KB 固定 → 32KB（槽底硬底守卫页 4K 永不映射 + 28KB 可生长栈区，栈顶页起、守卫页随栈底下移）；`stack_guard_hit` 二态扩三态（OK/GROWTH/BOOM，纯逻辑可宿主单测）；`pf_handler` 命中守卫页补映射新栈页并更新 PCB 记账、深越界/到硬底才判溢出；PCB `stack_frame` 改 `stack_frames[]`+`stack_fcount`+`stack_bottom`，`stack_init`/`stack_free` 统一管理；地址空间重布局（栈区 0x80010000-0x80090000，shell/app 槽/SHMEM 后移）；`deep` 演示 12KB 递归触发 3 次生长；宿主 34 断言 + QEMU/串口回归全绿 |
 | v0.27 | 工具链与自举：guest 内「写-编-跑」闭环          | 移植自托管 C 子集编译器 **cc500**（`tools/cc500/cc500.c`）进 guest：链接基址 0x800A0000 + mini-os ABI；唯一机器码 stub 收敛为通用 `syscall3`（eax/ebx/ecx/edx=int 0x80），exit/malloc/getchar/putchar/sys_print 全用 C 子集实现（malloc=brk bump）；I/O 走 mini-fs（整读 /cc500.c、编译完写回 /out.elf）；initramfs 嵌入编译器 ELF + 自举源码；shell `ccboot` 命令验证**自举不动点**——gcc 版编译出 P1、P1 再编译出 P2，P1==P2（FNV+字节数逐字节一致，18079B）⇒ 写-编-跑闭环在 guest 内跑通；修复 BUG-025（brk 页中部映射空洞）；回归五层全绿 |
 | v0.27b | 写-编-跑演示闭环：cc500 命令行路径 + shell 写/编/跑 | cc500 支持 `argv[1]=输入 argv[2]=输出`（`load_ptr` 逐字节拼 4 字节指针；缺省回退 /cc500.c→/out.elf）；入口/CRT 声明顺序对齐 CC500 反向压参与内核 cdecl 入口的差异；shell 新增 `writefile <path> <content>`（agent 写源码，ARG_MAX 32→128）+ `ccrun <src> <out>`（fork+exec 编译→运行→校验退出码）；guest 内完整剧本跑通：`writefile /hello.c … → ccrun /hello.c /hello.elf` → 编译产物被加载运行；修复 BUG-026（cc500 对畸形输入死循环，加 EOF 守卫）；页错误日志附 EIP/eax/ebx 便于定位用户态故障；回归五层全绿 |
+| v0.28 | 网络收尾：DHCP 租期续约（T1/T2 renew） | RFC 2131 §4.4.5 租期续约：`e1000_dhcp_tick()` 由 timer 心跳每 tick 非阻塞驱动（状态机 RENEW_NONE/SENT、REBIND_SENT、REACQ_OFFER/ACK）；到 T1=0.5×lease 单播 RENEW（ciaddr+54+50）、到 T2=0.875×lease 广播 REBIND（仅 50），ACK 重置、NAK/超时重新获取→静态兜底；netsock 注册端口 68 专用 DHCP socket（`netsock_dhcp_open/recv`）解决 sockdemo"排空"网卡抢先消费应答；修复 tick 内用户页目录访问高地址 MMIO 缺页（临时切内核页目录）与 print_ip 缺 `& 0xFF` 显示 bug；宿主单测 test_dhcp 38→61；test_net 短租期（`DHCP_RENEW_SECS=2`）断言 RENEW→ACK 续约闭环（pcap UDP 10→12）；五层回归全绿 |
 
 ## 下一步规划
 
-按依赖顺序演进，两条支线可选：
+> **当前路线以下方三阶段为准**；"支线 A/B/C"为历史规划存档（多数条目已勾选完成，
+> 保留作演进记录）。
+
+### 项目阶段判断
+
+| 维度 | 状态 | 判断 |
+|------|------|------|
+| 核心概念覆盖 | 进程/内存/文件/网络/工具链全部完成 | 教学闭环已达成 |
+| 工程质量 | 五层测试、零告警、纯逻辑可单测、四件套文档 | 工程成熟度高 |
+| 代码规模 | ~500KB / 28 个版本 | 接近维护临界点 |
+| 自举能力 | guest 内写-编-跑闭环、编译器不动点验证 | 已具备自我演化能力 |
+
+**结论**：继续无限堆砌新子系统边际收益递减，而跨子系统组合的维护成本递增
+（BUG-020/025/026 已展示该趋势）。下一步按三阶段推进，不再追逐版本号。
+
+### 阶段一「收尾」（只补欠账，不开新坑）
+
+* ✅ **P0 泄漏修复**（v0.28，BUG-027/028）：`sys_map_page` 记账槽满分配前拒绝；
+  exec 路径归还 `load_frames` 数组
+* ✅ **DHCP 租期续约**（v0.28，RFC 2131 §4.4.5）：T1 单播 RENEW / T2 广播 REBIND /
+  ACK 重置 / NAK·超时重新获取
+* ✅ **sys_map_page 容量上限显式化**：超 8 页返回 -1 而非静默泄漏（BUG-027 的一部分）
+* ✅ **BUG-031 文件槽泄漏**（v0.30，用户实操报告 + 复现）：全局 `fs_files[8]`
+  无进程归属、退出路径不清理——一次编译失败（cc500 parse error）即烧掉 slot2、
+  毒化整条工具链直到重启。修复：槽记打开者 pid，进程退出按归属归还
+  （`fs_files_close_pid`）；per-process fd 表（打开文件表入 PCB）仍留作架构债
+* ✅ **BUG-032 cc500 入口桩丢 argv**（v0.30，用户实操报告 + 复现）：`be_start` 裸
+  `call` 不编组 argc/argv，自编译产物静默吞 argv。修复：入口桩 call 前压 argv/argc
+  （与 cc500 "首参 8(%esp)/末参 4(%esp)" 约定对齐）；v0.27b "命令行路径"现对自编译
+  产物也成立
+* ✅ **`fork_frames` 动态化**（v0.30，BUG-035，=OBS-002）：`sched_fork` 先数需深拷贝
+  页数再按需 kmalloc 动态数组（同 `own_frames`），退出 kfree——大进程（bigdemo 28 页）
+  fork 不再受 24 帧硬编码上限限制
+* [可选] **pipe（管道）**：经典 IPC 补全（字节流 vs 消息队列的离散消息，互为补充）。
+  ⚠️ 定性为**新功能**而非欠账，与"收尾"原则有张力——若做，归入"如果还想做深"选项
+
+### 阶段二「加固」（不增功能，增信心）
+
+* ✅ **fuzz**（v0.29，`tests/fuzz_parse.c`）：确定性 xorshift32 注入随机路径/随机字节，
+  覆盖 `fs_walk` / `elf_load_range` / `net_eth_type` / `arp` / `ip_parse` / `udp_parse` /
+  `icmp_parse` / `dhcp_parse_reply`；ASan+UBSan 宿主侧跑（60k 轮缺省、FUZZ_ITERS 可调），
+  发现并修复 **BUG-029**（`icmp_parse` len<14 时 `len-14` 下溢 + `frame+14` 越界读），
+  已集成 `run_host_tests.sh` 强制回归
+* ✅ **内核堆审计**（v0.29，`heap_audit` 挂入 `kern_audit`）：遍历 `block_t` 链表校验
+  magic/free 一致性、size 上界，防 next 指针成环/悬垂；`used/free` 记账计数器与遍历
+  统计对账（泄漏/双重释放/写越界破坏块头都会漂移）；报告碎片；宿主单测 + QEMU selftest
+  双重锁定（`[audit] heap ok`）
+* **record/replay 基础设施**：QEMU `-icount` + gdb reverse-debugging（勿引 rr）；
+  日志钉点基于 v0.21 tick 时间戳（已备），失败 transcript 固化回归
+* ✅ **回归盲区补格**（v0.29）：
+  * `deep`/已生长栈 × fork/exec 组合：新增 `deepfork` / `deepexec` 演示并挂入
+    qemu + serial 回归；**顺带抓到并修复 BUG-030**（fork 子进程栈在父槽、守卫按子 pid
+    推导槽位误判缺页——改由实际栈位置 `stack_bottom` 推导）
+  * brk 收缩-再涨路径：heapdemo step 4（收缩回 8KB→sbrk 再涨复用已映射页）已覆盖
+  * 编译产物 × 持久化：test_persist.sh S10（writefile→ccrun→save→重启→run）已覆盖
+
+### 阶段三「沉淀」（不再是版本号）
+
+> 从"持续开发的仓库"变为"可交付的教学产品"——项目的最终价值不在代码行数，
+> 而在"能被多少人学会"。
+
+1. **教学文档系列**：每子系统一篇"从零到一"（引导与保护模式 → 中断与系统调用 →
+   分页与隔离 → 调度 → 文件系统 → 网络 → 自举），附最小可运行代码片段 + 思考题
+2. **交互式实验手册**：利用已有写-编-跑闭环，读者在 guest 内用 `writefile` + `ccrun`
+   编写小程序，亲手体验 `fork`/`brk`/`socket`/`ccboot`——比"读代码"有效得多
+3. **开源发布**：定位 **"AI 辅助系统编程的完整案例研究"**——BUG 库的根因/修复/回归
+   记录本身就是极有价值的工程方法论素材；演示录屏（`make run` → `selftest PASS`、
+   `ccboot` 自举仪式）
+
+### 红线（明确不做）
+
+| 方向 | 理由 |
+|------|------|
+| TCP 状态机 | 复杂度与"微型"定位严重不匹配；UDP + ICMP 已够教学 |
+| 多核 / SMP | 重写调度/锁/页表模型，等于重写 |
+| HAL / ARM 移植 | 无真实目标硬件，抽象层设计必然过度；等真有 ARM 板子 |
+| 动态链接 / ELF 重定位 | 已标注"黑洞，吃掉项目余生" |
+| 移植 GCC/clang/TinyCC 完整体 | 同上 |
+| 图形子系统 | 偏离核心教学定位 |
 
 ### 支线 A：继续做深 x86 内核（v0.16+）
 
@@ -70,7 +151,7 @@
 
 * 候选下一步（按价值排序）：
 
-  * **网络进一步可用化**：DHCP 租期续约（T1/T2 定时 renew）；
+  * **网络进一步可用化**：~~DHCP 租期续约（T1/T2 定时 renew）~~ ✅ **v0.28 已完成**；
     TCP 状态机暂缓（复杂度高，非"最小可演进"核心）
 
   * 真实硬件引导（GRUB/ISO）——串口终端（v0.10）已就绪，届时可直接在真机串口上交互调试；
@@ -165,6 +246,8 @@
     shell 新增 `writefile <path> <content>`（agent 写源码）+ `ccrun <src> <out>`
     （编译并运行）；guest 内 `writefile /hello.c … → ccrun /hello.c /hello.elf` →
     编译产物被加载运行全链路跑通（test_serial.sh 用例）。
+    ~~⚠️ v0.29 发现（BUG-032）：argv 路径仅对 gcc 版成立、自编译产物静默丢参；~~
+    ✅ **v0.30 已修复**：入口桩编组 argc/argv 后，自编译产物（P1）exec 带 argv 也正确。
 
 * **P2 并行项（可插在网络收尾之前/之间）**
 
@@ -174,8 +257,10 @@
     **QEMU** **`-icount`** **+ gdb reverse-debugging**（TCG i386 原生支持），日志钉点基于
     v0.21 tick 时间戳（已备），失败 transcript 固化回归。
 
-  * **DHCP 租期续约（T1/T2 renew）**：网络收尾。简报"ICMP + 静态 IP 可配"已由 v0.23/v0.25
-    完成，此为其剩余项。
+  * ~~**DHCP 租期续约（T1/T2 renew）**~~：✅ **v0.28 已完成**（RFC 2131 §4.4.5：
+    T1 单播 RENEW / T2 广播 REBIND / ACK 重置 / NAK·超时重新获取；netsock 端口 68
+    专用 socket 解决用户 recvfrom"排空"网卡抢先消费应答；test_net 短租期回归闭环）。
+    TCP 状态机仍属"非最小可演进"核心，暂缓。
 
 ## 开发原则
 

@@ -399,6 +399,8 @@ int fs_write(blockdev_t *bd, uint32_t inode, const void *buf, uint32_t off, uint
         if (file_block(bd, &in, b, 1) == 0) {
             if (b == first_b) { inode_put(bd, inode, &in); return -1; }
             len = b * BLOCK_SIZE - off;   /* 只写能写进去的部分 */
+            /* 短写语义：中间块分配失败时，已写入的部分不可回滚——已持久化到文件，
+             * 且下方 in.size 会更新为 off+done。调用方必须检查返回值 != len 并自行降级 */
             break;
         }
     }

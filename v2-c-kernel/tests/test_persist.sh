@@ -67,6 +67,12 @@ wait_for "$LOG1" "ATA 探测到磁盘"      "\[ata\] IDE disk:"
 wait_for "$LOG1" "空白盘格式化"        "disk blank -> format"
 send "mkdir /persist"
 wait_for "$LOG1" "mkdir 建 /persist"   "\[shell\] mkdir '/persist' -> "
+# ---- S10 组合格：工具链 × 持久化（写-编-跑产物落盘，重启后仍可运行） ----
+send 'writefile /persist/p.c int syscall3(int n,int a,int b,int c);int main(){syscall3(1,"persist: hello\x0a",0,0);return 0;}'
+wait_for "$LOG1" "writefile 写持久化源码" "\[writefile\] '/persist/p.c' wrote [0-9][0-9]* bytes"
+send "ccrun /persist/p.c /persist/p.elf"
+wait_for "$LOG1" "cc500 编译持久化源码"   "cc500: compiled OK"
+wait_for "$LOG1" "编译产物落盘前可运行"    "\[ccrun\] '/persist/p.elf' exited code=0 PASS"
 send "save"
 wait_for "$LOG1" "save 写回磁盘"       "\[shell\] save -> 0"
 wait_for "$LOG1" "storage 保存日志"    "\[storage\] saved "
@@ -83,6 +89,11 @@ send "ls"
 wait_for "$LOG2" "重启后 /persist 仍在" "\[ls\]   persist/ "
 send "selftest"
 wait_for "$LOG2" "持久盘应用可运行"    "\[selftest\] PASS (6 checks)" 20
+# ---- S10：重启后编译产物仍在磁盘、可被 run 直接加载运行 ----
+send "run /persist/p.elf"
+wait_for "$LOG2" "重启后编译产物被加载"  "\[elf\] '/persist/p.elf' loaded"
+wait_for "$LOG2" "重启后编译产物可运行"   "persist: hello"
+wait_for "$LOG2" "重启后编译产物退出码"   "'/persist/p.elf' exited code=0"
 shutdown
 
 echo

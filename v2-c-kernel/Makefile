@@ -59,6 +59,16 @@ $(BUILD)/%.o: %.s
 $(BUILD)/%.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# ---- v0.28 DHCP 租期续约：测试用短租期覆盖 ----
+# DHCP_RENEW_SECS 非空时，e1000 编译加 -D：把 DHCP 服务器租期覆盖为该值（秒），
+# 使 T1/T2 在秒级窗口内触发续约闭环（tests/test_net.sh 用 `make DHCP_RENEW_SECS=2`
+# 构建，跑完再 `make clean && make` 恢复常规内核）。缺省用服务器租期（SLIRP 24h）。
+ifdef DHCP_RENEW_SECS
+DHCP_RENEW_DEF = -DDHCP_RENEW_SECS=$(DHCP_RENEW_SECS)
+endif
+$(BUILD)/e1000.o: src/drv/e1000.c
+	$(CC) $(CFLAGS) $(DHCP_RENEW_DEF) -c $< -o $@
+
 # 依赖自动生成的头文件（userprog 各进程入口偏移）
 $(BUILD)/kernel.o: src/kernel/kernel.c $(USERPROG_OFFS)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -92,7 +102,7 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500
+APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -117,6 +127,10 @@ $(BUILD)/apps/stackovf.elf: $(BUILD)/apps/stackovf.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/deep.elf: $(BUILD)/apps/deep.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/deepfork.elf: $(BUILD)/apps/deepfork.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/deepexec.elf: $(BUILD)/apps/deepexec.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/heapdemo.elf: $(BUILD)/apps/heapdemo.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/fsdemo.elf: $(BUILD)/apps/fsdemo.o $(BUILD)/apps/crt.o
@@ -134,9 +148,17 @@ $(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o $(BUILD)/apps/crt.o
 
 # ---- v0.27 工具链：cc500 编译器 ----
 #  - 源码在 tools/cc500/cc500.c（自举源，同时嵌入 initramfs 作 /cc500.c）
-#  - 用专用 cc500_crt.o（_start 以 app_main 返回值 sys_exit），普通 crt 会吞掉退出码
+#  - 用专用 cc500_crt.o（_start 以 cc500_main 返回值 sys_exit），普通 crt 会吞掉退出码
+#  - 该源受"CC500 语言子集"约束（无类型转换），syscall3 指针/整数混参是子集固有
+#    写法，GCC>=14 把 -Wint-conversion 设为 permerror（硬错误）会误杀；故文件级豁免。
+#  - `-Wno-int-conversion`（必需）：GCC 14 中它是 permerror，`-w` 只抑制 warning 压不住
+#    error（BUG-036：v0.30 曾误删此项只留 -w，GCC 14 下 make 直接 EXIT=2 构建失败；
+#    GCC 13 下 -w 恰好够用是旧假设的来源）。
+#  - `-w`：抑制其余普通警告（含 `in_data == (0-1)` 指针与整数比较的
+#    -Wcompare-distinct-pointer-types 惯用法、-Wmaybe-uninitialized 等），
+#    该源本就不能在源码层修复，只能豁免。GCC 8+ 两者均有效、可并存。
 $(BUILD)/apps/cc500.o: tools/cc500/cc500.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -Wno-int-conversion -w -c $< -o $@
 $(BUILD)/apps/cc500.elf: $(BUILD)/apps/cc500.o $(BUILD)/apps/cc500_crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/cc500_crt.o $<
 # 源码以原始字节嵌入（符号 _binary_cc500_c_start/end，由输入文件名 cc500.c 决定）
