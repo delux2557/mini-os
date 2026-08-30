@@ -12,6 +12,10 @@ static inline void outb(uint16_t port, uint8_t val) {
 
 static void timer_cb(registers_t *r) {
     ticks++;
+    /* v0.28 DHCP 租期续约：每 tick 非阻塞轮询（须在 sched_tick 之前——
+     * sched_tick 里 schedule 可能上下文切换且不返回，排在它后面会被跳过） */
+    extern void e1000_dhcp_tick(void);
+    e1000_dhcp_tick();
     /* 交由调度器：唤醒到期进程 + 抢占切换（可能不返回） */
     extern void sched_tick(registers_t *);
     sched_tick(r);

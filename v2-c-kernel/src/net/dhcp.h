@@ -29,6 +29,20 @@ uint32_t dhcp_build_discover(uint8_t *frame, const uint8_t *mac, uint32_t xid);
 uint32_t dhcp_build_request(uint8_t *frame, const uint8_t *mac, uint32_t xid,
                             uint32_t server_ip, uint32_t req_ip);
 
+/* ---- v0.28 DHCP 租期续约（RFC 2131 §4.4.5）----
+ * T1 = 0.5×lease 单播 RENEW、T2 = 0.875×lease 广播 REBIND。
+ * RENEW  ：ciaddr=本机 IP，dst=服务器单播（dst_mac + server_ip），带 54+50；
+ * REBIND ：ciaddr=本机 IP，dst=广播 255.255.255.255，只带 50（不含 54，任意服务器可续）。 */
+#define DHCP_T1_RATIO_NUM 1u   /* T1 = lease × 1/2 */
+#define DHCP_T1_RATIO_DEN 2u
+#define DHCP_T2_RATIO_NUM 7u   /* T2 = lease × 7/8 */
+#define DHCP_T2_RATIO_DEN 8u
+
+uint32_t dhcp_build_renew(uint8_t *frame, const uint8_t *mac, const uint8_t *dst_mac,
+                          uint32_t xid, uint32_t ciaddr, uint32_t server_ip);
+uint32_t dhcp_build_rebind(uint8_t *frame, const uint8_t *mac, uint32_t xid,
+                           uint32_t ciaddr);
+
 /* 解析 DHCP 应答载荷（BOOTP 头 + 选项）：xid 不匹配 / 缺少 magic cookie / 无消息类型 -> -1。
  * 成功置 msg_type（OFFER/ACK/...）、yiaddr（分配 IP）、server_ip(54)、router(3)、lease(51)。 */
 int dhcp_parse_reply(const uint8_t *payload, uint32_t plen, uint32_t xid,

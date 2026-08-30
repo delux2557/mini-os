@@ -83,6 +83,58 @@ int main(void) {
     }
     CHECK(srv_ok && req_ok);
 
+    /* ---- v0.28 RENEW 构建：单播到服务器（dst_mac），ciaddr=已租 IP，带 54+50 ---- */
+    const uint8_t srv_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x35, 0x02};
+    const uint32_t ciaddr = 0x0A00020Fu, server = 0x0A000202u;
+    uint32_t nlen = dhcp_build_renew(frame, mac, srv_mac, xid, ciaddr, server);
+    CHECK_EQ(nlen, 42u + 256u);                    /* bootp(240+3+6+6+1) */
+    CHECK_EQ(frame[42], 1u);                       /* op=BOOTREQUEST */
+    /* ciaddr 写入 BOOTP 头（offset 12） */
+    CHECK_EQ((frame[42 + 12] << 24) | (frame[42 + 13] << 16) | (frame[42 + 14] << 8) | frame[42 + 15],
+             ciaddr);
+    /* src IP=ciaddr、dst IP=server（单播，非广播） */
+    for (int i = 0; i < 4; i++) CHECK_EQ(frame[26 + i], frame[42 + 12 + i]);
+    for (int i = 0; i < 4; i++) CHECK_EQ(frame[30 + i], (uint8_t)(server >> (24 - 8 * i)));
+    /* dst MAC = 服务器 MAC（单播），src MAC = 本机 */
+    int dst_uni = 1;
+    for (int i = 0; i < 6; i++) if (frame[i] != srv_mac[i]) dst_uni = 0;
+    for (int i = 0; i < 6; i++) if (frame[6 + i] != mac[i]) dst_uni = 0;
+    CHECK(dst_uni);
+    /* 选项含 54(server id) 与 50(请求 IP) */
+    int r_srv = 0, r_req = 0;
+    for (uint32_t i = 42 + 240; i + 1 < nlen; i++) {
+        if (frame[i] == 54 && frame[i + 1] == 4 &&
+            (frame[i + 2] << 24 | frame[i + 3] << 16 | frame[i + 4] << 8 | frame[i + 5]) == server)
+            r_srv = 1;
+        if (frame[i] == 50 && frame[i + 1] == 4 &&
+            (frame[i + 2] << 24 | frame[i + 3] << 16 | frame[i + 4] << 8 | frame[i + 5]) == ciaddr)
+            r_req = 1;
+    }
+    CHECK(r_srv && r_req);
+    /* UDP round-trip：src=ciaddr:68 -> server:67 */
+    CHECK_EQ(udp_parse(frame, nlen, &sip, &sp, &dp, &pay, &plen), 0);
+    CHECK_EQ(sip, ciaddr); CHECK_EQ(sp, DHCP_CLIENT_PORT); CHECK_EQ(dp, DHCP_SERVER_PORT);
+
+    /* ---- v0.28 REBIND 构建：广播，ciaddr=已租 IP，只带 50（无 54） ---- */
+    uint32_t blen2 = dhcp_build_rebind(frame, mac, xid, ciaddr);
+    CHECK_EQ(blen2, 42u + 250u);                   /* bootp(240+3+6+1)，无 54 */
+    CHECK_EQ(frame[42], 1u);
+    CHECK_EQ((frame[42 + 12] << 24) | (frame[42 + 13] << 16) | (frame[42 + 14] << 8) | frame[42 + 15],
+             ciaddr);
+    int bcast_dst2 = 1;
+    for (int i = 0; i < 6; i++) if (frame[i] != 0xFFu) bcast_dst2 = 0;   /* dst=广播 */
+    for (int i = 0; i < 4; i++) if (frame[30 + i] != 0xFFu) bcast_dst2 = 0;
+    CHECK(bcast_dst2);
+    int rb_has54 = 0, rb_has50 = 0;
+    for (uint32_t i = 42 + 240; i + 1 < blen2; i++) {
+        if (frame[i] == 54 && frame[i + 1] == 4) rb_has54 = 1;
+        if (frame[i] == 50 && frame[i + 1] == 4 &&
+            (frame[i + 2] << 24 | frame[i + 3] << 16 | frame[i + 4] << 8 | frame[i + 5]) == ciaddr)
+            rb_has50 = 1;
+    }
+    CHECK(!rb_has54);                              /* REBIND 不含 server id（RFC 2131） */
+    CHECK(rb_has50);
+
     /* ---- 应答解析 ---- */
     uint8_t rep[280];
     uint32_t blen, yi, si, rt, ls; uint8_t mt;

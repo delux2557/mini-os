@@ -32,4 +32,12 @@ int  netsock_recv(int id, uint8_t *buf, uint32_t max,
                   uint32_t *src_ip, uint16_t *src_port);
 void netsock_close(int id);
 
+/* ---- v0.28 DHCP 租期续约接收端点（端口 68 专用 socket）----
+ * 用户 socket 的 recvfrom 会"排空"网卡（取走 NIC 环所有帧），无匹配本地端口的帧
+ * （如 DHCP 应答）会被丢弃——续约应答可能被抢先消费。注册端口 68 的 DHCP socket，
+ * 让分发路径把 DHCP 应答入其队列，续约 tick 经 netsock_dhcp_recv 读取（与用户
+ * socket 共享同一分发路径）。 */
+void netsock_dhcp_open(void);   /* 打开 DHCP 客户端 socket（幂等；引导期 DHCP 前调用） */
+int  netsock_dhcp_recv(uint8_t *buf, uint32_t max);  /* 排空网卡并取一条 DHCP 应答载荷 */
+
 #endif /* NET_NETSOCK_H */

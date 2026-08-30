@@ -9,6 +9,7 @@
 #include "netsock.h"
 #include "e1000.h"
 #include "udp.h"
+#include "dhcp.h"
 #include "mem.h"
 #include "serial.h"
 #include <stdint.h>
@@ -17,6 +18,9 @@
 
 static net_sock_t socks[NET_SOCK_MAX];
 static uint16_t auto_port = 21000;   /* 自动分配端口起点（避开常用端口） */
+
+/* v0.28 DHCP 租期续约接收端点：端口 68 专用 socket（见 netsock.h 说明） */
+static int dhcp_sock = -1;
 
 /* e1000 的 MMIO 位于高地址（0xfeb8xxxx，PDE>=512），而 addr_space_create 只
  * 克隆低 1GB PDE（dir[0..511]）给进程页目录。syscall 路径（CR3=当前进程页目录）
@@ -122,4 +126,31 @@ void netsock_close(int id) {
     if (id < 0 || id >= NET_SOCK_MAX) return;
     socks[id].used = 0;
     serial_printf("[netsock] close id=%d\n", id);
+}
+
+/* ---- v0.28 DHCP 租期续约接收端点 ----
+ * 问题：用户 socket 的 recvfrom 会"排空"网卡（netsock_drain 取走 NIC 环所有帧），
+ * 无匹配本地端口的帧（DHCP 应答 67->68）被直接丢弃——续约应答会被 sockdemo 等
+ * 抢先消费。注册端口 68 的 DHCP socket，dispatch_frame 即把应答入其队列。 */
+void netsock_dhcp_open(void) {
+    if (dhcp_sock >= 0) return;
+    dhcp_sock = netsock_open(DHCP_CLIENT_PORT);
+}
+
+/* 排空网卡并取一条 DHCP 应答载荷（BOOTP 内容，可直接交 dhcp_parse_reply）；
+ * 返回载荷长度；0=无；-1=失败。非阻塞（与轮询驱动一致）。 */
+int netsock_dhcp_recv(uint8_t *buf, uint32_t max) {
+    if (dhcp_sock < 0) netsock_dhcp_open();
+    if (dhcp_sock < 0) return -1;
+    uint32_t saved;
+    enter_kernel_pd(&saved);            /* 排空网卡（e1000_rx 访问 MMIO） */
+    netsock_drain();
+    exit_kernel_pd(saved);
+    if (socks[dhcp_sock].rx_head == socks[dhcp_sock].rx_tail) return 0;
+    uint32_t h = socks[dhcp_sock].rx_head;
+    uint32_t n = socks[dhcp_sock].rxlen[h];
+    if (n > max) n = max;
+    for (uint32_t i = 0; i < n; i++) buf[i] = socks[dhcp_sock].rxb[h][i];
+    socks[dhcp_sock].rx_head = (h + 1) % NET_RXQ;
+    return (int)n;
 }

@@ -34,4 +34,9 @@ void e1000_dhcp_run(void);
 uint32_t e1000_my_ip(void);   /* 本机 IP（DHCP 学得或静态兜底） */
 uint32_t e1000_gw_ip(void);   /* 网关 IP（DHCP 学得或静态兜底） */
 
+/* v0.28 DHCP 租期续约：由 timer 心跳每 tick 驱动（非阻塞，每 tick 至多收一帧）。
+ * 到 T1(0.5×lease) 单播 RENEW、到 T2(0.875×lease) 广播 REBIND，ACK 重置定时器；
+ * 编译期 DHCP_RENEW_SECS 非空时覆盖服务器租期（测试用短租期）。 */
+void e1000_dhcp_tick(void);
+
 #endif

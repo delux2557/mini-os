@@ -18,15 +18,27 @@ MON="/tmp/minios-net-mon.sock"
 FAIL=0
 DURATION="${DURATION:-25}"
 ECHO_PID=""
+RESTORED=0
+
+# v0.28：test_net 用短租期内核（DHCP_RENEW_SECS=2）观察续约闭环；跑完恢复常规内核。
+# 短租期下 T1=1s，秒级窗口内可看到 RENEW -> ACK 多轮续约；不影响 ARP/UDP/ICMP 断言
+#（续约只是额外 UDP 流量，pcap 计数均为"≥"）。
+restore_kernel() {
+    [ "$RESTORED" = 1 ] && return
+    RESTORED=1
+    make clean >/dev/null 2>&1 && make >/dev/null 2>&1 || true
+}
 
 cleanup() {
     [ -n "$ECHO_PID" ] && kill "$ECHO_PID" 2>/dev/null || true
+    restore_kernel
     rm -f "$ECHO_LOG"
 }
 trap cleanup EXIT
 
-echo "== [1/4] 构建内核 =="
-if ! make >/dev/null 2>&1; then
+echo "== [1/4] 构建内核（DHCP_RENEW_SECS=${DHCP_RENEW_SECS:-2} 短租期：供租期续约回归） =="
+make clean >/dev/null 2>&1
+if ! make DHCP_RENEW_SECS="${DHCP_RENEW_SECS:-2}" >/dev/null 2>&1; then
     echo "[FAIL] 内核构建失败"
     exit 1
 fi
@@ -107,6 +119,15 @@ if kill -0 "$QPID" 2>/dev/null; then
     sendkeys $'netping\n'
     wait_after "$NET_START" "shell netping -> PONG" "\[netping\] 10.0.2.2:7777 PONG" 15 || true
 fi
+# ---- v0.28 等续约闭环（T1=1s）出现再杀 QEMU：DURATION 循环会因 sockdemo 提前 break，
+#     早杀会漏掉 tick=100 的首次 RENEW（本轮回归的核心断言）。确定性轮询等待而非固定 sleep。 ----
+for _ in $(seq 1 40); do   # 最长 10s
+    if grep -aq "\[dhcp\] renew: sent RENEW (unicast)" "$LOG" 2>/dev/null && \
+       grep -aq "\[dhcp\] renew ACK: ip [0-9]" "$LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 0.25
+done
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 
@@ -125,7 +146,10 @@ check "e1000 探测 + MMIO + 链路"   "\[net\] e1000: MAC .* bar=.* link=1"
 check "DHCP DISCOVER 发出"         "\[dhcp\] sent DISCOVER"
 check "DHCP 收到 OFFER"            "\[dhcp\] OFFER: ip [0-9]"
 check "DHCP REQUEST 发出"          "\[dhcp\] sent REQUEST"
-check "DHCP 收到 ACK（动态取 IP）" "\[dhcp\] ACK: ip [0-9].*gw [0-9]"
+check "DHCP 收到 ACK（动态取 IP）" "\[dhcp\] .*ACK: ip [0-9].*gw [0-9]"
+# ---- v0.28 DHCP 租期续约：短租期下 T1 单播 RENEW -> ACK，续约闭环（RFC 2131 §4.4.5） ----
+check "DHCP 续约 RENEW 发出"     "\[dhcp\] renew: sent RENEW (unicast)"
+check "DHCP 续约收到 ACK"        "\[dhcp\] renew ACK: ip [0-9]\|\[dhcp\] rebind ACK: ip [0-9]"
 check "ARP 请求发出"               "selftest: tx ARP req (who has 10.0.2.2)"
 check "收到 SLIRP ARP 回复"        "selftest: rx ARP reply 10.0.2.2 @ .* -> OK"
 check "UDP 发送 PING"              "udp: tx .*B -> 10.0.2.2:7777 (PING)"

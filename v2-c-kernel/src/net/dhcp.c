@@ -16,22 +16,28 @@ static uint32_t get32(const uint8_t *p) {
            ((uint32_t)p[2] << 8) | p[3];
 }
 
-/* 构建 BOOTP 报文（固定头 + 选项），返回总长 */
+/* 构建 BOOTP 报文（固定头 + 选项），返回总长。
+ * ciaddr：已租 IP（续约 RENEW/REBIND 用，初选为 0）；
+ * with_server_id：REQUEST 是否带 server id(54)——SELECTING/RENEW 带，REBIND 不带。 */
 static uint32_t build_bootp(uint8_t *bootp, const uint8_t *mac, uint32_t xid,
-                            uint8_t msg_type, uint32_t server_ip, uint32_t req_ip) {
+                            uint8_t msg_type, uint32_t server_ip, uint32_t req_ip,
+                            uint32_t ciaddr, int with_server_id) {
     for (int i = 0; i < 240; i++) bootp[i] = 0;   /* 固定头 + cookie 清零 */
     bootp[0] = 1;                 /* op = BOOTREQUEST */
     bootp[1] = 1;                 /* htype = Ethernet */
     bootp[2] = 6;                 /* hlen = MAC 6B */
     put32(bootp + 4, xid);
     put16(bootp + 10, 0x8000u);   /* flags：请求广播应答（我们是轮询收包，广播更稳） */
+    put32(bootp + 12, ciaddr);    /* ciaddr：续约时 = 已租 IP */
     for (int i = 0; i < 6; i++) bootp[28 + i] = mac[i];   /* chaddr */
     put32(bootp + 236, DHCP_MAGIC_COOKIE);
 
     uint32_t off = 240;
     bootp[off++] = 53; bootp[off++] = 1; bootp[off++] = msg_type;
     if (msg_type == DHCP_MSG_REQUEST) {
-        bootp[off++] = 54; bootp[off++] = 4; put32(bootp + off, server_ip); off += 4;
+        if (with_server_id) {
+            bootp[off++] = 54; bootp[off++] = 4; put32(bootp + off, server_ip); off += 4;
+        }
         bootp[off++] = 50; bootp[off++] = 4; put32(bootp + off, req_ip);    off += 4;
     } else {
         /* 参数请求列表：1 子网掩码 / 3 路由器 / 51 租期 */
@@ -44,7 +50,7 @@ static uint32_t build_bootp(uint8_t *bootp, const uint8_t *mac, uint32_t xid,
 
 uint32_t dhcp_build_discover(uint8_t *frame, const uint8_t *mac, uint32_t xid) {
     uint8_t bootp[300];
-    uint32_t blen = build_bootp(bootp, mac, xid, DHCP_MSG_DISCOVER, 0, 0);
+    uint32_t blen = build_bootp(bootp, mac, xid, DHCP_MSG_DISCOVER, 0, 0, 0, 0);
     const uint8_t bcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     return udp_build_frame(frame, bcast_mac, mac,
                            0x00000000u, 0xFFFFFFFFu,          /* 0.0.0.0 -> 255.255.255.255 */
@@ -54,10 +60,30 @@ uint32_t dhcp_build_discover(uint8_t *frame, const uint8_t *mac, uint32_t xid) {
 uint32_t dhcp_build_request(uint8_t *frame, const uint8_t *mac, uint32_t xid,
                             uint32_t server_ip, uint32_t req_ip) {
     uint8_t bootp[300];
-    uint32_t blen = build_bootp(bootp, mac, xid, DHCP_MSG_REQUEST, server_ip, req_ip);
+    uint32_t blen = build_bootp(bootp, mac, xid, DHCP_MSG_REQUEST, server_ip, req_ip, 0, 1);
     const uint8_t bcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     return udp_build_frame(frame, bcast_mac, mac,
                            0x00000000u, 0xFFFFFFFFu,
+                           DHCP_CLIENT_PORT, DHCP_SERVER_PORT, bootp, blen);
+}
+
+/* v0.28 RENEW：单播 REQUEST 到服务器（src=ciaddr:68 -> server_ip:67），带 54+50 */
+uint32_t dhcp_build_renew(uint8_t *frame, const uint8_t *mac, const uint8_t *dst_mac,
+                          uint32_t xid, uint32_t ciaddr, uint32_t server_ip) {
+    uint8_t bootp[300];
+    uint32_t blen = build_bootp(bootp, mac, xid, DHCP_MSG_REQUEST, server_ip, ciaddr,
+                                ciaddr, 1);
+    return udp_build_frame(frame, dst_mac, mac, ciaddr, server_ip,
+                           DHCP_CLIENT_PORT, DHCP_SERVER_PORT, bootp, blen);
+}
+
+/* v0.28 REBIND：广播 REQUEST（src=ciaddr:68 -> 255.255.255.255:67），只带 50 */
+uint32_t dhcp_build_rebind(uint8_t *frame, const uint8_t *mac, uint32_t xid,
+                           uint32_t ciaddr) {
+    uint8_t bootp[300];
+    const uint8_t bcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    uint32_t blen = build_bootp(bootp, mac, xid, DHCP_MSG_REQUEST, 0, ciaddr, ciaddr, 0);
+    return udp_build_frame(frame, bcast_mac, mac, ciaddr, 0xFFFFFFFFu,
                            DHCP_CLIENT_PORT, DHCP_SERVER_PORT, bootp, blen);
 }
 
