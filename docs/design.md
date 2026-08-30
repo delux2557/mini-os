@@ -2,7 +2,7 @@
 
 ## 1. 总览
 
-Micro-OS 是 x86 32 位保护模式内核，通过 multiboot 协议由 QEMU 直接加载
+Mini-OS 是 x86 32 位保护模式内核，通过 multiboot 协议由 QEMU 直接加载
 （`-kernel` 方式，无需外部 bootloader）。所有源码在 `v2-c-kernel/src/`。
 
 ```

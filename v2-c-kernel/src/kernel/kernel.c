@@ -58,7 +58,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
-    vga_puts("Micro-OS " MINI_OS_VERSION "  (toolchain self-host: cc500 compiles itself in guest)\n");
+    vga_puts("Mini-OS " MINI_OS_VERSION "  (toolchain self-host: cc500 compiles itself in guest)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
     if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
