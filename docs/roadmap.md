@@ -65,7 +65,7 @@
 * ✅ **sys_map_page 容量上限显式化**：超 8 页返回 -1 而非静默泄漏（BUG-027 的一部分）
 * ✅ **BUG-031 文件槽泄漏**（v0.30，用户实操报告 + 复现）：全局 `fs_files[8]`
   无进程归属、退出路径不清理——一次编译失败（cc500 parse error）即烧掉 slot2、
-  毒化整条工具链直到重启。修复：槽记打开者 pid，进程退出按归属归还
+  污染整条工具链直到重启。修复：槽记打开者 pid，进程退出按归属归还
   （`fs_files_close_pid`）；per-process fd 表（打开文件表入 PCB）仍留作架构债
 * ✅ **BUG-032 cc500 入口桩丢 argv**（v0.30，用户实操报告 + 复现）：`be_start` 裸
   `call` 不编组 argc/argv，自编译产物静默吞 argv。修复：入口桩 call 前压 argv/argc

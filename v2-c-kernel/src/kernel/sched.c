@@ -689,7 +689,7 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
     /* v0.9/v0.11/v0.12: 回收本进程私有数据帧（ELF 代码/私有页/fork 深拷贝帧/用户栈） */
     release_priv_frames(p);
     /* v0.29（BUG-031）：进程退出时归还其占用的文件槽——否则 cc500 等在 parse error
-     * 等异常退出路径泄漏的槽会毒化后续所有编译/文件操作（fs_files 全局表，按 pid 归属） */
+     * 等异常退出路径泄漏的槽会污染后续所有编译/文件操作（fs_files 全局表，按 pid 归属） */
     fs_files_close_pid(p->pid);
     /* v0.15: 父进程退出 -> 子进程孤儿化（parent_pid=0，交心跳回收）。
      * 否则父的 pid 槽被复用后，孤儿永远等不到"父进程 FREE"而被回收。 */
