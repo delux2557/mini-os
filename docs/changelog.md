@@ -2,6 +2,61 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## \[v0.27] - 2026-08-30 · 工具链与自举：guest 内「写-编-跑」闭环
+
+**Added**
+
+* **CC500 编译器移植**（`tools/cc500/cc500.c`，E. Grimley-Evans 自托管 C 子集编译器
+  ~750 行）——v0.27-29「工具链与自举」的核心一步，**一步到位实现完整自举闭环**
+  （原规划 27a 汇编器+链接器 / 27b C 前端 分两版，现以整机自托管编译器直接达成）
+
+  * 链接基址改 `code_offset=0x800A0000`（APP_LINK），ELF 头 e_entry/p_vaddr/p_paddr
+    同步改为 0x800A 基址，入口 stub 适配 mini-os ABI（`SYS_EXIT=0`）
+
+  * **唯一机器码 stub = 通用系统调用** `syscall3(n,a,b,c)`（eax=n ebx=a ecx=b edx=c，
+    int $0x80），`exit/malloc/getchar/putchar/sys_print` 全部改用 CC500 C 子集实现
+    （malloc 基于 `SYS_BRK=35`），编译器内部不含任何平台相关代码
+
+  * **输入输出走 mini-fs**：整读 `/cc500.c`（initramfs 预置源码）进堆做 `getchar` 源；
+    `putchar` 为空操作，编译完由 `flush_output` 把 code 缓冲一次性写回 `/out.elf`
+    ——绕开 mini-os 无 stdin/stdout 重定向的限制，与文件系统天然衔接
+
+  * **专用 CRT**（`src/app/cc500_crt.c`）：`_start` 以 `cc500_main()` 返回值
+    `sys_exit`（普通 crt.o 固定退出 0，无法把编译成败传给 shell）；不 include
+    user_lib.h（其 static inline `syscall3` 会与外部 `syscall3` 重名冲突）
+
+* **initramfs 嵌入**：`cc500`（编译器 ELF）+ `cc500.c`（自举源，objcopy 原始字节）
+  两个文件；Makefile 新增 cc500 构建链（`tools/cc500/cc500.c` → 独立编译 →
+  专用 crt 链接 → ELF blob + 源码 blob 嵌入内核）
+
+* **shell `ccboot` 自举命令**：run cc500（gcc 版）编译自身 → `/out.elf`=P1；
+  再 run `/out.elf`（=P1）编译自身 → `/out.elf`=P2；校验 P1/P2 的 FNV-1a 校验和
+  与字节数一致，单行输出 `[ccboot] sha1=.. sha2=.. bytes=.. PASS/FAIL`
+
+**自举闭环（验收达成）**
+
+* guest 内验证：`cc500` 编译 `cc500.c` → P1（18079B，entry=0x800A0054）；
+  P1 再编译 `cc500.c` → P2；P1 与 P2 **逐字节一致**（FNV 707789893 / 18079B）
+  ⇒ 编译器对自身源码是"不动点"，自举成立；写文件→编译→运行闭环在 guest 内跑通
+
+**Fixed**
+
+* BUG-025：`sys_brk` 扩展时映射循环从非页对齐的 `old` 起逐 0x1000 上跳，brk 落在
+  页中部时**顶部半页未映射**——任意非页对齐 malloc 都会越界缺页。heapdemo 用
+  页对齐 sbrk 未暴露；cc500 任意尺寸 malloc 踩中。改为映射 `[old,a)` 相交的所有页
+  （old 下取整、a 上取整），与 `brk_pages_up` 记账一致
+
+**Engineering**
+
+* 编译器 C 子集约束记录：无 `break/continue/for/switch/&&/||/!/</>/%/*(乘)/类型转换`，
+  循环退出用 done 标志、`>=` 用操作数交换为 `<=`、换行用 `\x0a`（非 `\n`）——自举
+  源本身必须能被自己编译
+* Makefile 依赖陷阱：`$(KERNEL): $(OBJS)` 的 prereq 即时展开，`OBJS +=` 须在其前
+  （否则 recipe 引用 blob 而 make 不先构建），已加注释
+* 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 ccboot 用例
+  （编译自身 OK → P1 加载 → 自举 PASS），版本横幅/motd 更新为 v0.27
+* 全量回归（宿主 + qemu + serial + persist + net）五层全绿
+
 ## \[v0.26] - 2026-08-29 · 容量三连#1：用户栈按需生长
 
 **Added**

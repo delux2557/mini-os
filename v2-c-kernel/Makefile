@@ -43,6 +43,11 @@ OBJS = $(addprefix $(BUILD)/, \
        pci.o e1000.o netutil.o ip.o udp.o icmp.o dhcp.o netsock.o \
        ata.o storage.o userprog_bin.o) \
        $(APP_ELFOBJS) $(SHELL_ELFOBJ)
+# v0.27: cc500 编译器源码 blob（嵌入 initramfs 作 /cc500.c，供 guest 内自举）。
+# 必须在 $(KERNEL): $(OBJS) 规则之前 append，否则该规则解析时（prereq 即时展开）
+# 不会包含它，导致 make 不先构建 cc500_csrc.o（recipe 因延迟展开却会引用它）。
+CC500_CSRC = $(BUILD)/apps/cc500_csrc.o
+OBJS += $(CC500_CSRC)
 
 $(KERNEL): $(OBJS)
 	$(LD) $(LDFLAGS) -o $@ $(OBJS)
@@ -87,7 +92,7 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep heapdemo fsdemo waitdemo abuse sockdemo bigdemo
+APPS       = hello echo crash isol forkdemo args stackovf deep heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -126,6 +131,19 @@ $(BUILD)/apps/bigdemo.elf: $(BUILD)/apps/bigdemo.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(SHELL_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+
+# ---- v0.27 工具链：cc500 编译器 ----
+#  - 源码在 tools/cc500/cc500.c（自举源，同时嵌入 initramfs 作 /cc500.c）
+#  - 用专用 cc500_crt.o（_start 以 app_main 返回值 sys_exit），普通 crt 会吞掉退出码
+$(BUILD)/apps/cc500.o: tools/cc500/cc500.c
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/apps/cc500.elf: $(BUILD)/apps/cc500.o $(BUILD)/apps/cc500_crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/cc500_crt.o $<
+# 源码以原始字节嵌入（符号 _binary_cc500_c_start/end，由输入文件名 cc500.c 决定）
+$(BUILD)/apps/cc500.c: tools/cc500/cc500.c
+	cp $< $@
+$(BUILD)/apps/cc500_csrc.o: $(BUILD)/apps/cc500.c
+	cd $(BUILD)/apps && $(OBJCOPY) -I binary -O elf32-i386 -B i386 cc500.c cc500_csrc.o
 
 # ELF 文件原始字节内嵌（objcopy -I binary 按原始字节复制，保留 ELF 头；
 # 符号名 _binary_<name>_elf_start/end，由输入文件名决定）

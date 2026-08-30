@@ -88,7 +88,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.26: user stack grows on demand"
+"      "Mini-OS v0.27: toolchain self-host (cc500 compiles itself)"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo
@@ -116,6 +116,9 @@ cmd "run heapdemo"   "run heapdemo
 # ---- v0.26#3 ELF 加载去上限：>64KB 大 ELF（旧 32KB/8 帧上限会拒绝） ----
 cmd "run bigdemo"    "run bigdemo
 "      "\[bigdemo\] pid=.* blob=70KB size=70000" "\[bigdemo\] 70KB write+verify sum=" "\[bigdemo\] survived big-ELF load" "\[shell\] 'bigdemo' exited code=0"
+# ---- v0.27 工具链自举：cc500 编译自身两次，P1==P2（写-编-跑闭环） ----
+cmd "ccboot 自举"     "ccboot
+"      "cc500: compiled /cc500.c -> /out.elf OK" "\[ccboot\] sha1=[0-9][0-9]* sha2=[0-9][0-9]* bytes=[0-9][0-9]* PASS"
 # ---- v0.14 文件系统增强：shell 目录命令 + fsdemo ----
 # 注意：QEMU HMP sendkey 不支持 '/'（斜杠会静默丢弃），此处用平铺名；
 # 带斜杠路径的交互验证走串口通道（test_serial.sh）。
@@ -267,6 +270,12 @@ check "heapdemo 存活"            "\[heapdemo\] survived heap brk/sbrk demo"
 check "initramfs 写入 bigdemo"   "\[ramdisk\] 'bigdemo'"
 check "大 ELF 加载日志"           "\[elf\] 'bigdemo' loaded"
 check "bigdemo 帧数超旧上限"      "\[elf\] 'bigdemo' loaded.*[0-9][0-9]* frames"
+# ---- v0.27 工具链自举 ----
+check "initramfs 写入 cc500"     "\[ramdisk\] 'cc500'"
+check "initramfs 写入 cc500.c"   "\[ramdisk\] 'cc500.c'"
+check "cc500 编译自身成 P1"       "cc500: compiled /cc500.c -> /out.elf OK"
+check "P1 被加载运行"             "\[elf\] '/out.elf' loaded.* entry=800a0054"
+check "自举闭环 PASS"            "\[ccboot\] sha1=[0-9][0-9]* sha2=[0-9][0-9]* bytes=[0-9][0-9]* PASS"
 # ---- v0.14 文件系统增强 ----
 check "initramfs 写入 fsdemo"   "\[ramdisk\] 'fsdemo'"
 check "fsdemo 建目录 /etc"       "\[fsdemo\] mkdir /etc -> [0-9][0-9]*"

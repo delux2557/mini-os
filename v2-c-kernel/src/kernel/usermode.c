@@ -800,8 +800,12 @@ void syscall_dispatch(registers_t *r) {
                 r->eax = (uint32_t)-1;
                 return;
             }
-            uint32_t v = old;
-            while (v < a) {
+            /* v0.26 bugfix: 映射 [old,a) 相交的"所有页"（old 下取整、a 上取整），
+             * 否则 brk 落在页中部时顶部半页未映射，任意非页对齐 malloc 都会越界缺页。
+             * （heapdemo 用页对齐 sbrk 没暴露；cc500 任意尺寸 malloc 踩中） */
+            uint32_t v = old & 0xFFFFF000u;
+            uint32_t vend = (a + 0xFFFu) & 0xFFFFF000u;
+            while (v < vend) {
                 if (!is_mapped(v)) {          /* 已映射页（收缩后复用）跳过 */
                     uint32_t phys = frame_alloc();
                     if (!phys) { r->eax = (uint32_t)-1; return; }

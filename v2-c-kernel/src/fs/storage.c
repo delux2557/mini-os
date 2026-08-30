@@ -75,6 +75,8 @@ extern char _binary_waitdemo_elf_start[], _binary_waitdemo_elf_end[];
 extern char _binary_abuse_elf_start[],   _binary_abuse_elf_end[];
 extern char _binary_sockdemo_elf_start[], _binary_sockdemo_elf_end[];
 extern char _binary_bigdemo_elf_start[], _binary_bigdemo_elf_end[];
+extern char _binary_cc500_elf_start[],  _binary_cc500_elf_end[];     /* v0.27 编译器 ELF */
+extern char _binary_cc500_c_start[],    _binary_cc500_c_end[];       /* v0.27 编译器源码 */
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
@@ -89,8 +91,8 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
 
 static void initramfs_setup(void) {
     static const char motd[] =
-        "Mini-OS v0.26: user stack grows on demand (deep). Try: run deep\n"
-        "Commands: help ls cat mkdir rmdir rm run exec save selftest exit netping\n";
+        "Mini-OS v0.27: toolchain self-host (cc500 compiles itself). Try: ccboot\n"
+        "Commands: help ls cat mkdir rmdir rm run exec save selftest exit netping ccboot\n";
     initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
     initramfs_file("hello",
                    _binary_hello_elf_start,
@@ -134,6 +136,13 @@ static void initramfs_setup(void) {
     initramfs_file("bigdemo",   /* v0.26#3: >64KB 大 ELF（验证加载去上限） */
                    _binary_bigdemo_elf_start,
                    (uint32_t)(_binary_bigdemo_elf_end - _binary_bigdemo_elf_start));
+    /* v0.27 工具链：编译器 ELF + 其自举源码（guest 内写-编-跑闭环的素材） */
+    initramfs_file("cc500",
+                   _binary_cc500_elf_start,
+                   (uint32_t)(_binary_cc500_elf_end - _binary_cc500_elf_start));
+    initramfs_file("cc500.c",
+                   _binary_cc500_c_start,
+                   (uint32_t)(_binary_cc500_c_end - _binary_cc500_c_start));
     initramfs_file("shell",
                    _binary_shell_elf_start,
                    (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));

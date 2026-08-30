@@ -56,6 +56,7 @@ static void cmd_help(void) {
     sys_print("  exec <prog> [a] fork + exec app with argv (forkdemo/args)\n");
     sys_print("  save            write FS back to disk (v0.16 persist)\n");
     sys_print("  netping [ip][p] UDP ping to host echo (v0.22, default 10.0.2.2:7777)\n");
+    sys_print("  ccboot          self-host bootstrap: cc500 compiles itself twice (v0.27)\n");
     sys_print("  selftest        run all demos, print one-line PASS/FAIL (agent-verifiable)\n");
     sys_print("  exit            quit shell\n");
 }
@@ -330,13 +331,56 @@ static void cmd_netping(char *args) {
     sys_net_close(s);
 }
 
+/* v0.27: 自举闭环验证（写-编-跑）。
+ * 步骤：run cc500（gcc 版）编译 /cc500.c -> /out.elf=P1；再 run /out.elf（=P1）
+ * 编译 /cc500.c -> /out.elf=P2；校验 P1 与 P2 的 FNV-1a 校验和与字节数一致。
+ * 一致 => 编译器对自身源码是"不动点"，自举成立。单行原子输出供回归 grep。 */
+static uint32_t file_fnv(const char *path, uint32_t *size_out) {
+    uint32_t h = 0x811C9DC5u;
+    uint32_t sz = 0;
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 0) != 0) { *size_out = 0; return 0; }
+    for (;;) {
+        char buf[64];
+        int n = (int)syscall3(SYS_FS_READ, 1, (uint32_t)buf, 64);
+        if (n <= 0) break;
+        for (int i = 0; i < n; i++) { h ^= (uint8_t)buf[i]; h *= 0x01000193u; }
+        sz += (uint32_t)n;
+    }
+    syscall3(SYS_FS_CLOSE, 1, 0, 0);
+    *size_out = sz;
+    return h;
+}
+
+static void cmd_ccboot(void) {
+    /* 第 1 步：gcc 版编译器编译 /cc500.c -> /out.elf = P1 */
+    int pid = sys_spawn_file("cc500");
+    if (pid <= 0) { sys_print("[ccboot] cannot spawn cc500\n"); return; }
+    int code = 0;
+    (void)sys_wait((uint32_t)pid, &code);
+    uint32_t s1, n1;
+    s1 = file_fnv("/out.elf", &n1);
+    /* 第 2 步：P1 再编译 /cc500.c -> /out.elf = P2 */
+    pid = sys_spawn_file("/out.elf");
+    if (pid <= 0) { sys_print("[ccboot] cannot spawn /out.elf (P1)\n"); return; }
+    code = 0;
+    (void)sys_wait((uint32_t)pid, &code);
+    uint32_t s2, n2;
+    s2 = file_fnv("/out.elf", &n2);
+    /* 汇总单行：[ccboot] sha1=.. sha2=.. bytes=.. PASS/FAIL */
+    nl_reset();
+    nl_s("[ccboot] sha1="); nl_u(s1); nl_s(" sha2="); nl_u(s2);
+    nl_s(" bytes="); nl_u(n1);
+    nl_s((n1 > 0 && n1 == n2 && s1 == s2) ? " PASS\n" : " FAIL\n");
+    nl_end();
+}
+
 void app_main(int argc, char **argv) {
     (void)argc; (void)argv;
     char line[CMD_MAX];
     char cmd[ARG_MAX];
     char arg[ARG_MAX];
 
-    sys_print("\n=== Mini-OS v0.18 shell ===\n");
+    sys_print("\n=== Mini-OS v0.27 shell ===\n");
     sys_print("type 'help' for commands\n");
 
     for (;;) {
@@ -358,6 +402,7 @@ void app_main(int argc, char **argv) {
         else if (user_strcmp(cmd, "exec") == 0) cmd_exec(arg);
         else if (user_strcmp(cmd, "save") == 0) cmd_save();
         else if (user_strcmp(cmd, "netping") == 0) cmd_netping(arg);
+        else if (user_strcmp(cmd, "ccboot") == 0)  cmd_ccboot();
         else if (user_strcmp(cmd, "selftest") == 0) cmd_selftest();
         else if (user_strcmp(cmd, "exit") == 0) {
             sys_print("bye\n");
