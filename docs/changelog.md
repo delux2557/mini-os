@@ -2,13 +2,13 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
-## \[v0.30] - 2026-08-30 · 修复工具链恶性 BUG（文件槽泄漏 + 自编译产物丢 argv）
+## \[v0.30] - 2026-08-30 · 修复工具链严重 BUG（文件槽泄漏 + 自编译产物丢 argv）
 
 > 两个带复现的真 bug 由独立实操报告、逐条核验属实后修复（见 bugs.md BUG-031/032）。
 
 **Fixed**
 
-* **BUG-031：全局文件槽泄漏毒化工具链**（`src/kernel/usermode.c` + `sched.c`）：
+* **BUG-031：全局文件槽泄漏污染工具链**（`src/kernel/usermode.c` + `sched.c`）：
   `fs_files[8]` 全局表无进程归属、退出路径不清理——cc500 一次 parse error（裸 `exit(1)`
   跳过 `flush_output`）即永久占用 slot2，此后所有编译 `setup_output` 失败直到重启。
   修复：文件槽记**打开者 pid**（`fs_file_t.pid`），`terminate_current` 调
@@ -36,7 +36,7 @@
   FAIL → 同源 good2.c 再编译必须成功）与 BUG-B（ccboot 产 P1 → `exec /out.elf
   /cc500.c /out2.elf` → /out2.elf 必须被创建）双断言
 * 修复后实测：`[ls] out2.elf size=19217`（argv 生效）；good2.c 二次编译
-  `[ccrun] ... code=0 PASS`（槽不毒化）；ccboot P1==P2 逐字节一致仍成立
+  `[ccrun] ... code=0 PASS`（槽不污染）；ccboot P1==P2 逐字节一致仍成立
 * 五层回归全绿：宿主 16/16 + QEMU + 串口 + 持久化 + 网络（cc500 桩改动经自举
   不动点 + 全量 QEMU 复验）
 * 独立评估 L-4/L-5：版本串单一来源——新增 `src/version.h` 的 `MINI_OS_VERSION`，

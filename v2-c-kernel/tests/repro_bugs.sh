@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 实锤复现 BUG-A（文件槽泄漏毒化工具链）与 BUG-B（cc500 产物丢失 exec argv）
+# 实锤复现 BUG-A（文件槽泄漏污染工具链）与 BUG-B（cc500 产物丢失 exec argv）
 set -u
 cd "$(dirname "$0")/.." || exit 1   # 相对路径定位到 v2-c-kernel/，任意机器可跑
 make >/dev/null 2>&1
@@ -57,7 +57,7 @@ send "writefile /good2.c $GOOD"
 wait_for "写 good2.c" "wrote [0-9][0-9]* bytes"
 send "ccrun /good2.c /good2.elf"
 if grep -aq "output setup fail" "$LOG"; then
-    echo "[!]   BUG-A 属实：同源二次编译失败（cc500: output setup fail = slot2 泄漏毒化）"
+    echo "[!]   BUG-A 属实：同源二次编译失败（cc500: output setup fail = slot2 泄漏污染）"
     wait_for "二次编译 FAIL code=1" "\[ccrun\] compile FAIL code=1" 15
 else
     echo "[ok]   BUG-A 未复现：二次编译仍成功"
