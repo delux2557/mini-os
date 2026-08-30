@@ -2,6 +2,41 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## \[v0.27b] - 2026-08-30 · 写-编-跑演示闭环：cc500 支持命令行路径
+
+**Added**
+
+* **cc500 命令行指定输入/输出路径**（`tools/cc500/cc500.c`）：`cc500_main(argv, argc)`
+  按 `argv[1]=输入 argv[2]=输出` 取路径（`load_ptr` 逐字节拼回 4 字节指针，因 CC500
+  无 int\* 解引用/类型转换），缺省回退 `/cc500.c` → `/out.elf`（`run cc500` 保持原行为）；
+  入口/CRT 声明顺序对齐 CC500 反向压参与内核 `[esp+4]=argc,[esp+8]=argv` 的差异
+
+* **shell `writefile <path> <content...>`**：把命令行剩余部分（保留空格）写入文件，
+  让 agent 能在 guest 内经 shell 写源码（ARG_MAX 32→128 解除内容截断）
+
+* **shell `ccrun <src> <out>`**：fork+exec cc500 编译 `<src>` 为 `<out>` → `run <out>`
+  → 校验退出码，端到端「写-编-跑」一键命令
+
+**自举仪式（验收达成）**
+
+* 完整演示剧本在 guest 内跑通：`writefile /hello.c <C 源码>` → `ccrun /hello.c /hello.elf`
+  → 编译产物被加载运行（`[elf] '/hello.elf' loaded`）→ 程序输出 + 退出码 0；
+  cc500 对**任意**合法源程序编译出可运行 ELF，不再局限于编译自身
+
+**Fixed**
+
+* BUG-026：cc500 对畸形输入（形参列表 EOF 未闭合）死循环——`program()` 形参循环
+  `while (accept(")")==0)` 在 token 变空后无限调用 `sym_declare("")`，符号表
+  `table_pos` 无界增长直至越界缺页。修复：缺名字/形参处遇 EOF 直接 `error()`
+
+**Engineering**
+
+* 页错误日志增强：`pf_handler` 附打印 fault EIP / eax / ebx（`PAGE FAULT … eip=… eax=…`），
+  便于定位用户态故障指令（本次调试 cc500 越界即靠此定位）
+* 回归升级：`tests/test_serial.sh` 新增 writefile + ccrun 用例（写源码 → 编译 OK →
+  编译产物被加载 → PASS），与 ccboot（自举不动点）互补：前者证"能编译任意程序"、
+  后者证"编译器对自身是不动点"
+
 ## \[v0.27] - 2026-08-30 · 工具链与自举：guest 内「写-编-跑」闭环
 
 **Added**

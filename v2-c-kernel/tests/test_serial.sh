@@ -115,8 +115,15 @@ wait_for "bigdemo 存活"        "\[bigdemo\] survived big-ELF load"
 wait_for "bigdemo 退出码"     "'bigdemo' exited code=0"
 # ---- v0.27 工具链自举：cc500 编译自身两次 P1==P2（写-编-跑闭环） ----
 send "ccboot"
-wait_for "cc500 编译自身"       "cc500: compiled /cc500.c -> /out.elf OK"
+wait_for "cc500 编译自身"       "cc500: compiled OK"
 wait_for "自举闭环 PASS"        "\[ccboot\] sha1=[0-9][0-9]* sha2=[0-9][0-9]* bytes=[0-9][0-9]* PASS"
+# ---- v0.27b 写-编-跑（任意程序）：writefile 写源码 -> ccrun 编译并运行 ----
+send 'writefile /hello.c int syscall3(int n,int a,int b,int c);int main(){syscall3(1,"hello, world\x0a",0,0);return 0;}'
+wait_for "writefile 写源码"     "\[writefile\] '/hello.c' wrote [0-9][0-9]* bytes"
+send "ccrun /hello.c /hello.elf"
+wait_for "cc500 编译成功"       "cc500: compiled OK"
+wait_for "编译产物被加载"        "\[elf\] '/hello.elf' loaded"
+wait_for "ccrun 编译运行 PASS"  "\[ccrun\] '/hello.elf' exited code=0 PASS"
 # ---- v0.14 文件系统增强 ----
 send "mkdir /sd1"
 wait_for "mkdir 返回"          "\[shell\] mkdir '/sd1' -> "

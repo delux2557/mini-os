@@ -413,6 +413,26 @@
 
 ---
 
+## BUG-026 [已修复] v0.27b cc500 对畸形输入死循环（形参列表 EOF 未闭合）
+
+- **版本**：v0.27（guest 内 cc500 编译器；v0.27b 写-编-跑演示时暴露）
+- **现象**：`writefile` 写入的源码被 shell 的 `ARG_MAX=32` 截断，形参列表
+  `int syscall3(int n,int a,...` 在 EOF 处未闭合。编译该残缺源码时编译器**死循环**：
+  反复调用 `sym_declare("")`，符号表 `table_pos` 每次 +6 无界增长，约 600 次后
+  `table[0xef8]` 写越出映射页 → `PAGE FAULT @801ad000 eip=… eax=801ac108 ebx=ef8`。
+- **根因**：`program()` 形参解析 `while (accept(")") == 0) { … type_name(); … }`
+  在 token 变为空（EOF）时 `accept(")")` 恒假、`type_name()` 也只会再读到空，
+  `sym_declare(token, …)` 以空名字被无限调用——**缺 EOF 终止/报错守卫**。
+  原版 cc500 只在完整源码上自举，从未遇到畸形输入。
+- **修复**：`program()` 在"缺名字处遇 EOF"与"形参列表遇 EOF"两处补 `if (token[0]==0) error()`
+  （畸形输入直接 `exit(1)`，不再死循环）。同时 shell `ARG_MAX` 32→128 解除 writefile 内容截断。
+- **回归**：`make test` 全绿；writefile+ccrun 写-编-跑用例通过；ccboot 自举不动点不受影响。
+- **教训**：解析器对"输入流在未预期位置耗尽"必须有显式报错路径，不能依赖
+  `accept()` 永远能匹配到终结符；自托管编译器的健壮性边界要用**畸形输入**用例覆盖，
+  而不只是"能编译自己"。
+
+---
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号 | 场景 | 现象 | 处置/教训 |

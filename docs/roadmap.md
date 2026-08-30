@@ -34,6 +34,7 @@
 | v0.25 | DHCP 客户端：动态获取 IP/网关           | `net/dhcp.c/h` 纯逻辑（BOOTP 固定头+选项，RFC 2131/2132）+ 宿主单测 test\_dhcp（38 断言）；`e1000_dhcp_run` 开机四步状态机（DISCOVER→OFFER→REQUEST→ACK，忙等超时 ~2s、NAK/超时重试），失败回退静态——静态兜底收敛为单一配置点 `NET_STATIC_IP`/`NET_STATIC_GW`；`e1000_my_ip()`/`e1000_gw_ip()` 访问器，ARP/UDP/ICMP 三自检改取动态 IP；test\_net 新增 DHCP 四项断言全绿                                                                                   |
 | v0.26 | 容量三连#1：用户栈按需生长                | 每进程栈槽 8KB 固定 → 32KB（槽底硬底守卫页 4K 永不映射 + 28KB 可生长栈区，栈顶页起、守卫页随栈底下移）；`stack_guard_hit` 二态扩三态（OK/GROWTH/BOOM，纯逻辑可宿主单测）；`pf_handler` 命中守卫页补映射新栈页并更新 PCB 记账、深越界/到硬底才判溢出；PCB `stack_frame` 改 `stack_frames[]`+`stack_fcount`+`stack_bottom`，`stack_init`/`stack_free` 统一管理；地址空间重布局（栈区 0x80010000-0x80090000，shell/app 槽/SHMEM 后移）；`deep` 演示 12KB 递归触发 3 次生长；宿主 34 断言 + QEMU/串口回归全绿 |
 | v0.27 | 工具链与自举：guest 内「写-编-跑」闭环          | 移植自托管 C 子集编译器 **cc500**（`tools/cc500/cc500.c`）进 guest：链接基址 0x800A0000 + mini-os ABI；唯一机器码 stub 收敛为通用 `syscall3`（eax/ebx/ecx/edx=int 0x80），exit/malloc/getchar/putchar/sys_print 全用 C 子集实现（malloc=brk bump）；I/O 走 mini-fs（整读 /cc500.c、编译完写回 /out.elf）；initramfs 嵌入编译器 ELF + 自举源码；shell `ccboot` 命令验证**自举不动点**——gcc 版编译出 P1、P1 再编译出 P2，P1==P2（FNV+字节数逐字节一致，18079B）⇒ 写-编-跑闭环在 guest 内跑通；修复 BUG-025（brk 页中部映射空洞）；回归五层全绿 |
+| v0.27b | 写-编-跑演示闭环：cc500 命令行路径 + shell 写/编/跑 | cc500 支持 `argv[1]=输入 argv[2]=输出`（`load_ptr` 逐字节拼 4 字节指针；缺省回退 /cc500.c→/out.elf）；入口/CRT 声明顺序对齐 CC500 反向压参与内核 cdecl 入口的差异；shell 新增 `writefile <path> <content>`（agent 写源码，ARG_MAX 32→128）+ `ccrun <src> <out>`（fork+exec 编译→运行→校验退出码）；guest 内完整剧本跑通：`writefile /hello.c … → ccrun /hello.c /hello.elf` → 编译产物被加载运行；修复 BUG-026（cc500 对畸形输入死循环，加 EOF 守卫）；页错误日志附 EIP/eax/ebx 便于定位用户态故障；回归五层全绿 |
 
 ## 下一步规划
 
@@ -156,11 +157,14 @@
     `cc500 编译自身 → P1；P1 再编译 → P2；P1==P2` 自举闭环已跑通（`shell ccboot` 命令，
     `[ccboot] … PASS`）。
 
-  * **v0.29 自举仪式验收**：~~`cc.c` 编译出 `cc2`，`cc2` 再编译 `cc.c`，产物逐字节一致；~~
-    ✅ 已达成（cc500 对自身源码是"不动点"，P1==P2 逐字节一致）。
-    剩余增量：让编译器支持**命令行指定输入/输出路径**（现为固定 `/cc500.c` → `/out.elf`），
-    然后演示剧本：agent 经串口/UDP 通道 → `cat > hello.c` → `cc hello.c` → `run a.out`；
-    selftest 追加"cc 自举 + 编译循环"两项（沿用 `PASS (N checks)` 行不变式）。
+  * **v0.29 自举仪式验收**：~~`cc.c` 编译出 `cc2`，`cc2` 再编译 `cc.c`，产物逐字节一致；~~ ✅
+    已达成（cc500 对自身源码是"不动点"，P1==P2 逐字节一致）。
+    ~~剩余增量：让编译器支持**命令行指定输入/输出路径**（现为固定 `/cc500.c` → `/out.elf`），
+    然后演示剧本：agent 经串口/UDP 通道 → `cat > hello.c` → `cc hello.c` → `run a.out`；~~
+    ✅ **v0.27b 已完成**：cc500 支持 `argv[1]=输入 argv[2]=输出`（缺省回退固定路径）；
+    shell 新增 `writefile <path> <content>`（agent 写源码）+ `ccrun <src> <out>`
+    （编译并运行）；guest 内 `writefile /hello.c … → ccrun /hello.c /hello.elf` →
+    编译产物被加载运行全链路跑通（test_serial.sh 用例）。
 
 * **P2 并行项（可插在网络收尾之前/之间）**
 

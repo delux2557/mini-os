@@ -118,7 +118,7 @@ cmd "run bigdemo"    "run bigdemo
 "      "\[bigdemo\] pid=.* blob=70KB size=70000" "\[bigdemo\] 70KB write+verify sum=" "\[bigdemo\] survived big-ELF load" "\[shell\] 'bigdemo' exited code=0"
 # ---- v0.27 工具链自举：cc500 编译自身两次，P1==P2（写-编-跑闭环） ----
 cmd "ccboot 自举"     "ccboot
-"      "cc500: compiled /cc500.c -> /out.elf OK" "\[ccboot\] sha1=[0-9][0-9]* sha2=[0-9][0-9]* bytes=[0-9][0-9]* PASS"
+"      "cc500: compiled OK" "\[ccboot\] sha1=[0-9][0-9]* sha2=[0-9][0-9]* bytes=[0-9][0-9]* PASS"
 # ---- v0.14 文件系统增强：shell 目录命令 + fsdemo ----
 # 注意：QEMU HMP sendkey 不支持 '/'（斜杠会静默丢弃），此处用平铺名；
 # 带斜杠路径的交互验证走串口通道（test_serial.sh）。
@@ -273,7 +273,7 @@ check "bigdemo 帧数超旧上限"      "\[elf\] 'bigdemo' loaded.*[0-9][0-9]* f
 # ---- v0.27 工具链自举 ----
 check "initramfs 写入 cc500"     "\[ramdisk\] 'cc500'"
 check "initramfs 写入 cc500.c"   "\[ramdisk\] 'cc500.c'"
-check "cc500 编译自身成 P1"       "cc500: compiled /cc500.c -> /out.elf OK"
+check "cc500 编译自身成 P1"       "cc500: compiled OK"
 check "P1 被加载运行"             "\[elf\] '/out.elf' loaded.* entry=800a0054"
 check "自举闭环 PASS"            "\[ccboot\] sha1=[0-9][0-9]* sha2=[0-9][0-9]* bytes=[0-9][0-9]* PASS"
 # ---- v0.14 文件系统增强 ----

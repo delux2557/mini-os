@@ -37,11 +37,14 @@ int putchar(int);
 int syscall3(int n, int a, int b, int c);   /* v0.27: be_start 内联 stub */
 int sys_print(char *s);
 
-/* The first thing defined must be the entry (v0.27: cc500_main；cc500_crt 也以它入口). */
-int main1();
-int cc500_main()
+/* The first thing defined must be the entry (v0.27: cc500_main；cc500_crt 也以它入口).
+ * v0.27b: 支持命令行指定输入/输出路径——argv[1]=输入 argv[2]=输出。
+ * 注意声明顺序：CC500 首个形参落在 8(%esp)、末个落在 4(%esp)，而内核/CRT 以
+ * [esp+4]=argc、[esp+8]=argv 进入，故按 (char *argv, int argc) 声明才能对上。 */
+int main1(char *argv, int argc);
+int cc500_main(char *argv, int argc)
 {
-  return main1();
+  return main1(argv, argc);
 }
 
 char *my_realloc(char *old, int oldlen, int newlen)
@@ -726,6 +729,8 @@ void program()
   int current_symbol;
   while (token[0]) {
     type_name();
+    if (token[0] == 0)
+      error();           /* v0.27b: 缺名字处遇 EOF（畸形输入）直接报错而非死循环 */
     current_symbol = sym_declare_global(token);
     get_token();
     if (accept(";")) {
@@ -738,6 +743,8 @@ void program()
       while (accept(")") == 0) {
 	number_of_args = number_of_args + 1;
 	type_name();
+	if (token[0] == 0)
+	  error();       /* v0.27b: 形参列表在 EOF 处未闭合（畸形输入） */
 	if (peek(")") == 0) {
 	  sym_declare(token, 'A', number_of_args);
 	  get_token();
@@ -767,6 +774,16 @@ int in_slot;
 int in_len;
 int in_pos;
 char *in_data;
+int in_path;    /* 输入路径（0=默认 /cc500.c），v0.27b 由 argv[1] 指定 */
+int out_path;   /* 输出路径（0=默认 /out.elf），v0.27b 由 argv[2] 指定 */
+
+/* 从 argv 指针数组按字节偏移读 4 字节指针（CC500 无 int* 解引用/类型转换，
+ * 逐字节拼回小端 32 位）。argv[0] 在偏移 0、argv[1] 在偏移 4、argv[2] 在偏移 8。 */
+int load_ptr(char *base, int off)
+{
+  return (base[off] & 255) + ((base[off + 1] & 255) << 8) +
+         ((base[off + 2] & 255) << 16) + ((base[off + 3] & 255) << 24);
+}
 
 int getchar(void)
 {
@@ -805,12 +822,17 @@ int sys_print(char *s)
   return syscall3(1, s, 0, 0);            /* SYS_PRINT */
 }
 
-/* 整读 /cc500.c 进 in_data，返回 0/-1（CC500 子集无 break，用 done 标志退出） */
+/* 整读输入文件（in_path 或默认 /cc500.c）进 in_data，返回 0/-1
+ * （CC500 子集无 break，用 done 标志退出） */
 int open_input()
 {
   int n;
   int done;
-  if (syscall3(14, 1, "/cc500.c", 0) != 0)   /* SYS_FS_OPEN slot1 只读 */
+  char *p;
+  p = "/cc500.c";
+  if (in_path != 0)
+    p = in_path;
+  if (syscall3(14, 1, p, 0) != 0)            /* SYS_FS_OPEN slot1 只读 */
     return 0 - 1;
   in_data = malloc(32768);
   if (in_data == (0 - 1))
@@ -830,13 +852,17 @@ int open_input()
   return 0;
 }
 
-/* 建/清 /out.elf 并打开只写（slot2），返回 0/-1 */
+/* 建/清输出文件（out_path 或默认 /out.elf）并打开只写（slot2），返回 0/-1 */
 int setup_output()
 {
-  syscall3(19, "/out.elf", 0, 0);            /* SYS_FS_DELETE：清旧文件 */
-  if (syscall3(13, "/out.elf", 0, 0) <= 0 - 1)  /* SYS_FS_CREATE：新 inode */
+  char *p;
+  p = "/out.elf";
+  if (out_path != 0)
+    p = out_path;
+  syscall3(19, p, 0, 0);                     /* SYS_FS_DELETE：清旧文件 */
+  if (syscall3(13, p, 0, 0) <= 0 - 1)        /* SYS_FS_CREATE：新 inode */
     return 0 - 1;
-  if (syscall3(14, 2, "/out.elf", 1) != 0)      /* SYS_FS_OPEN slot2 只写 */
+  if (syscall3(14, 2, p, 1) != 0)            /* SYS_FS_OPEN slot2 只写 */
     return 0 - 1;
   return 0;
 }
@@ -852,15 +878,21 @@ int flush_output()
   return 0;
 }
 
-int main1()
+int main1(char *argv, int argc)
 {
   code_offset = 2148139008; /* 0x800A0000 = APP_LINK（与内核 ELF 加载器一致） */
+  in_path = 0;              /* 默认 /cc500.c */
+  out_path = 0;             /* 默认 /out.elf */
+  if (3 <= argc) {          /* argv[1]=输入路径 argv[2]=输出路径 */
+    in_path = load_ptr(argv, 4);
+    out_path = load_ptr(argv, 8);
+  }
   if (open_input() != 0) {
-    sys_print("cc500: input /cc500.c open fail\x0a");
+    sys_print("cc500: input open fail\x0a");
     return 1;
   }
   if (setup_output() != 0) {
-    sys_print("cc500: output /out.elf setup fail\x0a");
+    sys_print("cc500: output setup fail\x0a");
     return 1;
   }
   be_start();
@@ -872,6 +904,6 @@ int main1()
     sys_print("cc500: output write fail\x0a");
     return 1;
   }
-  sys_print("cc500: compiled /cc500.c -> /out.elf OK\x0a");
+  sys_print("cc500: compiled OK\x0a");
   return 0;
 }

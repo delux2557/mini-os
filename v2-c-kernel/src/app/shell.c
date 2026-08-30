@@ -7,7 +7,8 @@
 #include "user_lib.h"
 
 #define CMD_MAX  128
-#define ARG_MAX  32
+/* v0.27b: arg 缓冲提升到与命令行同宽，writefile 才能写入接近整行长的源码内容 */
+#define ARG_MAX  128
 
 /* 从整行中取第一个单词到 out，返回是否非空 */
 static int split_cmd(char *line, char *out) {
@@ -57,6 +58,8 @@ static void cmd_help(void) {
     sys_print("  save            write FS back to disk (v0.16 persist)\n");
     sys_print("  netping [ip][p] UDP ping to host echo (v0.22, default 10.0.2.2:7777)\n");
     sys_print("  ccboot          self-host bootstrap: cc500 compiles itself twice (v0.27)\n");
+    sys_print("  writefile <p> <c> write file (content = rest of line, v0.27b)\n");
+    sys_print("  ccrun <src> <out> cc500 compile then run (write-compile-run, v0.27b)\n");
     sys_print("  selftest        run all demos, print one-line PASS/FAIL (agent-verifiable)\n");
     sys_print("  exit            quit shell\n");
 }
@@ -374,6 +377,66 @@ static void cmd_ccboot(void) {
     nl_end();
 }
 
+/* v0.27b: writefile <path> <content...> —— 把命令行剩余部分（保留空格）写入文件。
+ * 让 agent 能在 guest 内经 shell 写源码文件（单行内容），配合 ccrun 完成"写-编-跑"。 */
+static void cmd_writefile(char *args) {
+    char path[64];
+    uint32_t i = 0, j = 0;
+    char *content;
+    while (args[i] == ' ') i++;
+    while (args[i] && args[i] != ' ' && j < 63) path[j++] = args[i++];
+    path[j] = 0;
+    while (args[i] == ' ') i++;
+    content = &args[i];
+    if (!path[0] || !content[0]) { sys_print("usage: writefile <path> <content>\n"); return; }
+    syscall3(SYS_FS_DELETE, (uint32_t)path, 0, 0);
+    if ((int)syscall3(SYS_FS_CREATE, (uint32_t)path, 0, 0) < 0) {
+        sys_print("[writefile] create fail '"); sys_print(path); sys_print("'\n"); return;
+    }
+    if ((int)syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 1) != 0) {
+        sys_print("[writefile] open fail '"); sys_print(path); sys_print("'\n"); return;
+    }
+    uint32_t len = user_strlen(content);
+    int w = (int)syscall3(SYS_FS_WRITE, 1, (uint32_t)content, len);
+    syscall3(SYS_FS_CLOSE, 1, 0, 0);
+    nl_reset();
+    nl_s("[writefile] '"); nl_s(path); nl_s("' wrote "); nl_u((uint32_t)w); nl_s(" bytes\n");
+    nl_end();
+}
+
+/* v0.27b: ccrun <src> <out> —— fork+exec cc500 编译 <src> 为 <out>，随后运行 <out>。
+ * 端到端"写-编-跑"一键：writefile 写源 → ccrun 编译并运行 → 观察程序输出与退出码。 */
+static void cmd_ccrun(char *args) {
+    char *tok[4];
+    int n = tokenize(args, tok, 4);
+    if (n < 2) { sys_print("usage: ccrun <src> <out>\n"); return; }
+    /* 1) fork 子进程 exec cc500 <src> <out> 编译 */
+    uint32_t pid = sys_fork();
+    if (pid == 0) {
+        char *av[4];
+        av[0] = "cc500"; av[1] = tok[0]; av[2] = tok[1]; av[3] = 0;
+        (void)sys_exec("cc500", 3, (const char **)av);
+        sys_print("[ccrun] exec cc500 FAIL\n");
+        sys_exit(1);
+    }
+    int code = 0;
+    (void)sys_wait((uint32_t)pid, &code);
+    if (code != 0) {
+        sys_print("[ccrun] compile FAIL code="); user_putdec((uint32_t)code); sys_print("\n");
+        return;
+    }
+    /* 2) 运行编译产物 */
+    pid = sys_spawn_file(tok[1]);
+    if (pid <= 0) {
+        sys_print("[ccrun] cannot run '"); sys_print(tok[1]); sys_print("'\n"); return;
+    }
+    code = 0;
+    (void)sys_wait((uint32_t)pid, &code);
+    sys_print("[ccrun] '"); sys_print(tok[1]); sys_print("' exited code=");
+    user_putdec((uint32_t)code);
+    sys_print(code == 0 ? " PASS\n" : " FAIL\n");
+}
+
 void app_main(int argc, char **argv) {
     (void)argc; (void)argv;
     char line[CMD_MAX];
@@ -403,6 +466,8 @@ void app_main(int argc, char **argv) {
         else if (user_strcmp(cmd, "save") == 0) cmd_save();
         else if (user_strcmp(cmd, "netping") == 0) cmd_netping(arg);
         else if (user_strcmp(cmd, "ccboot") == 0)  cmd_ccboot();
+        else if (user_strcmp(cmd, "writefile") == 0) cmd_writefile(arg);
+        else if (user_strcmp(cmd, "ccrun") == 0)  cmd_ccrun(arg);
         else if (user_strcmp(cmd, "selftest") == 0) cmd_selftest();
         else if (user_strcmp(cmd, "exit") == 0) {
             sys_print("bye\n");

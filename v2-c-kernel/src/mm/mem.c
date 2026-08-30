@@ -276,10 +276,10 @@ void pf_handler(registers_t *r) {
             __asm__ volatile ("cli; hlt");   /* 不可达 */
         }
 
-        serial_printf("\n[user] PAGE FAULT pid=%u @%x err=%u -> killed\n",
-                      pid, fault, r->err_code);
-        vga_printf("\n[user] PAGE FAULT pid=%u @%x err=%u -> killed\n",
-                   pid, fault, r->err_code);
+        serial_printf("\n[user] PAGE FAULT pid=%u @%x err=%u eip=%x eax=%x ebx=%x -> killed\n",
+                      pid, fault, r->err_code, r->eip, r->eax, r->ebx);
+        vga_printf("\n[user] PAGE FAULT pid=%u @%x err=%u eip=%x eax=%x ebx=%x -> killed\n",
+                   pid, fault, r->err_code, r->eip, r->eax, r->ebx);
         sched_kill(r, (uint32_t)-1);
         __asm__ volatile ("cli; hlt");   /* 不可达 */
     }
