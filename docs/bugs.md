@@ -505,7 +505,7 @@
 
 ---
 
-## BUG-031 [已修复] v0.30 全局文件槽泄漏：一次编译失败毒化整条工具链（=用户报告 BUG-A）
+## BUG-031 [已修复] v0.30 全局文件槽泄漏：一次编译失败污染整条工具链（=用户报告 BUG-A）
 
 - **版本**：v0.8（固定槽 fs 模型）引入；v0.29 独立实操复现（`tests/repro_bugs.sh`）
 - **现象**：cc500 编译语法被拒的源（parse error → `error()` = 裸 `exit(1)`）之后，
@@ -515,7 +515,7 @@
   `static fs_file_t fs_files[FS_MAX_OBJ]`）；`terminate_current`/`reap_process`
   退出路径**不清理**任何槽。cc500 `setup_output` 打开 slot2 后，唯一归还点是成功路径的
   `flush_output`；parse error 直接 `exit(1)` 跳过它 → slot2 永久占用 → 此后任何 cc500
-  的 `setup_output`（`SYS_FS_OPEN slot2` 因 `fs_files[2].used==1` 失败）→ 工具链被毒化
+  的 `setup_output`（`SYS_FS_OPEN slot2` 因 `fs_files[2].used==1` 失败）→ 工具链被污染
   直到重启。
 - **修复**：文件槽记**打开者 pid**（`fs_file_t.pid`，`sys_fs_open` 写入），进程退出时
   `fs_files_close_pid(pid)` 只归还该进程的槽（`terminate_current` 调用）。首版"关闭全部

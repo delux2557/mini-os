@@ -62,7 +62,7 @@ static fs_file_t fs_files[FS_MAX_OBJ];
 
 /* v0.29（BUG-031）：进程退出时归还其占用的文件槽。
  * fs_files 是全局表、无进程归属；cc500 等程序在 parse error 等异常退出路径
- * （裸 exit/kill）不归还槽，泄漏的槽会毒化后续所有编译/文件操作。
+ * （裸 exit/kill）不归还槽，泄漏的槽会污染后续所有编译/文件操作。
  * 只清理"该 pid 打开"的槽，不误伤并发进程（boot 演示进程与 shell 的编译并存）。 */
 void fs_files_close_pid(uint32_t pid) {
     for (uint32_t i = 1; i < FS_MAX_OBJ; i++)

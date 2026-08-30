@@ -46,7 +46,7 @@
 | v0.27b | `v2-c-kernel/` | cc500 命令行路径 + shell `writefile`/`ccrun`（任意程序写-编-跑） | — |
 | v0.28 | `v2-c-kernel/` | DHCP 租期续约（T1 单播 RENEW / T2 广播 REBIND，RFC 2131） | — |
 | v0.29 | `v2-c-kernel/` | 加固：宿主侧 fuzz + 内核堆审计 | — |
-| v0.30 | `v2-c-kernel/` | 修复工具链恶性 BUG（文件槽泄漏 + 自编译产物丢 argv）+ 代码审查修复 | — |
+| v0.30 | `v2-c-kernel/` | 修复工具链严重 BUG（文件槽泄漏 + 自编译产物丢 argv）+ 代码审查修复 | — |
 
 ### cc500 方言边界（guest 内写-编-跑须知）
 
