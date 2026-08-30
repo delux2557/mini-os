@@ -51,6 +51,28 @@ run_test test_udp     "src/net/ip.c src/net/udp.c tests/test_udp.c"
 run_test test_icmp    "src/net/icmp.c src/net/ip.c src/net/udp.c tests/test_icmp.c"
 run_test test_dhcp    "src/net/ip.c src/net/udp.c src/net/dhcp.c tests/test_dhcp.c"
 
+# ---- 阶段二加固：宿主侧 fuzz（阶段建议 v0.29）----
+# 对纯逻辑解析模块（fs_walk/elf/arp/ip/udp/icmp/dhcp）注入随机字节/随机路径，
+# 验证"畸形输入被拒绝而不崩溃"。ASan+UBSan 下跑，越界/未初始化读/下溢即失败；
+# 不用共享 CFLAGS 的 -fno-pie（fuzz 程序无 32 位地址假设）。迭代数 FUZZ_ITERS 可调。
+FUZZ_SRCS="src/fs/blockdev.c src/fs/fs.c src/kernel/elf.c src/net/netutil.c \
+           src/net/ip.c src/net/udp.c src/net/icmp.c src/net/dhcp.c tests/fuzz_parse.c"
+FUZZ_CFLAGS="-Wall -Wextra -O1 -g -fsanitize=address,undefined \
+             -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -Itests \
+             -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast"
+if $CC $FUZZ_CFLAGS $FUZZ_SRCS -o "$BUILD/test_fuzz"; then
+    if "$BUILD/test_fuzz"; then
+        echo "[OK]   test_fuzz（解析器 fuzz，ASan 清洁）"
+        PASS=$((PASS + 1))
+    else
+        echo "[FAIL] test_fuzz（fuzz 崩溃 / ASan 报错）"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "[FAIL] test_fuzz（编译失败）"
+    FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "宿主测试汇总: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1

@@ -54,6 +54,9 @@ int main(void) {
 
     /* 5) 帧太短 -> 拒绝 */
     CHECK_EQ(icmp_parse(frame, 30, 0, 0, 0, 0, 0, 0, 0), -1);
+    /* 5b) 短于以太网头（<14）-> len-14 下溢 + frame+14 越界守卫（fuzz 抓到的 BUG-029） */
+    CHECK_EQ(icmp_parse(frame, 13, 0, 0, 0, 0, 0, 0, 0), -1);
+    CHECK_EQ(icmp_parse(frame, 0, 0, 0, 0, 0, 0, 0, 0), -1);
 
     UTEST_SUMMARY("test_icmp");
 }

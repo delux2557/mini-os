@@ -54,6 +54,15 @@ int main(void) {
     CHECK(stack_guard_hit(0x80010FFFu, 0, 0x80011000u) == STACK_BOOM); /* 硬底守卫页 */
     CHECK(stack_guard_hit(0x80010000u, 0, 0x80011000u) == STACK_BOOM); /* 槽底 */
 
+    /* v0.29 回归盲区（BUG-030）：fork 子进程栈在父进程槽（继承深拷贝），守卫须按实际栈位置判定。
+     * 父 pid=3 槽 [0x80028000,0x80030000) 已生长至 stack_bottom=0x8002c000；
+     * 子进程 pid=4 继承该栈（stack_bottom 仍 0x8002c000），应能继续下探生长——
+     * 旧实现按子 pid=4 推导槽 [0x80030000,0x80038000)，fault@0x8002b000 判"槽外"=OK（错）。 */
+    CHECK(stack_guard_hit(0x8002b000u, 4, 0x8002c000u) == STACK_GROWTH); /* 继承栈下方守卫页 */
+    CHECK(stack_guard_hit(0x8002c000u, 4, 0x8002c000u) == STACK_OK);     /* 继承栈页起点 */
+    CHECK(stack_guard_hit(0x8002a000u, 4, 0x8002b000u) == STACK_GROWTH); /* 二次生长 */
+    CHECK(stack_guard_hit(0x80029FFFu, 4, 0x8002b000u) == STACK_BOOM);   /* 深越界 */
+
     /* 栈区终点最后一槽：pid15 槽 [0x80088000, 0x80090000) */
     CHECK(stack_guard_hit(0x80088000u, 15, 0x8008F000u) == STACK_BOOM);   /* 槽底硬底 */
     CHECK(stack_guard_hit(0x8008E000u, 15, 0x8008F000u) == STACK_GROWTH); /* 当前守卫页起点 */

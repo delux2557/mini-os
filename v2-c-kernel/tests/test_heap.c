@@ -7,6 +7,7 @@
 #include "heap.h"
 #include "utest.h"
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 /* ---- 外部依赖的宿主替身 ---- */
@@ -30,6 +31,10 @@ void frame_free(uint32_t phys) { (void)phys; }
 
 /* serial.h 声明，宿主测试里静默 */
 void serial_printf(const char *fmt, ...) { (void)fmt; }
+
+/* 与 heap.c 内 block_t 同构的探针结构：成员顺序/类型一致，故宿主/内核布局相同。
+ * 仅用于定位空闲块头部各字段，便于测试篡改 magic 触发审计报警。 */
+struct probe_block { void *next; uint32_t size; uint32_t free; uint32_t magic; };
 
 int main(void) {
     /* 1) 初始化与页计数 */
@@ -99,6 +104,25 @@ int main(void) {
     for (int i = 0; i < n; i++) kfree(blocks[i]);
     void *reuse = kmalloc(500);
     CHECK(reuse != 0);
+
+    /* 10b) v0.29 堆审计：高强度分配/释放（分裂/不分裂/合并/复用全路径）后应全部通过 */
+    CHECK_EQ(heap_audit(), 0u);
+
+    /* 11) v0.29 堆审计：正常分配/释放场景应通过（含分裂路径 + 独立空闲块）。
+     * 先重置 mock 帧池（第 9 步已耗尽），再重置堆。 */
+    pool_next = 0;
+    heap_init();
+    void *h1 = kmalloc(100);   /* 补页 + 分裂 */
+    void *h2 = kmalloc(200);   /* 再分裂 */
+    kfree(h1);                 /* h1 独立空闲块（两侧皆已用，不合并） */
+    CHECK_EQ(heap_audit(), 0u);
+
+    /* 12) v0.29 堆审计：篡改空闲块 magic -> 应报错（暴露写越界破坏块头部的场景）。
+     * 块头位于 h1 - sizeof(probe_block)，magic 用 offsetof 定位（适配 32/64 位宿主）。 */
+    char *hdr = (char *)h1 - sizeof(struct probe_block);
+    *(uint32_t *)(hdr + offsetof(struct probe_block, magic)) = 0xBAD0u;
+    CHECK(heap_audit() > 0u);
+    kfree(h2);                                  /* 收尾：恢复链表（审计后状态不影响断言） */
 
     UTEST_SUMMARY("heap");
 }

@@ -57,6 +57,7 @@ int icmp_parse(const uint8_t *frame, uint32_t len, uint32_t *src_ip,
                uint8_t *type, uint8_t *code,
                uint16_t *id, uint16_t *seq,
                const uint8_t **payload, uint32_t *plen) {
+    if (len < 14) return -1;                 /* 短于以太网头：防止 len-14 下溢 + frame+14 越界（fuzz 抓到） */
     uint32_t sip = 0;
     uint8_t proto = 0;
     const uint8_t *icmp = 0;
