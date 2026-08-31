@@ -47,13 +47,15 @@
 | v0.28 | `v2-c-kernel/` | DHCP 租期续约（T1 单播 RENEW / T2 广播 REBIND，RFC 2131） | — |
 | v0.29 | `v2-c-kernel/` | 加固：宿主侧 fuzz + 内核堆审计 | — |
 | v0.30 | `v2-c-kernel/` | 修复工具链严重 BUG（文件槽泄漏 + 自编译产物丢 argv）+ 代码审查修复 | — |
+| v0.31 | `v2-c-kernel/` | 内核资源归属收口：per-process fd 表（fd 号进程私有）+ socket 归属/退出回收/保留槽防任意 close | — |
+| v0.32 | `v2-c-kernel/` | cc500 编译器三缺陷修复：未闭合字符串自噬 / 未定义符号静默 / 关系运算残缺 + error 诊断 | — |
 
 ### cc500 方言边界（guest 内写-编-跑须知）
 
 - **全局数组不支持**：`int arr[4];` 在文法层面被拒（C 子集边界，非缺陷），用局部数组
   或手动缓冲替代
-- **编译错误零诊断**：语法错误仅 `error()` 裸 `exit(1)`，无出错 token 提示——排错靠
-  二分试错（诊断增强属后续候选）
+- **编译错误诊断**：v0.32 起 `error()` 打印 `cc500: error at <token>`（此前裸 `exit(1)` 零诊断，
+  排错靠二分试错）；未闭合字符串→`bad string`、未定义符号→`undefined symbol` 均有专项消息
 - **argv 路径已通**：入口桩自 v0.30 起编组 argc/argv，gcc 版与自编译产物（P1）exec
   带 argv 均正确（历史 BUG-032 已修复）
 
