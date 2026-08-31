@@ -3,6 +3,31 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v0.33] - 2026-08-31 · 回归可观测性收口（F-4 行撕裂 / F-5 pid 静默）+ harness 语义 + CI 全链
+
+> 与上一批（v0.32）同为"收尾-加固-沉淀"阶段：不给新功能，只让回归更可信、更可定位。
+
+**Fixed**（见 bugs.md BUG-042/043）
+
+* **F-4 selftest 汇总行撕裂**（BUG-042，`src/app/shell.c`）：`cmd_selftest` 的 PASS/FAIL 汇总行
+  此前用多次 `sys_print` 拼，片段间可被内核异步打印（孤儿 reap / DHCP 续约）插入撕裂 → 整行锚
+  定回归假阴性。改走 `nl_*` 缓冲原子行（一次 flush，与 netping/ccboot/writefile 同机制）
+* **F-5 pid 表耗尽静默**（BUG-043，`src/kernel/sched.c`）：`alloc_pid` 耗尽静默 `return -1`，三处
+  调用方对 `pid<0` 无声返回（A4 fork 炸弹先到的是无声槽耗尽而非有日志深拷贝 OOM）。`alloc_pid`
+  增"每耗尽周期报一次" `[sched] pid table full`（防 spawn/bomb 风暴刷屏）；`sched_audit` 补
+  `slots=%u/MAX_PROCS`
+
+**Engineering**
+
+* **harness 退出码语义统一**（T3）：7 个测试脚本统一"缺依赖 → `[ERR]` + exit 2"（此前缺 socat
+  等会退化成全断言超时 `[FAIL]/exit 1`，环境病伪装代码病）。约定：`0` 全绿 / `1` 断言失败 /
+  `2` 环境或依赖缺失（记于 changelog 头部，CI 显式将 `2` 标环境错误）
+* **CI 全链 + 分步矩阵**（T4，审核方落地）：每步 `make test-*` 各自全量重建 → 单 job `make test`
+  全 7 层门禁 + 失败上传 build-logs 工件 + `workflow_dispatch`；新增 `layers.yml` 并行矩阵（host/
+  qemu/serial/persist/net/socket/cc500 每层独立 job 定位）；含 test-cc500 层
+* **账本收口**（T5）：bugs.md 追加 BUG-042/043 与 OBS-003/004；版本串 v0.32→v0.33 并同步 motd
+  断言；新增 `docs/external-reviews/` 外部评估报告索引（F-xx ↔ BUG 号 ↔ commit 对照）
+
 ## \[v0.32] - 2026-08-31 · 修复 cc500 编译器三缺陷（F-3 字符串自噬 / F-2 未定义静默 / F-1 关系运算残缺）
 
 > 三个缺陷均会破坏 guest 内"写-编-跑"教学闭环（静默误编译 / 编译器自杀 / 无声失败），

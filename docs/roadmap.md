@@ -42,6 +42,7 @@
 | v0.30 | 修复工具链严重 BUG | BUG-031 文件槽泄漏污染工具链（文件槽记打开者 pid + `fs_files_close_pid` 退出回收）、BUG-032 cc500 自编译产物静默丢 argv（入口桩把内核 argc/argv 编组成首函数形参）、代码审查 BUG-033/034/035（页表帧 OOM 写物理0 / kb 行缓冲并发追加 / fork_frames[24] 上限）；工程：新增 `repro_bugs.sh` 双断言、版本串单一来源 `src/version.h=MINI_OS_VERSION`（banner/motd/回归断言统一取）、整理 BUG-036（cc500 豁免 `-w`≠压 permerror，GCC14 需 `-Wno-int-conversion`） |
 | v0.31 | 内核资源归属收口：per-process fd 表 + socket 归属/回收 | ① per-process fd：`fs_files` 全局表迁入 `pcb_t.fd_table[]`，fd 号进程私有，fork 深拷贝/exec/exit 清本表——根治跨进程槽号冲突与异常退出泄漏（v0.30 记 pid 归属方案的彻底收口）；② socket 归属：`net_sock_t` 增 `pid` + `reserved`（DHCP 保留槽），`terminate_current` 回收（F-0a）、close 仅限本进程且禁关保留槽（F-0b）、`netsock_audit` 观测（F-0c）；新增 `test_socket.sh` 攻击回归，六层全绿 |
 | v0.32 | cc500 编译器三缺陷修复 | F-3 未闭合字符串字面量越界自噬（get_token EOF 守卫 + primary NUL 守卫）→ `cc500: bad string`；F-2 只声明未定义函数静默编出"call ELF 头"废产物（be_finish 收尾 'U' 符号检测）→ `cc500: undefined symbol`；F-1 关系运算补齐 `<`/`>`/`>=` + `error()` 带 token 上下文 + `\n`/`\t` 解码；收编 `host_crt.c` hostcc 基座 + `test_cc500.sh`（症状对立断言）挂入 test；自举不动点 P1==P2 保持，六/七层回归全绿 |
+| v0.33 | 回归可观测性收口 | F-4 selftest 汇总行撕裂（Shell 改 `nl_*` 原子行 + 撕裂探测器）、F-5 pid 表耗尽静默（alloc_pid 日志 + audit slots）；harness 退出码语义统一（0 全绿/1 断言失败/2 环境缺失，7 脚本前置检查）；CI 全链 `make test` + layers 并行矩阵 + 失败日志工件 + workflow_dispatch（审核方落地）；账本收口（external-reviews 索引、version bump v0.33） |
 
 ## 下一步规划
 

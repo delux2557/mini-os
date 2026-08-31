@@ -701,6 +701,39 @@
 
 ---
 
+## BUG-042 [已修复] v0.33 selftest 汇总行可被内核异步打印撕裂 → 回归假阴性（=F-4）
+
+- **版本**：v0.33（回归抗撕裂收口时）
+- **现象**：`cmd_selftest` 的 `[selftest] PASS (N checks)` / `FAIL` 汇总行被内核异步打印（如孤儿
+  reap、DHCP 短租期续约）撕裂成三截——现场实录 `[selftest] PASS ( ... check ...` 拆断命中。
+  所有以"整行 PASS"为锚的断言在"boot 演示未退出 + 续约打印"窗口下可随机漏匹配（harness 已实
+  被咬过 30s 假超时）。
+- **根因**：`src/app/shell.c` `cmd_selftest` 汇总用多次 `sys_print` 片段拼行（`PASS (` + 计数 +
+  ` checks)`），片段间可被任意其他上下文插入；而对 netping/ccboot/writefile 早已用 `nl_*` 缓冲
+  原子行（单次 `sys_print` flush），selftest 却漏用。
+- **修复**：`cmd_selftest` 汇总改走 `nl_reset/nl_s/nl_u/nl_end` 一次缓冲 + 一次 flush（对前向
+  声明位于文件后部的 `nl_*` 加声明）。**未改内核串口全局原子性**（cli/sti 包行是另一设计决定）。
+- **回归**：test_socket.sh 增 F-4 撕裂探测器（`[selftest] PASS (` 开头却非整行 `checks)` 结尾的
+  残缺行计数=0），短租期 DHCP 续约并发窗口下 0 撕裂；连发 selftest 全为整行。
+
+---
+
+## BUG-043 [已修复] v0.33 pid 表耗尽静默返回，无任何日志（=F-5）
+
+- **版本**：v0.33（可观测性收口时）
+- **现象**：pid 表（`MAX_PROCS` 槽）耗尽时 `alloc_pid` 静默 `return -1`，三处调用方
+  （`sched_spawn`/`spawn_at`/`sched_fork`）对 `pid<0` 无声返回。A4 fork 炸弹实测"成功 29 条、
+  FAILED 0 条"——先到达的约束是**无声的槽耗尽**而非有日志的深拷贝 OOM。教学场景学生面对
+  "spawn 失败但内核什么都不说"。
+- **根因**：`src/kernel/sched.c` `alloc_pid` 无失败日志（OOM 分支 `spawn FAILED` 有日志，槽耗尽
+  分支无——不对称）。
+- **修复**：`alloc_pid` 增 **每耗尽周期报一次**的 `[sched] pid table full`（有 free 槽时重置标志，
+  防 spawn/bomb 风暴刷屏）；`sched_audit` 汇总行补 `slots=%u/MAX_PROCS`。
+- **回归**：fork 炸弹实测日志恰 1 条 `pid table full`（防刷屏生效）、无 panic/无重启；审计行含
+  slots 计数。
+
+---
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号 | 场景 | 现象 | 处置/教训 |
@@ -716,3 +749,5 @@
 |------|------|------|
 | OBS-001 | 定时器中断内读 PIT 计数器常为 0 | 正常现象：中断发生在计数器回绕时，读到的瞬时值即 0，并非硬件故障 |
 | OBS-002 | ~~`pcb_t::fork_frames[24]` 硬编码 24 帧（96KB）限制大进程 fork~~ | ✅ 已修复（v0.30 BUG-035）：改为 kmalloc 动态数组，`sched_fork` 按需分配、退出 kfree |
+| OBS-003<br>（=评审残留） | netsock send/recv 无进程归属（`netsock_sendto`/`recvfrom` 不校验调用者是否为该 socket 的打开者） | 现设计语义：单用户教学 OS 将网络 socket 视为进程共享资源。close 已做归属隔离（BUG-038），send/recv 保持共享；威胁模型声明之，需强化时再列缺陷 |
+| OBS-004<br>（=F-6） | `writefile` 整行 128B 截断（shell/kb 行缓冲容量）——超长源码被截断 | F-3 修复前是未闭合字符串崩溃引信；F-3 修复后仅剩教学限制（单行源码 ≤128B，大程序用 ccrun 多次或逐段写）。限速不修，记录之 |
