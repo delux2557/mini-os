@@ -64,6 +64,10 @@ int token_size;
 
 void error()
 {
+  /* v0.32 F-1：error() 带 token 上下文，学员可归因（此前裸 exit(1)，零诊断） */
+  sys_print("cc500: error at\x0a");
+  sys_print(token);
+  sys_print("\x0a");
   exit(1);
 }
 
@@ -84,6 +88,7 @@ void takechar()
 void get_token()
 {
   int w = 1;
+  int str_done;
   while (w) {
     w = 0;
     while ((nextc == ' ') | (nextc == 9) | (nextc == 10))
@@ -99,15 +104,26 @@ void get_token()
     if (i == 0) {
       if (nextc == 39) {
 	takechar();
-	while (nextc != 39)
-	  takechar();
-	takechar();
+	/* v0.32 F-3：字符字面量读取加 EOF 守卫（C 子集无 break，用标志变量）。
+	 * 此前 `while(nextc!=39) takechar()` 对未闭合输入到 EOF 仍死循环 → token 无限增长自噬。 */
+	str_done = 0;
+	while (str_done == 0) {
+	  if (nextc == 0 - 1) str_done = 1;
+	  else if (nextc == 39) str_done = 1;
+	  else takechar();
+	}
+	if (nextc == 39) takechar();
       }
       else if (nextc == '"') {
 	takechar();
-	while (nextc != '"')
-	  takechar();
-	takechar();
+	/* v0.32 F-3：字符串字面量读取加 EOF 守卫（同上，见 cc500.c:106 原 `while(nextc!='"')`）。 */
+	str_done = 0;
+	while (str_done == 0) {
+	  if (nextc == 0 - 1) str_done = 1;
+	  else if (nextc == '"') str_done = 1;
+	  else takechar();
+	}
+	if (nextc == '"') takechar();
       }
       else if (nextc == '/') {
 	takechar();
@@ -339,6 +355,26 @@ void be_start()
 
 void be_finish()
 {
+  /* v0.32 F-2：遍历全局符号表，发现仍有"未定义但被引用"的 'U' 符号 →
+   * 之前无人回填，调用目标恒留 code_offset(0x800A0000)，产物 call 自己的 ELF 头，
+   * 运行即 PAGE FAULT。此处收尾报错而非静默编出废产物。
+   * 布局与 sym_lookup 同款：t+1=class、t+2=value，符号间 stride 6。
+   * "chain 非空"判据：value 曾被 sym_get_value 改写为引用点，故 != 初始 code_offset。 */
+  int t = 0;
+  int bad = 0;
+  while (t <= table_pos - 1) {
+    /* 符号表锚点 = 名字 NUL 位置（同 sym_define_global 语义：t+1=class、t+2=value）。
+     * 自符号起点起跳过名字到 NUL，再检测，t=t+6 跳到下一符号起点。 */
+    while (table[t] != 0)
+      t = t + 1;
+    if ((table[t + 1] == 'U') & (load_int(table + t + 2) != code_offset))
+      bad = 1;
+    t = t + 6;
+  }
+  if (bad != 0) {
+    sys_print("cc500: undefined symbol\x0a");
+    error();
+  }
   save_int(code + 68, codepos);
   save_int(code + 72, codepos);
   i = 0;
@@ -398,7 +434,10 @@ int primary_expr()
     int i = 0;
     int j = 1;
     int k;
-    while (token[j] != '"') {
+    /* v0.32 F-3：解码时对 token 加 NUL 守卫——原 `while(token[j]!='"')` 无终点保护，
+     * 越过 token 尾部 NUL 越界读直到堆里偶遇 '"'，且 token[i]= 写越界砸 brk arena。
+     * 命中 NUL（EOF 前未闭合）→ 干净报错而非自噬。 */
+    while ((token[j] != '"') & (token[j] != 0)) {
       if ((token[j] == 92) & (token[j + 1] == 'x')) {
 	if (token[j + 2] <= '9')
 	  k = token[j + 2] - '0';
@@ -412,11 +451,24 @@ int primary_expr()
 	token[i] = k;
 	j = j + 4;
       }
+      /* v0.32 F-1：\n / \t 常规转义解码（此前只解 \xNN，故源码一律写 \x0a） */
+      else if ((token[j] == 92) & (token[j + 1] == 'n')) {
+	token[i] = 10;
+	j = j + 2;
+      }
+      else if ((token[j] == 92) & (token[j + 1] == 't')) {
+	token[i] = 9;
+	j = j + 2;
+      }
       else {
 	token[i] = token[j];
 	j = j + 1;
       }
       i = i + 1;
+    }
+    if (token[j] != '"') {
+      sys_print("cc500: bad string\x0a");
+      error();
     }
     token[i] = 0;
     /* call ... ; the string ; pop %eax */
@@ -541,13 +593,36 @@ int shift_expr()
 int relational_expr()
 {
   int type = shift_expr();
-  while (accept("<=")) {
-    binary1(type);
-    /* pop %ebx ; cmp %eax,%ebx ; setle %al ; movzbl %al,%eax */
-    type = binary2(shift_expr(),
+  /* v0.32 F-1：关系运算原只有 <=。补齐 < / > / >=（与 <= 同构，仅 setcc 字节不同：
+   * setle=0x9e setl=0x9c setge=0x9d setg=0x9f；操作数序同 <=，基于 objdump 实测确认）。 */
+  while (1) {
+    if (accept("<=")) {
+      binary1(type);
+      /* pop %ebx ; cmp %eax,%ebx ; setle %al ; movzbl %al,%eax */
+      type = binary2(shift_expr(),
 		   9, "\x5b\x39\xc3\x0f\x9e\xc0\x0f\xb6\xc0");
+    }
+    else if (accept("<")) {
+      binary1(type);
+      /* setl %al */
+      type = binary2(shift_expr(),
+		   9, "\x5b\x39\xc3\x0f\x9c\xc0\x0f\xb6\xc0");
+    }
+    else if (accept(">=")) {
+      binary1(type);
+      /* setge %al */
+      type = binary2(shift_expr(),
+		   9, "\x5b\x39\xc3\x0f\x9d\xc0\x0f\xb6\xc0");
+    }
+    else if (accept(">")) {
+      binary1(type);
+      /* setg %al */
+      type = binary2(shift_expr(),
+		   9, "\x5b\x39\xc3\x0f\x9f\xc0\x0f\xb6\xc0");
+    }
+    else
+      return type;
   }
-  return type;
 }
 
 /*
