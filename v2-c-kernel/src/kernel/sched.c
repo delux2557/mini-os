@@ -389,6 +389,9 @@ int sched_fork(registers_t *r) {
     c->heap_base = p->heap_base;   /* v0.26#2: 子进程继承父进程堆区与断点；已深拷贝全部堆页，
                                       新帧记 fork_frames，故 heap_frames 保持清零 */
     c->heap_brk = p->heap_brk;
+    /* v0.31（per-process fd）：子进程继承父进程打开文件表（fd 号各自独立，内容拷贝）。
+     * 经典 fork 语义：子进程持有与父进程相同的打开文件集（读/写位置各自独立推进）。 */
+    memcpy8((uint8_t *)c->fd_table, (const uint8_t *)p->fd_table, sizeof(p->fd_table));
 
     policy_readyq_push(&readyq, pid);
     serial_printf("[fork] pid=%u -> child=%u pd=%x frames=%u\n",
@@ -484,6 +487,10 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
     p->heap_base = USER_HEAP_BASE;   /* v0.26#2: 镜像替换后堆重来（旧堆帧已由上面 release 释放） */
     p->heap_brk  = USER_HEAP_BASE;
     p->heap_fcount = 0;
+    /* v0.31（per-process fd）：exec 镜像替换后，旧程序打开的 fd 一并清空——新程序从
+     * 干净的 fd 表开始（与"释放旧地址空间、重建堆"的镜像替换语义自洽）。若保留旧 fd，新程序
+     * open 同号会因占位返回 -1（如 cc500 场景踏坑）。 */
+    memset8((uint8_t *)p->fd_table, 0, sizeof(p->fd_table));
 
     /* 就地改写当前中断帧为新程序入口现场：
      * schedule() 保存的 kernel_esp 即 r，下次切回时 iret 从新入口执行。
@@ -688,9 +695,11 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
     p->state = PROC_ZOMBIE;
     /* v0.9/v0.11/v0.12: 回收本进程私有数据帧（ELF 代码/私有页/fork 深拷贝帧/用户栈） */
     release_priv_frames(p);
-    /* v0.29（BUG-031）：进程退出时归还其占用的文件槽——否则 cc500 等在 parse error
-     * 等异常退出路径泄漏的槽会污染后续所有编译/文件操作（fs_files 全局表，按 pid 归属） */
-    fs_files_close_pid(p->pid);
+    /* v0.31（per-process fd）：进程退出清空自己的 fd 表。v0.29-BUG-031 用全局
+     * fs_files 按 pid 归属清理（退出时归还其槽）；改造后 fd 表在 PCB 内，清本表即可，
+     * 不再有跨进程槽号冲突/泄漏。 */
+    for (uint32_t i = 0; i < FS_FDS_PER_PROC; i++)
+        p->fd_table[i].used = 0;
     /* v0.15: 父进程退出 -> 子进程孤儿化（parent_pid=0，交心跳回收）。
      * 否则父的 pid 槽被复用后，孤儿永远等不到"父进程 FREE"而被回收。 */
     for (uint32_t i = 1; i < MAX_PROCS; i++)

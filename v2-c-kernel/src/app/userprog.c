@@ -310,9 +310,12 @@ void user_fs_l(void) {
 
     syscall3(SYS_FS_CREATE, (uint32_t)"alpha.txt", 0, 0);
     syscall3(SYS_FS_CREATE, (uint32_t)"beta.txt", 0, 0);
-    if (syscall3(SYS_FS_OPEN, 3, (uint32_t)"alpha.txt", 1) == 0)
-        syscall3(SYS_FS_WRITE, 3, (uint32_t)"hello ls!", 9);
-    syscall3(SYS_FS_CLOSE, 3, 0, 0);
+    /* v0.31（per-process fd）：故意用与 procFSA 相同的 fd=1 打开自己的文件——
+     * 旧全局 fs_files[8] 下（procFSA 持 slot1）此处会失败；改造后每进程持有独立 fd=1，
+     * 两进程并发各自写不同文件互不干扰（这就是 BUG-031 的根治语义）。 */
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)"alpha.txt", 1) == 0)
+        syscall3(SYS_FS_WRITE, 1, (uint32_t)"hello ls!", 9);
+    syscall3(SYS_FS_CLOSE, 1, 0, 0);
 
     syscall3(SYS_FS_LS, 0, 0, 0);          /* 内核打印根目录 */
     sys_print("[FL] ls done\n");
