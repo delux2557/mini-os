@@ -11,6 +11,7 @@
 #include "udp.h"
 #include "dhcp.h"
 #include "mem.h"
+#include "sched.h"     /* v0.31 socket 归属：sched_current_pid */
 #include "serial.h"
 #include <stdint.h>
 
@@ -79,11 +80,13 @@ int netsock_open(uint16_t port) {
         return -1;                                /* 端口占用 */
     }
     socks[slot].used       = 1;
+    socks[slot].pid        = sched_current_pid();   /* v0.31 归属：本 socket 记打开者 */
+    socks[slot].reserved   = 0;
     socks[slot].local_port = port;
     socks[slot].local_ip   = MY_IP;
     socks[slot].rx_head    = 0;
     socks[slot].rx_tail    = 0;
-    serial_printf("[netsock] open id=%d port=%u\n", slot, port);
+    serial_printf("[netsock] open id=%d port=%u (pid=%u)\n", slot, port, socks[slot].pid);
     return slot;
 }
 
@@ -128,6 +131,39 @@ void netsock_close(int id) {
     serial_printf("[netsock] close id=%d\n", id);
 }
 
+/* v0.31（F-0b）：仅当 socket 归 pid 所有且非内核保留槽时才关闭。
+ * 防任意 ring3 程序 close(id=0) 打死 DHCP 续约端点。返回 0 已关 / -1 被拒。 */
+int netsock_close_if_owner(int id, uint32_t pid) {
+    if (id < 0 || id >= NET_SOCK_MAX || !socks[id].used) return -1;
+    if (socks[id].reserved || socks[id].pid != pid) {
+        serial_printf("[netsock] close id=%d DENIED (reserved=%d or not owner pid=%u)\n",
+                      id, socks[id].reserved, pid);
+        return -1;
+    }
+    netsock_close(id);
+    return 0;
+}
+
+/* v0.31（F-0a）：进程退出时归还其打开的所有 socket（跳内核保留槽）。
+ * 根治"开 socket 不关即退出 -> 槽位永久失踪，直到表满网络降级"。 */
+void netsock_close_pid(uint32_t pid) {
+    for (int i = 0; i < NET_SOCK_MAX; i++)
+        if (socks[i].used && !socks[i].reserved && socks[i].pid == pid) {
+            socks[i].used = 0;
+            serial_printf("[netsock] close id=%d (proc %u exit cleanup)\n", i, pid);
+        }
+}
+
+/* v0.31（F-0c）：socket 表审计——占用计数与数据库一致即健康（并入 kern_audit）。 */
+uint32_t netsock_audit(void) {
+    uint32_t used = 0;
+    for (int i = 0; i < NET_SOCK_MAX; i++)
+        if (socks[i].used) used++;
+    serial_printf("[audit] netsock ok: used=%u/%d (dhcp_sock id=%d)\n",
+                  used, NET_SOCK_MAX, dhcp_sock);
+    return 0;
+}
+
 /* ---- v0.28 DHCP 租期续约接收端点 ----
  * 问题：用户 socket 的 recvfrom 会"排空"网卡（netsock_drain 取走 NIC 环所有帧），
  * 无匹配本地端口的帧（DHCP 应答 67->68）被直接丢弃——续约应答会被 sockdemo 等
@@ -135,6 +171,12 @@ void netsock_close(int id) {
 void netsock_dhcp_open(void) {
     if (dhcp_sock >= 0) return;
     dhcp_sock = netsock_open(DHCP_CLIENT_PORT);
+    if (dhcp_sock >= 0) {
+        socks[dhcp_sock].reserved = 1;   /* v0.31：内核保留槽，用户永不 close */
+        socks[dhcp_sock].pid      = 0;
+        serial_printf("[netsock] DHCP socket id=%d reserved (port %u)\n",
+                      dhcp_sock, DHCP_CLIENT_PORT);
+    }
 }
 
 /* 排空网卡并取一条 DHCP 应答载荷（BOOTP 内容，可直接交 dhcp_parse_reply）；

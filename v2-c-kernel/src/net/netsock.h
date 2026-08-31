@@ -12,6 +12,8 @@
 
 typedef struct {
     int      used;
+    uint32_t pid;               /* v0.31 打开者对 socket 的归属（sched_current_pid；0=内核/DHCP） */
+    int      reserved;          /* v0.31 保留槽（端口 68 DHCP）：内核专用，用户永不 close */
     uint16_t local_port;            /* 本地绑定端口 */
     uint32_t local_ip;              /* 固定 10.0.2.15 */
     uint8_t  rxb[NET_RXQ][NET_RXMAX];   /* 待收数据报载荷 */
@@ -31,6 +33,14 @@ int  netsock_send(int id, uint32_t dst_ip, uint16_t dst_port,
 int  netsock_recv(int id, uint8_t *buf, uint32_t max,
                   uint32_t *src_ip, uint16_t *src_port);
 void netsock_close(int id);
+/* v0.31（socket 归属）：仅当 id 归当前进程所有（且非内核保留槽）才关闭；
+ * 返回 0 关闭成功 / -1（非法、非本人、或保留槽被拒）。防 F-0b 任意 close 打死 DHCP。 */
+int  netsock_close_if_owner(int id, uint32_t pid);
+/* v0.31（socket 回收）：进程退出时归还其打开的所有 socket（跳过内核保留槽）。
+ * 根治 F-0a：开 socket 不关即退出 -> 槽位永久失踪。 */
+void netsock_close_pid(uint32_t pid);
+/* v0.31（socket 审计）：socket 表不变量（可用/占用计数），供 kern_audit 汇总。 */
+uint32_t netsock_audit(void);
 
 /* ---- v0.28 DHCP 租期续约接收端点（端口 68 专用 socket）----
  * 用户 socket 的 recvfrom 会"排空"网卡（取走 NIC 环所有帧），无匹配本地端口的帧
