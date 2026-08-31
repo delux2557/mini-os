@@ -7,6 +7,10 @@
 # 失败项会列出缺失的关键字，便于定位内核某一步没有走到。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+# v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失（构建失败仍为 [FAIL]/exit 1，属代码真红）
+for c in qemu-system-i386 socat nasm gcc; do
+    command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
+done
 
 LOG="build/serial.log"
 MON="/tmp/minios-mon.sock"

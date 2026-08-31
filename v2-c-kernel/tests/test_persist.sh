@@ -5,6 +5,10 @@
 #   第 2 次：挂载同一镜像重启 -> ls / 应见 persist/（用户数据跨重启存活）
 set -u
 cd "$(dirname "$0")/.." || exit 1
+# v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失
+for c in qemu-system-i386; do
+    command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
+done
 
 IMG="build/persist.img"
 TIN="build/persist_in.fifo"
