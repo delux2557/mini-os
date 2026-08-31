@@ -85,6 +85,13 @@ static int selftest_one(const char *name) {
  * 每项打印退出码，最后汇总为一行 `[selftest] PASS (N checks)` / FAIL，供 agent grep。
  * v0.21：追加第 6 项——内核自审计（帧配平/信号量守恒/PCB 状态机），
  * 使 [selftest] PASS 从"5 个应用没崩"升级为"内核核心不变量成立"。 */
+/* v0.33 F-4：nl_* 缓冲原子行定义于本文件后部（:274 起），此处对 cmd_selftest 前向声明，
+ * 使汇总行走"一次缓冲 + 单次 sys_print flush"，避免被内核异步打印撕裂（F-4）。 */
+static void nl_reset(void);
+static void nl_s(const char *s);
+static void nl_u(uint32_t v);
+static void nl_end(void);
+
 static void cmd_selftest(void) {
     static const char *apps[] = { "hello", "isol", "forkdemo", "fsdemo", "waitdemo" };
     uint32_t n = sizeof(apps) / sizeof(apps[0]);
@@ -105,15 +112,19 @@ static void cmd_selftest(void) {
     sys_print("\n");
     if (audit == 0) pass++; else fail++;
     if (fail == 0) {
-        sys_print("[selftest] PASS (");
-        user_putdec(pass);
-        sys_print(" checks)\n");
+        nl_reset();
+        nl_s("[selftest] PASS (");
+        nl_u(pass);
+        nl_s(" checks)");
+        nl_end();
     } else {
-        sys_print("[selftest] FAIL: ");
-        user_putdec(fail);
-        sys_print("/");
-        user_putdec(n + 1);
-        sys_print(" checks\n");
+        nl_reset();
+        nl_s("[selftest] FAIL: ");
+        nl_u(fail);
+        nl_s("/");
+        nl_u(n + 1);
+        nl_s(" checks)");
+        nl_end();
     }
 }
 

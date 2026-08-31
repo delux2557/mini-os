@@ -37,9 +37,17 @@ static int own_frames_take(pcb_t *p, const uint32_t *frames, uint32_t fcount);
 
 /* 分配一个空闲进程槽（pid）。v0.12: 进程退出（reap 置 FREE）后槽位可重用——
  * fork/exec 演示会产生更多并发进程，若按 next_pid 单调递增会在 MAX_PROCS 处耗尽。 */
+static int pid_full_reported = 0;   /* v0.33 F-5：每"耗尽周期"只报一次，防 spawn/bomb 风暴刷屏 */
 static int alloc_pid(void) {
     for (uint32_t i = 1; i < MAX_PROCS; i++)
-        if (procs[i].state == PROC_FREE) return (int)i;
+        if (procs[i].state == PROC_FREE) { pid_full_reported = 0; return (int)i; }
+    /* v0.33 F-5：pid 表耗尽必须可观测——此前静默 return -1，三处调用方（sched_spawn/
+     * spawn_at/sched_fork）对 pid<0 无声返回，A4 fork 炸弹实测"成功 29 条、FAILED 0 条"：
+     * 先到的是无声的槽耗尽而非有日志的深拷贝 OOM（P2 可观测性缺口）。 */
+    if (!pid_full_reported) {
+        serial_printf("[sched] pid table full (MAX_PROCS=%u)\n", MAX_PROCS);
+        pid_full_reported = 1;
+    }
     return -1;
 }
 
@@ -791,8 +799,10 @@ uint32_t sched_audit(void) {
         serial_printf("[audit] sched FAIL: %u running (expect <=1)\n", running);
         bad++;
     }
-    if (bad == 0)
-        serial_printf("[audit] sched ok: %u alive, %u running\n",
-                      sched_alive_count(), running);
+    if (bad == 0) {
+        uint32_t n = sched_alive_count();   /* 非 FREE 槽数 = pid 表已占用 */
+        serial_printf("[audit] sched ok: %u alive, %u running, %u/%u slots\n",
+                      n, running, n, MAX_PROCS);
+    }
     return bad;
 }

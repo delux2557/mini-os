@@ -136,6 +136,15 @@ fi
 send "selftest"
 wait_for "selftest PASS"        "\[selftest\] PASS (6 checks)" 40
 wait_for "audit 含 netsock 健康" "\[audit\] netsock ok: used=" 10
+# F-4 撕裂探测器：selftest 汇总行若被内核异步打印（本例 DHCP 续约/RENEW、孤儿 reap）撕裂，
+# 会出现"以 [selftest] PASS ( 开头却非整行 checks) 结尾"的残缺行——计数必须为 0。
+TEAR=$(grep -aE '^\[selftest\] PASS \(' "$LOG" | grep -avE 'checks\)$' | wc -l)
+if [ "$TEAR" -ne 0 ]; then
+    echo "[FAIL] F-4 selftest 汇总行被撕裂 ×$TEAR"
+    FAIL=$((FAIL + 1))
+else
+    echo "[ok]   F-4 selftest 汇总行整行无撕裂"
+fi
 
 # 稳定后收尾
 sleep 1
