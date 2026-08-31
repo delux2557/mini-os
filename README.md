@@ -49,6 +49,7 @@
 | v0.30 | `v2-c-kernel/` | 修复工具链严重 BUG（文件槽泄漏 + 自编译产物丢 argv）+ 代码审查修复 | — |
 | v0.31 | `v2-c-kernel/` | 内核资源归属收口：per-process fd 表（fd 号进程私有）+ socket 归属/退出回收/保留槽防任意 close | — |
 | v0.32 | `v2-c-kernel/` | cc500 编译器三缺陷修复：未闭合字符串自噬 / 未定义符号静默 / 关系运算残缺 + error 诊断 | — |
+| v0.33 | `v2-c-kernel/` | 回归可观测性收口：F-4 selftest 行撕裂 / F-5 pid 表静默 + harness 退出码统一 + CI 全链 | — |
 
 ### cc500 方言边界（guest 内写-编-跑须知）
 
