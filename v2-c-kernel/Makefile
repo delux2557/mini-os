@@ -204,8 +204,12 @@ test-persist:
 test-net:
 	bash tests/test_net.sh
 
+# v0.31 socket 归属回归：F-0a 退出泄漏回收 / F-0b 保留槽防任意 close / 观测收口
+test-socket:
+	bash tests/test_socket.sh
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist test-net
+test: test-host test-qemu test-serial test-persist test-net test-socket
 
 clean:
 	rm -rf build tests/build

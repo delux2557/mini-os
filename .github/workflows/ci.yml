@@ -41,6 +41,10 @@ jobs:
         run: make test-net
         working-directory: v2-c-kernel
 
+      - name: QEMU socket 归属回归（F-0a 退出回收 / F-0b 保留槽）
+        run: make test-socket
+        working-directory: v2-c-kernel
+
       - name: 清理构建产物
         run: make clean
         working-directory: v2-c-kernel

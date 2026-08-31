@@ -283,6 +283,7 @@ static uint32_t kern_audit(void) {
     bad += mem_audit();
     bad += heap_audit();
     bad += sched_audit();
+    bad += netsock_audit();          /* v0.31 socket 表不变量（含 DHCP 保留槽恒计数） */
     uint32_t objs = 0;
     for (uint32_t i = 1; i < SEM_MAX_OBJ; i++) {
         if (!sem_objects[i].used) continue;
@@ -761,6 +762,7 @@ void syscall_dispatch(registers_t *r) {
     case 30: { /* sys_net_socket(port)：创建 UDP socket；port=0 自动分配；返回 socket id */
         if (b || c) { r->eax = (uint32_t)-1; return; }
         int s = netsock_open((uint16_t)a);
+        if (s < 0) serial_printf("[net] socket table full\n");   /* v0.31 观测：表满专项日志 */
         serial_printf("[net] socket port=%u -> id=%d\n", (uint16_t)a, s);
         r->eax = (uint32_t)s;
         return;
@@ -788,10 +790,10 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)n;
         return;
     }
-    case 33: /* sys_net_close(sock) */
-        netsock_close((int)a);
-        r->eax = 0;
+    case 33: { /* sys_net_close(sock)：v0.31 仅可关自己打开的 socket；内核保留(DHCP)槽不可关 */
+        r->eax = (uint32_t)netsock_close_if_owner((int)a, sched_current_pid());
         return;
+    }
     case 34: /* sys_kern_audit()：v0.21 内核自审计——帧配平/信号量守恒/PCB 状态机。
                 返回失败检查项总数（0=全部通过），细节见 [audit] 日志行 */
         r->eax = kern_audit();
