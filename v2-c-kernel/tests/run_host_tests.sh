@@ -4,6 +4,8 @@
 # 优点：不依赖 QEMU，秒级反馈，可用 ASan/valgrind 等宿主工具。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+# v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失
+command -v "${CC:-gcc}" >/dev/null 2>&1 || { echo "[ERR] 缺 ${CC:-gcc}，无法编宿主单测"; exit 2; }
 
 CC="${CC:-gcc}"
 # -no-pie：内核用 32 位地址当指针，宿主编译需把静态数据放在 4GB 内
