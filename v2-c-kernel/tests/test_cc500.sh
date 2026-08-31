@@ -17,7 +17,7 @@ mkdir -p "$VD"
 echo "== [1/4] 宿主 hostcc 基座 =="
 if ! command -v gcc >/dev/null 2>&1; then echo "[SKIP] 需要宿主 gcc"; exit 2; fi
 if ! gcc -m32 -std=gnu99 -O1 -w -fpermissive -o "$VD/hostcc" "$CC500" "$CRT" 2>"$VD/hostcc.log"; then
-    echo "[FAIL] hostcc 编译失败"; tail -8 "$VD/hostcc.log"; exit 1
+    echo "[ERR]  hostcc 编译失败（环境/仓库问题：缺 32 位工具链 gcc-multilib 或 tools/cc500/host_crt.c）；见日志"; tail -8 "$VD/hostcc.log"; exit 2
 fi
 RUN=("./$VD/hostcc")
 if ! printf 'int main(){return 0;}' >"$VD/probe.c" \

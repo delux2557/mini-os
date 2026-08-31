@@ -10,6 +10,10 @@
 #   3) filter-dump pcap 独立核验：线上确有 ARP 双向交换 与 IPv4/UDP、IPv4/ICMP 包
 set -u
 cd "$(dirname "$0")/.." || exit 1
+# v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失（避免环境病伪装成代码病）
+for c in qemu-system-i386 socat python3; do
+    command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
+done
 
 LOG="build/net.log"
 PCAP="build/net.pcap"

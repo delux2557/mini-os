@@ -7,6 +7,10 @@
 # 与 qemu_regression.sh（键盘 sendkey 路径）互补，验证"终端通道"而非"键盘通道"。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+# v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失
+for c in qemu-system-i386; do
+    command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
+done
 
 LOG="build/serial_term.log"
 TIN="build/term_in.fifo"
