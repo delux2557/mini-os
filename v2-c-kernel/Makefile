@@ -208,8 +208,12 @@ test-net:
 test-socket:
 	bash tests/test_socket.sh
 
+# v0.32 cc500 编译器回归：F-1 关系运算残缺 / F-2 未定义符号静默 / F-3 未闭合字符串自噬
+test-cc500:
+	bash tests/test_cc500.sh
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist test-net test-socket
+test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500
 
 clean:
 	rm -rf build tests/build
@@ -217,4 +221,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 clean
