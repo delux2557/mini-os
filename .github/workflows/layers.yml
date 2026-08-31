@@ -1,16 +1,18 @@
-name: CI
+name: Layers
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch: {}
 
 jobs:
-  # 主门禁：job 名保持 test（main 分支保护 required check 绑定该名，勿改）
-  test:
+  # 分步定位：每层独立 job 并行，主门禁（CI/test）失败时快速定位是哪一层
+  layer:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: [host, qemu, serial, persist, net, socket, cc500]
     steps:
       - uses: actions/checkout@v4
 
@@ -23,14 +25,14 @@ jobs:
             qemu-system-x86 \
             socat
 
-      # Makefile 的 test: 依赖链已含全 7 层（host/qemu/serial/persist/net/socket/cc500）
-      - name: 全链回归（7 层，失败即中断）
-        run: make test
+      # cc500 层脚本内部会自行构建（勿先 clean 再让它构建）
+      - name: make test-${{ matrix.layer }}
+        run: make test-${{ matrix.layer }}
         working-directory: v2-c-kernel
 
-      - name: 失败上传构建日志
+      - name: 失败上传该层日志
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
+          name: log-${{ matrix.layer }}
           path: v2-c-kernel/build/*.log
