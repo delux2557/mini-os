@@ -2,6 +2,70 @@
 
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 
+## \[v0.32] - 2026-08-31 · 修复 cc500 编译器三缺陷（F-3 字符串自噬 / F-2 未定义静默 / F-1 关系运算残缺）
+
+> 三个缺陷均会破坏 guest 内"写-编-跑"教学闭环（静默误编译 / 编译器自杀 / 无声失败），
+> 宿主 hostcc 复现实锤后逐条修复（见 bugs.md BUG-039/040/041）。
+
+**Fixed**（全部在 `tools/cc500/cc500.c`）
+
+* **F-3 未闭合字符串字面量 → 越界读写自噬**（BUG-039）：`get_token` 字符串读取
+  `while(nextc!='"') takechar()` 无 EOF 守卫（C 子集无 `break`，用标志变量），未闭合输入到
+  EOF 仍让 `token` 无限增长；`primary_expr` 解码 `while(token[j]!='"')` 无 NUL 守卫，越过
+  token 尾部越界读写直到堆里偶遇 `"`。修复：两处加守卫，命中 NUL 未闭合即
+  `cc500: bad string` 干净报错（前：guest 被内核击杀 exit=-1 / hostcc SIGSEGV rc=139）
+* **F-2 只声明未定义函数 → 静默编出 "call 自身 ELF 头" 的废产物**（BUG-040）：纯原型声明
+  走 `program()` 函数声明分支不触发 `sym_define_global` 回填，符号恒留 `'U'=code_offset`
+  （0x800A0000），调用即 `PAGE FAULT`。修复：`be_finish` 收尾遍历符号表（锚点=名字 NUL 位），
+  检出残留 'U' 且 `value != code_offset` → `cc500: undefined symbol`
+* **F-1 关系运算残缺（只有 <=）+ error() 零诊断**（BUG-041）：`relational_expr` 只识别 `<=`，
+  `<`/`>`/`>=` 缺失；`error()` 裸 `exit(1)`。修复：`error()` 打印 `cc500: error at <token>`；
+  补齐四元关系运算（setle=0x9e/setl=0x9c/setge=0x9d/setg=0x9f，操作数序 objdump 实测锁定）；
+  字符串解码补 `\n`/`\t` 常规转义
+
+**Engineering**
+
+* 收编 `tools/cc500/host_crt.c` 为 hostcc 基座（把 cc500 编成 Linux 宿主程序，缺陷与内核无关，
+  秒级红绿 + gdb 可调）
+* 新增 `tests/test_cc500.sh`（挂入 `make test`）：**症状对立断言**（"新症状必须出现 + 旧症状必须
+  缺席"，杜绝假绿）——宿主 T 系列 8/8 + `<` 编码 0f 9c 锁定；guest ccboot 自举不动点 P1==P2 +
+  关系运算 `<` 运行语义（源码 <128B 避开 F-6 writefile 行截断）
+* 全回归绿：宿主 16/16 + QEMU(195 断言, 含自举) + 串口 + 持久化 + 网络 + socket + cc500 +
+  `repro_bugs.sh`（BUG-031/032 双断言）；尺寸锚点 `entry=800a0054` 未动，cc500 产物 18079B→21283B
+  随代码体积自然漂移（无硬编码字节断言）
+
+## \[v0.31] - 2026-08-31 · 内核资源归属收口：per-process fd 表 + socket 归属/回收
+
+> 连续两项：把"全局单表 + 无归属 + 不随进程回收"的共享内核资源改造成"每进程私有 +
+> 进程绑定 + 退出归还"，根治跨进程槽污染与资源泄漏。
+
+**Changed**
+
+* **per-process fd 表入 PCB**（`src/kernel/sched.h/usermode.c/sched.c`）：`pcb_t` 增
+  `fd_table[FS_FDS_PER_PROC]`（`fs_file_t` 定义迁入 sched.h），fd 号从"全局约定号"改为
+  "本进程私有号"；`sys_open/read/write/close` 一律在当前进程自己的 fd 表上做，`sys_fork`
+  深拷贝子进程 fd 表、`exec/exit` 清本进程 fd 表——不再有 BUG-031 式的跨进程槽号互污染与
+  异常退出泄漏（v0.30 方案是记 pid 归属清理，此举把它彻底收进 PCB）
+* `userprog.c` 的 `procFSB` 改用与 `procFSA` 相同的 `fd=1` 打开自己的文件，作为 per-process
+  隔离性的负对照演示
+
+**Fixed**（见 bugs.md BUG-037/038）
+
+* **F-0a socket 表退出泄漏**：`net_sock_t` 增 `pid` 归属，`terminate_current` 调新
+  `netsock_close_pid(pid)` 归还其所有 socket——此前开 socket 不关即退出使槽位永久失踪，
+  直到表满网络降级
+* **F-0b 任意 close 可关内核 DHCP 保留槽**：`net_sock_t` 增 `reserved` 标志标记端口 68 槽；
+  `case 33` 改为 `netsock_close_if_owner`——仅可关本进程打开、非保留的槽，保留槽拒绝关闭，
+  DHCP 续约链不再被打断
+
+**Engineering**
+
+* **F-0c 观测收口**：`netsock_audit()` 并入 `kern_audit`（socket 表占用计数 + 保留槽恒计数），
+  socket 创建失败加"表满"专项日志
+* 新增 `tests/test_socket.sh`（挂入 `make test`）：F-0a 退出回收（leak2 后 netping 仍 PONG）+
+  F-0b 保留槽防 close + 观测断言；`qemu_regression.sh` 的 `slot` 断言同步改 `fd`
+* 全层回归绿；socket 攻击回归（F-0a/F-0b）在修复前后红→绿区分成立
+
 ## \[v0.30] - 2026-08-30 · 修复工具链严重 BUG（文件槽泄漏 + 自编译产物丢 argv）
 
 > 两个带复现的真 bug 由独立实操报告、逐条核验属实后修复（见 bugs.md BUG-031/032）。
