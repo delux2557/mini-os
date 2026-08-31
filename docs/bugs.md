@@ -614,6 +614,93 @@
 
 ---
 
+## BUG-037 [已修复] v0.31 socket 表退出泄漏：开 socket 不关即退出，槽位永久失踪（=F-0a）
+
+- **版本**：v0.31（socket 归属收口时）
+- **现象**：进程 open UDP socket 后不 close 直接退出，`netsock` 表槽位被永久占用；反复
+  "开-退" 多个进程后表满（`NET_SOCK_MAX` 含 DHCP 专用 1 槽），网络调用 `socket()` 返回 -1，
+  网络功能降级，直到重启才恢复。
+- **根因**：`net_sock_t` 无进程归属记录（打开者为谁、随谁回收），且进程退出路径没有任何
+  socket 回收逻辑——`terminate_current` 只清理 fd/私有帧/信号量，漏掉 netsock 槽。
+- **修复**（`v2-c-kernel/src/net/netsock.c/h` + `src/kernel/sched.c`）：`net_sock_t` 增
+  `pid` 字段（`netsock_open` 记 `sched_current_pid()`）；`terminate_current` 调新增
+  `netsock_close_pid(pid)` 归还该进程所有 socket 槽。
+- **回归**：`test_socket.sh` F-0a——leak2 在同进程循环 open 5 次（表净可用 3 槽）退出，
+  断言修复后泄漏链不出现、`netping` 仍能开 socket 收到 PONG；修复前该场景 `socket() FAIL`。
+
+---
+
+## BUG-038 [已修复] v0.31 任意 close：可关闭内核 DHCP 保留槽，续约链被打断（=F-0b）
+
+- **版本**：v0.31（socket 归属收口时）
+- **现象**：任何进程可 `close(任意 socket)`，连内核 DHCP（端口 68）专用槽也能被关；关闭后
+  DHCP 续约 RENEW/REBIND 无人收 ACK，租期一到被逼回退静态 IP，网络配置静默降级。
+- **根因**：`case 33`（`sys_net_close`）裸调 `netsock_close(id)`，无归属校验、无保留标记；
+  用户进程可越权关闭它没打开的、甚至是内核专用的 socket。
+- **修复**：`net_sock_t` 增 `reserved` 标志，`netsock_dhcp_open` 标记 DHCP 槽 `reserved`+`pid=0`；
+  `case 33` 改调 `netsock_close_if_owner(id,pid)`——仅允许关闭"本 pid 打开且非保留"的槽，
+  否则 `DENIED`。
+- **回归**：`test_socket.sh` F-0b——closer 对 `close(0)`（DHCP 保留槽）被拒、运行仍 PASS、
+  攻击后续约 ACK 照常出现、无 "lease lost" 静态回退；审计 `netsock_audit` 恒报保留槽计数。
+
+---
+
+## BUG-039 [已修复] v0.32 cc500 未闭合字符串字面量：越界读写自噬，被内核击杀（=F-3）
+
+- **版本**：v0.32（cc500 缺陷收口时）
+- **现象**：源码里字符串字面量未闭合（EOF 前无终止引号，如 `sys_print("unterminated` 到文件尾），
+  cc500 编译时内部越界读/写，guest 下被内核击杀（`PAGE FAULT ... -> killed` → `compile FAIL
+  code=4294967295`）、宿主 hostcc SIGSEGV（rc=139）。错误形态随机（砸进 brk arena 相邻分配）。
+- **根因**（两层，首崩点在 get_token 而非仅 primary）：
+  1) `get_token` 字符串读取 `while (nextc != '"') takechar();` 无 EOF 守卫（CC500 子集无
+     `break`，只能靠标志变量）——未闭合输入到 EOF 仍死循环，`token`（my_realloc 动态缓冲）
+     无限增长直至越界；
+  2) `primary_expr` 解码 `while (token[j] != '"')` 无 NUL 守卫——越过 token 尾部 NUL 继续读
+     直到堆里偶遇 `"` 字节，且同循环 `token[i]=` 写越界。
+- **修复**（`v2-c-kernel/tools/cc500/cc500.c`）：get_token 字符/字符串读取加 EOF 守卫
+  （`if (nextc==0-1) 置标志`）；primary_expr 解码 while 加 `token[j]!=0` 守卫，命中 NUL 未闭合
+  即 `sys_print("cc500: bad string\x0a"); error();` 干净报错退出 1。
+- **回归**：宿主 `t6` rc=1 且日志含 `bad string`（修复前 rc=139 SIGSEGV）；guest ccrun 报
+  `code=1` 而非 `code=-1(被击杀)`。
+
+---
+
+## BUG-040 [已修复] v0.32 cc500 只声明未定义函数：静默编出 "call 自身 ELF 头" 的废产物（=F-2）
+
+- **版本**：v0.32（cc500 缺陷收口时）
+- **现象**：`int sys_print(char*s);`（仅原型声明、无同文件定义）编译"成功"输出 `cc500:
+  compiled OK`；但产物运行时即 `PAGE FAULT ... -> killed`，eip 落在 0x800A0000——把产物自己的
+  ELF 头当代码执行（hostcc 产物内含 `mov eax,0x800A0000`+`call` 模式）。编译期零报错零告警。
+- **根因**：`sym_declare_global` 对首次出现符号记 `class='U'`、`value=code_offset(0x800A0000)`；
+  引用点经 'U' 链等 `sym_define_global` 回填。但"纯原型声明"走 `program()` 的
+  `accept('(')` 函数声明分支，`accept(';')` 为真时**不调用 `sym_define_global`**——定义永不到来，
+  无人回填，调用目标恒留 `0x800A0000`。
+- **修复**（`v2-c-kernel/tools/cc500/cc500.c` `be_finish`）：编译收尾遍历全局符号表，检出残留
+  `class='U'` 且 `value != code_offset`（被引用未回填）即 `cc500: undefined symbol` + `error()`。
+  **遍历锚点是"名字 NUL 位置"**（同 `sym_define_global` 的 `table[t+1]=class` 语义），非符号起点。
+- **回归**：宿主 `t4` rc=1 且日志含 `undefined symbol`（修复前 rc=0 `compiled OK`）；负对照
+  "声明 + 同文件定义" rc=0，无谓误报；ccboot 自举 P1==P2 仍成立（cc500 自身的库声明均有同文件定义）。
+
+---
+
+## BUG-041 [已修复] v0.32 cc500 关系运算残缺（只有 <=）+ error() 零诊断（=F-1）
+
+- **版本**：v0.32（cc500 缺陷收口时）
+- **现象**：`relational_expr` 只识别 `<=`，`<` / `>` / `>=` 全部缺失——教程式 `while(i<n)` 静默
+  parse error 退出 code=1 零输出；`error()` 是裸 `exit(1)`，不打印任何位置/token，学员无从归因。
+- **根因**：`relational_expr` 只有 `while (accept("<="))` 一个运算符；`error()` 无上下文参数。
+- **修复**（`v2-c-kernel/tools/cc500/cc500.c`）：
+  - `error()` 升级为打印 `sys_print("cc500: error at\x0a"); sys_print(token); sys_print("\x0a");`
+    （新消息用 `\x0a`——CC500 字符串解码此前只解 `\xNN`，故已为解码补 `\n`/`\t` 常规转义）；
+  - `relational_expr` 补齐 `<`/`>`/`>=`（与 `<=` 同构，仅 setcc 字节不同：setle=0x9e / setl=0x9c /
+    setge=0x9d / setg=0x9f；操作数序 `pop %ebx; cmp %eax,%ebx` 不变，`setl` 编码 0f 9c 由 objdump
+    实测锁定）。
+- **回归**：宿主 `<`/`>`/`>=`/`<=` 各 compile OK + `<` 编码 0f 9c 锁定；guest `<` 运行语义
+  （`while(i<1)` 恰循环 1 次、`i==1` 返回 0 即 exit code 0，方向错则会返回 1）；cc500 自举不动点与
+  原有 `<=` 用法不受影响。
+
+---
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号 | 场景 | 现象 | 处置/教训 |

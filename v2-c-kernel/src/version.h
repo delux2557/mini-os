@@ -5,6 +5,6 @@
 #ifndef _VERSION_H
 #define _VERSION_H
 
-#define MINI_OS_VERSION "v0.30"
+#define MINI_OS_VERSION "v0.32"
 
 #endif

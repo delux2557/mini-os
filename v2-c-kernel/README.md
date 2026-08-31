@@ -1,6 +1,6 @@
 # v2-c-kernel（当前版本）
 
-x86 32 位 C 内核，multiboot 引导，运行于 QEMU。当前里程碑：v0.30 工具链自举 + 加固（cc500 自举闭环、DHCP 租期续约、代码审查修复）。
+x86 32 位 C 内核，multiboot 引导，运行于 QEMU。当前里程碑：v0.32 cc500 编译器三缺陷修复（自举不动点保持）+ 内核资源归属收口（per-process fd 表、socket 归属/回收）。
 
 ```
 src/     内核源代码（.c/.h/.s/.ld）
