@@ -18,6 +18,7 @@
 #include "serial.h"
 #include "vga.h"
 #include "kb.h"
+#include "netsock.h"   /* v0.31 进程退出回收其 UDP socket */
 #include "userprog_offsets.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -700,6 +701,9 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
      * 不再有跨进程槽号冲突/泄漏。 */
     for (uint32_t i = 0; i < FS_FDS_PER_PROC; i++)
         p->fd_table[i].used = 0;
+    /* v0.31（socket 归属）：进程退出时归还其打开的 UDP socket（F-0b 根治）。
+     * 否则开 socket 不关即退出会永久占用 netsock 表槽位，直到表满网络降级。 */
+    netsock_close_pid(p->pid);
     /* v0.15: 父进程退出 -> 子进程孤儿化（parent_pid=0，交心跳回收）。
      * 否则父的 pid 槽被复用后，孤儿永远等不到"父进程 FREE"而被回收。 */
     for (uint32_t i = 1; i < MAX_PROCS; i++)
