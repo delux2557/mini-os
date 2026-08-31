@@ -14,6 +14,17 @@
 #define MAX_PROCS       16
 #define PID_KERNEL_IDLE 0     /* 进程 0 固定为内核空闲进程 */
 
+/* v0.31（per-process fd 表）：打开文件描述符，每进程独立 fd 表入 PCB。
+ * v0.8-v0.30 为全局 fs_files[8] 表（BUG-031：跨进程槽号互污染、异常退出泄漏）。
+ * 改造后 fd 号是"本进程内约定号"，并发进程互不影响、退出清自己的表即可。 */
+#define FS_FDS_PER_PROC 8
+typedef struct {
+    int      used;
+    uint32_t inode;
+    uint32_t pos;      /* 当前读写位置 */
+    uint32_t mode;     /* 0=只读 1=只写 2=追加 */
+} fs_file_t;
+
 typedef enum {
     PROC_FREE,      /* 槽位空闲 */
     PROC_READY,     /* 就绪（在就绪队列中） */
@@ -75,6 +86,9 @@ typedef struct {
                                 再按需分配，release_priv_frames/fork_oom 中 kfree。USER_CODE/用户栈/ELF 代码/
                                 私有页都深拷贝；共享内存区保持共享不在此列 */
     uint32_t fork_fcount;    /* 上表有效项数 */
+    fs_file_t fd_table[FS_FDS_PER_PROC]; /* v0.31（per-process fd）：本进程打开文件表。
+                                              v0.8-v0.30 为全局 fs_files[]（跨进程互污染/泄漏，
+                                              BUG-031）；改造后每进程独立，fork 复制、exec/exit 清空 */
 } pcb_t;
 
 /* 由 isr.s 提供：无条件切到目标 esp 并 ret（不返回） */

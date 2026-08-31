@@ -49,27 +49,12 @@ static msg_obj_t msg_objects[MSG_MAX_OBJ];
  * 基址/槽数在 mem.h 定义（v0.12：fork 需据此识别共享页以跳过深拷贝）。 */
 static uint32_t shmem_phys[SHMEM_SLOTS];
 
-/* ---- v0.8 文件系统：内核打开文件表（用户通过固定槽位引用，槽 0 保留） ---- */
-#define FS_MAX_OBJ 8
-typedef struct {
-    int      used;
-    uint32_t inode;
-    uint32_t pos;      /* 当前读写位置 */
-    uint32_t mode;     /* 0=只读 1=只写 */
-    uint32_t pid;      /* v0.29（BUG-031）：打开槽的进程 pid（退出时按归属清理） */
-} fs_file_t;
-static fs_file_t fs_files[FS_MAX_OBJ];
-
-/* v0.29（BUG-031）：进程退出时归还其占用的文件槽。
- * fs_files 是全局表、无进程归属；cc500 等程序在 parse error 等异常退出路径
- * （裸 exit/kill）不归还槽，泄漏的槽会污染后续所有编译/文件操作。
- * 只清理"该 pid 打开"的槽，不误伤并发进程（boot 演示进程与 shell 的编译并存）。 */
-void fs_files_close_pid(uint32_t pid) {
-    for (uint32_t i = 1; i < FS_MAX_OBJ; i++)
-        if (fs_files[i].used && fs_files[i].pid == pid) {
-            fs_files[i].used = 0;
-            serial_printf("[fs] close slot=%u (proc %u exit cleanup)\n", i, pid);
-        }
+/* ---- v0.31（per-process fd）：每进程打开文件表入 PCB（fs_file_t 定义移至 sched.h）。
+ * v0.8-v0.30 为全局 fs_files[8] 表——跨进程槽号互污染、异常退出泄漏（BUG-031）。
+ * 改造后 fd 号是"本进程内约定号"：打开/读写/关闭都在当前进程自己的 fd 表上做，
+ * 并发进程互不影响，退出/exec 只清自己的表。 */
+static fs_file_t *cur_fdt(void) {
+    return sched_get(sched_current_pid())->fd_table;
 }
 
 /* ---- v0.9 从文件系统加载 ELF 应用 ----
@@ -489,48 +474,51 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)ino;
         return;
     }
-    case 14: { /* sys_fs_open(slot, name, mode)：mode 0=只读 1=只写 2=追加(v0.14) */
-        if (a == 0 || a >= FS_MAX_OBJ || fs_files[a].used) { r->eax = (uint32_t)-1; return; }
+    case 14: { /* sys_fs_open(fd, name, mode)：fd 为本进程约定号；mode 0=只读 1=只写 2=追加(v0.14) */
+        fs_file_t *fdt = cur_fdt();
+        if (a == 0 || a >= FS_FDS_PER_PROC || fdt[a].used) { r->eax = (uint32_t)-1; return; }
         char path[64];
         if (copyin_str((const char *)b, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
         int ino = fs_lookup(fs_device(), path);
         if (ino < 0) { r->eax = (uint32_t)-1; return; }
-        fs_files[a].used  = 1;
-        fs_files[a].inode = (uint32_t)ino;
-        fs_files[a].pos   = (c == 2) ? fs_size(fs_device(), (uint32_t)ino) : 0;
-        fs_files[a].mode  = c;
-        fs_files[a].pid   = sched_current_pid();   /* v0.29（BUG-031）：记归属，退出时清理 */
-        serial_printf("[fs] open slot=%u '%s' inode=%u mode=%u pos=%u\n",
-                      a, path, ino, c, fs_files[a].pos);
+        fdt[a].used  = 1;
+        fdt[a].inode = (uint32_t)ino;
+        fdt[a].pos   = (c == 2) ? fs_size(fs_device(), (uint32_t)ino) : 0;
+        fdt[a].mode  = c;
+        serial_printf("[fs] open fd=%u '%s' inode=%u mode=%u pos=%u (pid=%u)\n",
+                      a, path, ino, c, fdt[a].pos, sched_current_pid());
         r->eax = 0;
         return;
     }
-    case 15: { /* sys_fs_write(slot, buf, len)：从当前位置写（buf 须为合法用户指针） */
-        if (a == 0 || a >= FS_MAX_OBJ || !fs_files[a].used) { r->eax = (uint32_t)-1; return; }
-        fs_file_t *f = &fs_files[a];
+    case 15: { /* sys_fs_write(fd, buf, len)：从当前位置写（buf 须为合法用户指针） */
+        fs_file_t *fdt = cur_fdt();
+        if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
+        fs_file_t *f = &fdt[a];
         if (f->mode == 0) { r->eax = (uint32_t)-1; return; }   /* 只读槽不可写 */
         if (!user_ptr_valid((const void *)b, c)) { r->eax = (uint32_t)-1; return; }
         int n = fs_write(fs_device(), f->inode, (const void *)b, f->pos, c);
         if (n > 0) f->pos += (uint32_t)n;
-        serial_printf("[fs] write slot=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
+        serial_printf("[fs] write fd=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
         r->eax = (uint32_t)n;
         return;
     }
-    case 16: { /* sys_fs_read(slot, buf, len)：从当前位置读（buf 须为合法用户指针） */
-        if (a == 0 || a >= FS_MAX_OBJ || !fs_files[a].used) { r->eax = (uint32_t)-1; return; }
-        fs_file_t *f = &fs_files[a];
+    case 16: { /* sys_fs_read(fd, buf, len)：从当前位置读（buf 须为合法用户指针） */
+        fs_file_t *fdt = cur_fdt();
+        if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
+        fs_file_t *f = &fdt[a];
         if (f->mode != 0) { r->eax = (uint32_t)-1; return; }
         if (!user_ptr_valid((const void *)b, c)) { r->eax = (uint32_t)-1; return; }
         int n = fs_read(fs_device(), f->inode, (void *)b, f->pos, c);
         if (n > 0) f->pos += (uint32_t)n;
-        serial_printf("[fs] read slot=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
+        serial_printf("[fs] read fd=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
         r->eax = (uint32_t)n;
         return;
     }
-    case 17: { /* sys_fs_close(slot) */
-        if (a == 0 || a >= FS_MAX_OBJ || !fs_files[a].used) { r->eax = (uint32_t)-1; return; }
-        fs_files[a].used = 0;
-        serial_printf("[fs] close slot=%u\n", a);
+    case 17: { /* sys_fs_close(fd) */
+        fs_file_t *fdt = cur_fdt();
+        if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
+        fdt[a].used = 0;
+        serial_printf("[fs] close fd=%u\n", a);
         r->eax = 0;
         return;
     }
@@ -740,11 +728,12 @@ void syscall_dispatch(registers_t *r) {
         __asm__ volatile ("cli; hlt");   /* 不可达 */
         return;
     }
-    case 26: { /* sys_fs_seek(slot, off)：定位读写位置，返回新位置或 -1 */
-        if (a == 0 || a >= FS_MAX_OBJ || !fs_files[a].used) { r->eax = (uint32_t)-1; return; }
-        fs_files[a].pos = b;
-        serial_printf("[fs] seek slot=%u -> pos=%u\n", a, fs_files[a].pos);
-        r->eax = fs_files[a].pos;
+    case 26: { /* sys_fs_seek(fd, off)：定位读写位置，返回新位置或 -1 */
+        fs_file_t *fdt = cur_fdt();
+        if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
+        fdt[a].pos = b;
+        serial_printf("[fs] seek fd=%u -> pos=%u\n", a, fdt[a].pos);
+        r->eax = fdt[a].pos;
         return;
     }
     case 27: { /* sys_fs_mkdir(path)：建目录（父目录须存在），返回 inode 或 -1 */
