@@ -9,7 +9,9 @@
 #define NET_SOCK_MAX 4      /* 内核 socket 表容量 */
 #define NET_RXMAX    2048    /* 单个数据报载荷上限（v1.1 Step 4 收尾：512->2048，
                                使转发器分块的 ≤1400B 会话数据报不被 dispatch 静默截断） */
-#define NET_RXQ      4      /* 每 socket 待收队列深度 */
+#define NET_RXQ      8      /* 每 socket 待收队列深度（v1.1 收尾 2：4->8。环形队列有效容量
+                               = N-1（1 哨兵位）；转发器下行分块后 OPENED+DATA+DATA+CLOSED 可
+                               一批到达，有效 3 装不下必丢帧 -> 提到有效 7 承载 SLIP 轮询突发） */
 
 typedef struct {
     int      used;
