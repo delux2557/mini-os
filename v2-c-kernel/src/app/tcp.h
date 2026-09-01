@@ -10,7 +10,12 @@
 
 #define TCP_CONN_MAX 4        /* 连接对象表容量（fd = 下标） */
 #define TCP_EVQ      4        /* 每连接状态事件队列深度（DATA 不走此队，见 tcp.c） */
-#define TCP_RXB      1024     /* 每连接数据接收缓冲（单包上限内可容纳） */
+#define TCP_RXB      4096     /* 每连接数据接收环（v1.1 Step 4 收尾：1024->4096，
+                                吃得住转发器分块突发 + 一次 >1KB 响应完整重组不丢尾） */
+#define TCP_DGRAM_BUF 1400    /* drain 单数据报缓冲（= netsock sendto/recvfrom 钳制上限，
+                                含 8B 会话头；接收侧最大可交付=该值） */
+#define TCP_MTU      1400     /* 发送硬墙：单数据报（含 8B 会话头）上限，与 netsock sendto
+                                钳制一致（见 tcp-mtu-fail v1.1 收尾）；应用数据≤TCP_MAX_PAYLOAD */
 #define TCP_RECV_TICKS 500    /* recv 阻塞超时上限（100Hz * 5s = 500 tick） */
 
 /* 连接对象（docs/tcp-thin-api.md §2；本实现为用户态 per-process，故不含内核 pid/内核栈缓冲） */

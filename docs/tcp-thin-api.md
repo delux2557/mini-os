@@ -1,7 +1,12 @@
 # 虚拟 TCP 薄包装 API 契约表（netif Step 4，第 2/3 份语义规定）
 
-> 版本 v1.0（2026-09-01）。**动码前定稿**。薄包装 = "API 形状 + 事件通道" 先立起来，
+> 版本 v1.0（2026-09-01）。**动码前定稿。** 薄包装 = "API 形状 + 事件通道" 先立起来，
 > 厚包装在既有对象与通道里补状态机（不改签名、不破帧格式）。
+> v1.1 注记：正文结构体里的 `pid`/`txq`/`timeout_tick` 字段在**用户态 per-process** 实现里
+> 未单列——进程天然隔离（省 pid）、薄包装一次 send 即发一条报文（`txq` 留作厚包装流式拼接
+> 预留、暂为空）、recv 超时上限由编译期常量 `TCP_RECV_TICKS` 承担（非字段）。`tcp_close` 的
+> 注销在 wire 上发的是 **guest→host 控制类 `MSG_CLOSE`**（非 host→guest 的 `MSG_CLOSED` 事件），
+> 方向语义见 `tcp-session-proto.md` §2.1。
 
 ## 1. 返回语义总表
 
@@ -14,7 +19,7 @@
 | recv | `int tcp_recv(int fd, uint8_t* buf, uint32_t max)` | `>0` | 收到 n 字节应用数据（DATA） |
 | | | `0` | **对端正常关闭**（收到 `MSG_CLOSED`）——与失败必须可区分 |
 | | | `-1` | **失败或超时**（收到 `MSG_ERROR` / `MSG_TIMEOUT`，或内部错误 / 无效 fd）——与"对端关闭"语义互斥，二者恒可区分 |
-| close | `int tcp_close(int fd)` | `0` | 连接对象已销毁、session_id 已归还（发 `MSG_CLOSED` 通知转发器注销） |
+| close | `int tcp_close(int fd)` | `0` | 连接对象已销毁、session_id 已归还（发控制类 `MSG_CLOSE` 通知转发器注销；非 `MSG_CLOSED` 事件） |
 | | | `-1` | 无效 fd / 已关闭 |
 
 ### 1.1 recv 的阻塞模型（关键）
