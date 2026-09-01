@@ -9,6 +9,9 @@ int e1000_init(void);                 /* 探测 + 初始化；成功返回 0 */
 int e1000_ready(void);                /* 驱动是否就绪 */
 const uint8_t *e1000_mac(void);       /* 6 字节 MAC */
 
+/* v1.1 Step 1：把 e1000 注册为 netif 后端（netif 适配层在 src/drv/e1000_netif.c）。 */
+void e1000_netif_register(void);
+
 /* v0.20: 网关（10.0.2.2）MAC——ARP 自检学到；供上层 socket 发送寻址用；未学到返回 NULL */
 const uint8_t *e1000_gw_mac(void);
 
