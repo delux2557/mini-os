@@ -81,9 +81,10 @@ uint32_t udp_build_ip(uint8_t *ip, uint32_t src_ip, uint32_t dst_ip,
     return 28u + plen;
 }
 
-/* 构建完整以太网帧（Ethernet+IPv4+UDP）——透传给宿主测试与旧调用方保留；
- * eth 头由 udp_build_frame 负责（测试参考），净道生产路径（netsock）已改走
- * udp_build_ip + netif（eth 头下沉到 e1000 适配层）。返回 14+28+plen。 */
+/* 构建完整以太网帧（Ethernet+IPv4+UDP）——共享 etherframe 参考，消费方是 e1000 链路
+ * 路径：dhcp.c 的 BOOTP 组帧（over e1000，HAL 期收口）与 e1000 UDP selftest，以及宿主
+ * 测试基准。socket 生产路径（netsock）不走本函数，改用 udp_build_ip + netif（eth 头由
+ * 网卡适配层封装）。返回 14+28+plen。 */
 uint32_t udp_build_frame(uint8_t *frame, const uint8_t *dst_mac, const uint8_t *src_mac,
                          uint32_t src_ip, uint32_t dst_ip,
                          uint16_t src_port, uint16_t dst_port,
@@ -134,7 +135,8 @@ int udp_parse_ip(const uint8_t *ip, uint32_t len, uint32_t *src_ip,
     return udp_parse_ip_core(ip, len, src_ip, src_port, dst_port, payload, plen);
 }
 
-/* 解析以太网+IPv4+UDP（含链路层头）——宿主测试与旧调用方保留。 */
+/* 解析以太网+IPv4+UDP（含链路层头）——与 udp_build_frame 同组的共享 etherframe 参考，
+ * 消费方为 e1000 链路路径（e1000 UDP selftest/续约收包）与宿主测试基准。 */
 int udp_parse(const uint8_t *frame, uint32_t len, uint32_t *src_ip,
               uint16_t *src_port, uint16_t *dst_port,
               const uint8_t **payload, uint32_t *plen) {
