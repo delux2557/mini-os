@@ -14,6 +14,7 @@
 #include "ata.h"
 #include "e1000.h"
 #include "netif.h"     /* v1.1 Step 1：netif 抽象层——协议/系统代码不再直调具体网卡 */
+#include "uart_netif.h" /* v1.1 Step 2：COM2 串口网卡（SLIP）——第二个 netif 后端 */
 #include "userprog_offsets.h"
 #include "version.h"   /* v0.30（评估 L-4）：版本单一来源，启动横幅取 MINI_OS_VERSION */
 #include <stdint.h>
@@ -84,8 +85,17 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
 
     ata_init();       /* v0.16：探测 IDE 真盘（无盘则纯内存盘） */
     storage_init();   /* v0.16：ramdisk + 真盘加载/格式化 + initramfs */
-    e1000_netif_register(); /* v1.1 Step 1：注册 e1000 网卡适配层；netif_init_all 内触发 e1000_init */
-    netif_init_all();       /* 初始化并选定当前网卡（无网卡则跳过，netif_ready()=-1） */
+    /* ---- v1.1 netif 网卡注册（Step 1 e1000 / Step 2 串口 SLIP）----
+     * 默认 e1000 优先（先注册先选用）；测试才用 UART_NETIF_DEFAULT 让串口优先
+     * （静态绑定，D6——不实现路由表）。netif_init_all 内触发各自驱动 init。 */
+#ifdef UART_NETIF_DEFAULT
+    uart_netif_register();
+    e1000_netif_register();
+#else
+    e1000_netif_register();
+    uart_netif_register();
+#endif
+    netif_init_all(); /* 初始化并选定当前网卡（无网卡则跳过，netif_ready()=-1） */
     e1000_dhcp_run(); /* v0.25：DISCOVER->OFFER->REQUEST->ACK 动态取 IP/网关（失败回退静态） */
     e1000_selftest(); /* v0.18：ARP 请求/应答自检（验证 TX+RX） */
     e1000_udp_selftest(); /* v0.19：经 SLIRP 网关回环到宿主 UDP echo（PING/PONG） */
