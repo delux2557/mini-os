@@ -19,6 +19,7 @@
 #include "icmp.h"
 #include "dhcp.h"
 #include "slip.h"
+#include "tcp_proto.h"      /* v1.1 Step 4 case 7：会话协议头解析 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -135,10 +136,18 @@ int main(void) {
             }
             free(b);
         }
+
+        /* 7) 虚拟 TCP 会话协议头解析（v1.1 Step 4：复制 PR13 模式，头不足/版本/保留位/越界由 ASan 抓） */
+        {
+            uint32_t n; uint8_t *b = rand_buf(&n, 64);
+            uint32_t sid; uint8_t mt;
+            (void)tcp_parse_hdr(b, n, &sid, &mt);
+            free(b);
+        }
     }
 
     printf("[fuzz_parse] %ld rounds (%ld parse calls) done, no crash (fixed seed, ASan clean)\n",
-           iters, iters * 7);
+           iters, iters * 8);
     free(fsmem);
     return 0;
 }

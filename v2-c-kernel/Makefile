@@ -73,11 +73,16 @@ $(BUILD)/e1000.o: src/drv/e1000.c
 # 依赖自动生成的头文件（userprog 各进程入口偏移）
 # v1.1 Step 2：UART_NETIF_DEFAULT 非空时，内核编译加 -D：netif 静态绑定串口网卡为当前
 #（tests/test_slip_net.sh 用 `make UART_NETIF_DEFAULT=1` 构建，跑完 `make clean && make` 恢复）。
+# v1.1 Step 4：TCP_DEMO 非空时加 -D，开机自动 spawn httpdemo（虚拟 TCP 演示，
+# tests/test_tcp.sh 用它，跑完恢复）。
 ifdef UART_NETIF_DEFAULT
 UART_NETIF_DEFAULT_DEF = -DUART_NETIF_DEFAULT
 endif
+ifdef TCP_DEMO
+TCP_DEMO_DEF = -DTCP_DEMO
+endif
 $(BUILD)/kernel.o: src/kernel/kernel.c $(USERPROG_OFFS)
-	$(CC) $(CFLAGS) $(UART_NETIF_DEFAULT_DEF) -c $< -o $@
+	$(CC) $(CFLAGS) $(UART_NETIF_DEFAULT_DEF) $(TCP_DEMO_DEF) -c $< -o $@
 
 $(BUILD)/sched.o: src/kernel/sched.c $(USERPROG_OFFS)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -108,7 +113,7 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500
+APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -167,6 +172,11 @@ $(BUILD)/apps/cc500.o: tools/cc500/cc500.c
 	$(CC) $(CFLAGS) -Wno-int-conversion -w -c $< -o $@
 $(BUILD)/apps/cc500.elf: $(BUILD)/apps/cc500.o $(BUILD)/apps/cc500_crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/cc500_crt.o $<
+
+# ---- netif Step 4：httpdemo（虚拟 TCP 薄包装演示）。薄包装 lib（src/app/tcp.c）
+# 与演示共享同一套 CFLAGS（-Isrc/net 已含 tcp_proto.h），链接进 httpdemo.elf ----
+$(BUILD)/apps/httpdemo.elf: $(BUILD)/apps/httpdemo.o $(BUILD)/apps/tcp.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $(BUILD)/apps/tcp.o $<
 # 源码以原始字节嵌入（符号 _binary_cc500_c_start/end，由输入文件名 cc500.c 决定）
 $(BUILD)/apps/cc500.c: tools/cc500/cc500.c
 	cp $< $@
@@ -222,8 +232,12 @@ test-cc500:
 test-slip:
 	bash tests/test_slip_net.sh
 
+# v1.1 Step 4 虚拟 TCP 回归：宿主转发器（UDP 通道）+ HTTP 请求-响应 demo + 断连/超时/-1 断言
+test-tcp:
+	bash tests/test_tcp.sh
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip
+test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp
 
 clean:
 	rm -rf build tests/build
@@ -231,4 +245,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp clean

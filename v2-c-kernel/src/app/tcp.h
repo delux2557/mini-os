@@ -1,0 +1,45 @@
+/* mini-os/v2-c-kernel/src/app/tcp.h
+ * 虚拟 TCP 薄包装（netif Step 4）——用户态库，建立在 sys_net_* (netsock UDP) 之上。
+ * API 契约见 docs/tcp-thin-api.md；wire 见 docs/tcp-session-proto.md。
+ * "薄"：guest 侧不实现 TCP 状态机；真实 TCP 由宿主转发器完成；上行只给
+ * "状态可见"面（连接对象 + 事件通道），厚包装时在同一对象/通道补状态机即可。
+ */
+#ifndef APP_TCP_H
+#define APP_TCP_H
+#include <stdint.h>
+
+#define TCP_CONN_MAX 4        /* 连接对象表容量（fd = 下标） */
+#define TCP_EVQ      4        /* 每连接状态事件队列深度（DATA 不走此队，见 tcp.c） */
+#define TCP_RXB      1024     /* 每连接数据接收缓冲（单包上限内可容纳） */
+#define TCP_RECV_TICKS 500    /* recv 阻塞超时上限（100Hz * 5s = 500 tick） */
+
+/* 连接对象（docs/tcp-thin-api.md §2；本实现为用户态 per-process，故不含内核 pid/内核栈缓冲） */
+typedef enum {
+    TCP_FREE = 0, TCP_OPENING, TCP_OPEN, TCP_CLOSED, TCP_ERROR
+} tcp_state_t;
+
+typedef struct {
+    int          used;
+    uint32_t     session_id;    /* guest 分配，单调递增 */
+    tcp_state_t  state;         /* FREE->OPENING->OPEN->CLOSED/ERROR */
+    uint32_t     dst_ip;        /* open 目标（仅薄包装侧语义记录；wire 只在 MSG_OPEN 传一次） */
+    uint16_t     dst_port;
+    uint8_t      rxb[TCP_RXB];  uint16_t rx_head, rx_tail;
+    /* 状态事件队列（DATA 直接进 rxb，不占此队；状态事件绝不丢弃，见 spec §3） */
+    struct { uint8_t type; } ev[TCP_EVQ];
+    uint16_t     ev_head, ev_tail;
+    uint8_t      ev_overflow;
+} tcp_conn_t;
+
+/* returns: >=0 fd / -1 本地失败 */
+int  tcp_open(uint32_t ip, uint16_t port);
+/* returns: 0 已建立（OPENED）/ -1 失败或超时（ERROR/TIMEOUT/超时上限） */
+int  tcp_wait_open(int fd);
+/* returns: >0 载荷已发 / -1 本地失败（无效 fd / 未建立 / 超单包上限 / 已关闭） */
+int  tcp_send(int fd, const uint8_t *d, uint32_t n);
+/* returns: >0 收到字节 / 0 对端正常关闭 / -1 失败或超时（三态互斥，见 spec §1.1） */
+int  tcp_recv(int fd, uint8_t *buf, uint32_t max);
+/* returns: 0 已关闭 / -1 无效 fd 或已关 */
+int  tcp_close(int fd);
+
+#endif /* APP_TCP_H */
