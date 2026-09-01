@@ -47,7 +47,7 @@ echo "== [2/3] QEMU（COM1=日志 / COM2=SLIP 对端）+ 宿主 SLIP 回显对�
 rm -f "$LOG" "$PEER_LOG"
 qemu-system-i386 -kernel build/kernel.elf -display none -m 64 \
     -serial file:"$LOG" \
-    -chardev socket,id=chr2,host=127.0.0.1,port=$SLIP_PORT,server=on,nowait \
+    -chardev socket,id=chr2,host=127.0.0.1,port=$SLIP_PORT,server=on,wait=on \
     -serial chardev:chr2 \
     -no-reboot -no-shutdown >/dev/null 2>&1 &
 QPID=$!
