@@ -80,7 +80,9 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown \
         -m 64 -serial stdio -monitor none < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!; exec 9>"$TIN"
-    gwait() { local desc="$1" re="$2" tmo="${3:-25}" i; for ((i=0;i<tmo*4;i++)); do grep -aq "$re" "$LOG" 2>/dev/null && { echo "[ok]   $desc"; return 0; }; sleep 0.25; done; echo "[FAIL] $desc (缺: $re)"; GFAIL=$((GFAIL+1)); return 1; }
+    # v1.1 收尾：默认等待窗 25s->60s；失败时自动转储 guest 串口尾部（慢 runner 自诊断，
+    # 2026-09-01 CI 33504825917：2 vCPU 无 KVM 下 "guest < 运行 exit0" 20s 窗超时红）
+    gwait() { local desc="$1" re="$2" tmo="${3:-60}" i; for ((i=0;i<tmo*4;i++)); do grep -aq "$re" "$LOG" 2>/dev/null && { echo "[ok]   $desc"; return 0; }; sleep 0.25; done; echo "[FAIL] $desc (缺: $re)"; GFAIL=$((GFAIL+1)); echo "      --- guest 串口尾部（自诊断） ---"; tail -n 8 "$LOG" 2>/dev/null | sed 's/^/      serial| /'; return 1; }
     gsend() { printf '%s\n' "$1" >&9; sleep 0.3; }
     gwait "shell 提示符" "mini-os\$ " 25
     # ccboot 自举：cc500 编译自身 P1==P2 逐字节一致（codegen 任何破坏当场暴露）
@@ -90,8 +92,8 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     # 若 < 缺失则 parse fail（ccrun FAIL）；若 < 方向错则 i!=1 返回 1（ccrun FAIL）
     gsend 'writefile /tlt.c int main(){int i;i=0;while(i<1){i=i+1;}if(i==1)return 0;return 1;}'
     gsend "ccrun /tlt.c /tlt.elf"
-    gwait "guest < 编译" "cc500: compiled OK" 30
-    gwait "guest < 运行 exit0" "'/tlt.elf' exited code=0 PASS" 20
+    gwait "guest < 编译" "cc500: compiled OK" 60
+    gwait "guest < 运行 exit0" "'/tlt.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else

@@ -72,7 +72,7 @@ PY
     echo "[FAIL] HTTP 服务未就绪（绑定失败或持续无响应）"
     return 1
 }
-stop_http() { kill "$HTTP_PID" 2>/dev/null || true; HTTP_PID=""; }
+stop_http() { [ -n "$HTTP_PID" ] && { kill "$HTTP_PID" 2>/dev/null || true; wait "$HTTP_PID" 2>/dev/null; }; HTTP_PID=""; }  # v1.1 收尾：等待进程退出再放行，杜绝 A/B 相接的端口竞争
 
 # await_log <log> <label> <regex> <timeout_s>  --- 命中返回0 / 超时返回1
 await_log() {
