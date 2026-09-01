@@ -56,12 +56,21 @@ while True:
     c.close()
 PY
     HTTP_PID=$!
-    # E-1 存活自检：绑定失败静默进 /dev/null 会把断言红误判成代码病（violate v0.33 exit-2）
-    if ! curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/" 2>/dev/null | grep -q '200'; then
-        echo "[FAIL] HTTP 服务未就绪（端口被占或绑定失败）"; return 1
+    # E-1 存活自检：冷启动 python 解释器慢，改成"重试循环 + 间隔"而非单次无等待 curl，
+    # 否则 CI 上 curl 先到、服务未 listen -> ECONNREFUSED 稳定误报"未就绪"（PR #16 审核坑5）
+    local ok=0 i
+    for ((i = 0; i < 10; i++)); do
+        if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/" 2>/dev/null | grep -q '200'; then
+            ok=1; break
+        fi
+        sleep 0.5
+    done
+    if [ "$ok" = 1 ]; then
+        echo "      http server pid=$HTTP_PID (self-check 200 OK)"
+        return 0
     fi
-    echo "      http server pid=$HTTP_PID (self-check 200 OK)"
-    return 0
+    echo "[FAIL] HTTP 服务未就绪（绑定失败或持续无响应）"
+    return 1
 }
 stop_http() { kill "$HTTP_PID" 2>/dev/null || true; HTTP_PID=""; }
 
@@ -83,7 +92,7 @@ if ! make TCP_DEMO=1 >/dev/null 2>&1; then
     echo "[FAIL] Part A 内核构建失败"; exit 1
 fi
 rm -f build/tcp_a.log build/tcp_proxy_a.log
-run_http_server
+run_http_server || { echo "[FAIL] Part A 起宿主 HTTP 服务失败"; exit 1; }
 python3 tests/tcp_proxy.py --mode udp --port $PROXY_UDP --log build/tcp_proxy_a.log >/dev/null 2>&1 &
 PROXY_PID=$!
 sleep 0.5
@@ -128,7 +137,7 @@ if ! make TCP_DEMO=1 UART_NETIF_DEFAULT=1 >/dev/null 2>&1; then
     echo "[FAIL] Part B 内核构建失败"; exit 1
 fi
 rm -f build/tcp_b.log build/tcp_proxy_b.log
-run_http_server
+run_http_server || { echo "[FAIL] Part B 起宿主 HTTP 服务失败"; exit 1; }
 python3 tests/tcp_proxy.py --mode slip --host 127.0.0.1 --port $SLIP_PORT --log build/tcp_proxy_b.log >/dev/null 2>&1 &
 PROXY_PID=$!
 sleep 0.5
