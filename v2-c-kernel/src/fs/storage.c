@@ -81,6 +81,7 @@ extern char _binary_bigdemo_elf_start[], _binary_bigdemo_elf_end[];
 extern char _binary_cc500_elf_start[],  _binary_cc500_elf_end[];     /* v0.27 编译器 ELF */
 extern char _binary_cc500_c_start[],    _binary_cc500_c_end[];       /* v0.27 编译器源码 */
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
+extern char _binary_httpdemo_elf_start[], _binary_httpdemo_elf_end[];  /* v1.1 Step 4 虚拟 TCP */
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
     int ino = fs_create(fs_device(), name);
@@ -156,6 +157,11 @@ static void initramfs_setup(void) {
     initramfs_file("shell",
                    _binary_shell_elf_start,
                    (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));
+    /* v1.1 Step 4：虚拟 TCP 薄包装 HTTP demo（开机在 kernel.c 按 TCP_DEMO spawn；此处仅入 initramfs，
+     * shell `run httpdemo` 亦可触发） */
+    initramfs_file("httpdemo",
+                   _binary_httpdemo_elf_start,
+                   (uint32_t)(_binary_httpdemo_elf_end - _binary_httpdemo_elf_start));
 }
 
 void storage_init(void) {
