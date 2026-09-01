@@ -614,6 +614,27 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
 - **可测性**：Makefile `DHCP_RENEW_SECS`（缺省用服务器租期，SLIRP 为 24h）编译期覆盖
   租期为秒级，test_net 短租期内核在秒级窗口断言 RENEW→ACK 续约闭环（pcap UDP 10→12）。
 
+### 网络抽象层 v1.1（netif + 虚拟 TCP，路标四步）
+- **核心解耦**：协议层不再直调网卡。`src/net/netif.{c,h}` 提供 ops 表（init/ready/tx/rx/mac）
+  + 注册表，包单位为 **IP 数据报**（lwIP netif 模式）；以太网头 / SLIP 帧等链路层封装**下沉到
+  网卡适配层**（`e1000_netif.c` 追加以太头、`uart_netif.c` 做 SLIP 成帧）。`netsock`/`dhcp` 等
+  协议层只走 `netif_tx/rx`，`grep e1000_ src/net/` 为空由 CI 守卫强制。管理面：`netif_select`/
+  `UART_NETIF_DEFAULT` 静态绑网卡（D6）。
+- **虚拟 TCP = 薄包装 + 宿主转发器**（真 TCP 状态机只在宿主，见 roadmap「语义边界」诚实声明）：
+  - **会话协议**（`src/net/tcp_proto.h`）：8B 会话头（session_id/msg_type/version/flags，大端），
+    msg_type 0x01 DATA / 0x02-05 事件(host→guest) / 0x06-07 控制(guest→host)；单一事实来源
+    （guest C + 宿主 Python + fuzz 三方共用）。三份语义规定定稿 docs/（session-proto / thin-api /
+    mtu-fail）。
+  - **guest 薄包装**（`src/app/tcp.c`，用户态库）：`tcp_open/send/recv/close` + `tcp_wait_open`，
+    fd=连接对象（事件环 + 数据环 + 状态机 FREE→OPENING→OPEN→CLOSED/ERROR），`tcp_recv` 三态
+    >0/0/-1 互斥（0=对端关闭，-1=失败/超时）。薄包装发送硬墙 = netsock sendto/recvfrom 钳制
+    1400（收发数据报 ≤1400），转发器下行分块 ≤1392，`NET_RXMAX=2048` + 环 4096 重组 >1KB 响应
+    不丢尾（BUG-044）。
+  - **宿主转发器**（`tests/tcp_proxy.py`）：会话表 + UDP↔TCP 映射 + 事件回传 + 超时/半开/背压，
+    支持 UDP(e1000)+SLIP(COM2) 双通道；主循环**非阻塞 multiclient select**（BUG-045 修正阻塞饿死）。
+  - **demo/回归**：`httpdemo` 开机 HTTP demo（成功 200 + 拒绝 -1）；test-tcp 双通道 + >1KB/尾字节
+    完整性断言；test-slip 串口网卡；fuzz case7 会话头解析。
+
 ## 18. 容量三连（v0.26 核心）
 
 ### #1 用户栈按需生长（`src/kernel/guard.c` + `src/mm/mem.c` pf_handler）
