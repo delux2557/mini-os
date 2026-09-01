@@ -64,26 +64,26 @@ static void rx_push(tcp_conn_t *c, const uint8_t *data, uint32_t n) {
     }
 }
 
-/* 排空 UDP：把转发器回传的会话数据报按 session_id 路由进各连接对象（须在 recv 前泵取） */
+/* 泵取 UDP：从转发器回传队列只取"一个"会话数据报并路由进对应连接对象。
+ * v1.2 BUG-047：原 for(;;) 全量 pump 把整段响应一次性挤进 rxb 环，超过 TCP_RXB 即丢尾；
+ * 改为单报泵取，令 tcp_recv 每轮 drain 后立即排空，环永不涨破 TCP_RXB。 */
 static void drain(void) {
-    for (;;) {
-        uint8_t tmp[TCP_DGRAM_BUF];
-        struct net_recv_iov ri;
-        ri.src_ip = 0; ri.src_port = 0; ri._pad = 0;
-        ri.buf = tmp; ri.max = sizeof(tmp);
-        int n = sys_net_recvfrom(tt_sock, &ri);
-        if (n <= 0) return;
-        uint32_t sid; uint8_t mt;
-        if (tcp_parse_hdr(tmp, (uint32_t)n, &sid, &mt) != 0) continue;   /* 非法头丢弃 */
-        tcp_conn_t *c = conn_by_session(sid);
-        if (!c) continue;
-        if (mt == MSG_DATA)      rx_push(c, tmp + TCP_PHDR, (uint32_t)n - TCP_PHDR);
-        else if (mt == MSG_OPENED)  { c->state = TCP_OPEN; }
-        else if (mt == MSG_CLOSED)  { c->state = TCP_CLOSED; ev_push(c, mt); }
-        else if (mt == MSG_ERROR)   { c->state = TCP_ERROR;  ev_push(c, mt); }
-        else if (mt == MSG_TIMEOUT) { c->state = TCP_ERROR;  ev_push(c, mt); }
-        /* MSG_OPEN/CLOSE 是 guest→host 方向，guest 收到即方向非法：忽略 */
-    }
+    uint8_t tmp[TCP_DGRAM_BUF];
+    struct net_recv_iov ri;
+    ri.src_ip = 0; ri.src_port = 0; ri._pad = 0;
+    ri.buf = tmp; ri.max = sizeof(tmp);
+    int n = sys_net_recvfrom(tt_sock, &ri);
+    if (n <= 0) return;
+    uint32_t sid; uint8_t mt;
+    if (tcp_parse_hdr(tmp, (uint32_t)n, &sid, &mt) != 0) return;   /* 非法头丢弃 */
+    tcp_conn_t *c = conn_by_session(sid);
+    if (!c) return;
+    if (mt == MSG_DATA)      rx_push(c, tmp + TCP_PHDR, (uint32_t)n - TCP_PHDR);
+    else if (mt == MSG_OPENED)  { c->state = TCP_OPEN; }
+    else if (mt == MSG_CLOSED)  { c->state = TCP_CLOSED; ev_push(c, mt); }
+    else if (mt == MSG_ERROR)   { c->state = TCP_ERROR;  ev_push(c, mt); }
+    else if (mt == MSG_TIMEOUT) { c->state = TCP_ERROR;  ev_push(c, mt); }
+    /* MSG_OPEN/CLOSE 是 guest→host 方向，guest 收到即方向非法：忽略 */
 }
 
 int tcp_open(uint32_t ip, uint16_t port) {

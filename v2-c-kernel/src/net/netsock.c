@@ -49,15 +49,19 @@ static void dispatch_frame(const uint8_t *frame, uint32_t len) {
     s->rx_tail = next;
 }
 
-/* 排空网卡：把当前已到达的 IP 数据报全部取出并分发（每次 recv 前调用一次）。
- * -1（适配层消费一帧但非 IP，如残留 ARP）不算"收到"，继续排空下一帧。 */
+/* 收一帧：从网卡取"一个" IP 数据报并分发（每次 recv 前调用一次）。
+ * v1.2 BUG-050：原 for(;;) 全量排空把整段下行一次性挤进 socket 环（NET_RXQ 有效 7），
+ * 虚拟 TCP 大响应 7×DATA+CLOSED 一批到达时 CLOSED 被队列满丢帧 -> recv 超时 -1。
+ * 改为"单帧泵取"（跳过非 IP 帧），把突发缓冲交还给 NIC 环（e1000 256 槽），
+ * socket 环深度恒 ≤1，永不因全量排空丢尾。 */
 static void netsock_drain(void) {
     uint8_t f[1600];
     uint32_t l;
     for (;;) {
         int r = netif_rx(f, sizeof(f), &l);
         if (r == 0) return;                       /* 网卡排空 */
-        if (r == 1) dispatch_frame(f, l);
+        if (r == 1) { dispatch_frame(f, l); return; }   /* 本回只收一帧，提前返回 */
+        /* r == -1：适配层消费一帧但非 IP（如残留 ARP），跳过继续取下一帧 */
     }
 }
 
