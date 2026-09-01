@@ -46,7 +46,11 @@ static int uart_if_init(void) {
     outb(COM2 + 1u, 0x00);           /* 高字节 */
     outb(COM2_LCR, 0x03);            /* 8N1 */
     slip_rx_init(&slip_rx);
-    serial_printf("[uart_netif] COM2 SLIP up (0x2F8)\n");
+    /* 独立可观测回归信号（BUG:COM2-FIFO）：写 FCR 后读回同端口 = IIR，bit6-7==11 即 FIFO
+     * 已使能（16550A）。若将来回退开 FIFO 那行，读回非 0xC -> FIFO=OFF，test-slip 断言红。 */
+    uint8_t iir = inb(COM2_FCR);     /* 读 COM2+2 = IIR（端口读=IIR、写=FCR） */
+    serial_printf("[uart_netif] COM2 SLIP up (0x2F8) FIFO=%s (IIR=0x%02x)\n",
+                  (iir & 0xC0u) == 0xC0u ? "16B-EN" : "OFF", (unsigned)iir);
     return 0;
 }
 

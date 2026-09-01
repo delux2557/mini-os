@@ -81,6 +81,8 @@ check() {   # check "<说明>" "<正则>"
     fi
 }
 check "COM2 串口网卡初始化（SLIP）"  "\[uart_netif\] COM2 SLIP up"
+# COM2-FIFO 独立回归：FCR 写后读回 IIR 须呈现 16B FIFO 使能（若回退开 FIFO，此断言红）
+check "COM2 16B RX FIFO 已使能"     "\[uart_netif\] COM2 SLIP up .*FIFO=16B-EN"
 check "用户态 sendto PING（经串口）" "\[sock\] sendto PING"
 check "用户态 recvfrom PONG（经串口）" "\[sock\] recvfrom PONG"
 check "用户态 UDP 回环 OK（串口往返）" "\[sock\] UDP round-trip OK"
