@@ -734,6 +734,67 @@
 
 ---
 
+## BUG-044 [已修复] v1.1 Step 4 大响应接收"容量丢字节"假象为"回绕区损坏"（B1/B2/E2 合并）
+
+- **版本**：v1.1（netif Step 4 薄包装 + 转发器）；独立核验报告指认后 dev 逐项核实修正
+- **现象**：HTTP 响应 >1KB 时 `tcp_recv` 要么超时 -1、要么结尾字节在**固定的位移窗口**被"替换/
+  缺失"（确定性复现，与内容/节奏/ISR 无关）。核验报告将其定性为"1024B 环回绕区地址损坏"，并
+  称"把 TCP_RXB 1024→2304 即完全消失"为证据。
+- **核实再判**：**根因不是回绕区地址损坏，而是同族三处容量上限叠加导致丢尾**：
+  1. `NET_RXMAX=512`：netsock `dispatch_frame` 对 >512 的数据报静默 `plen=NET_RXMAX` 截断；
+  2. 转发器下行**不分块**：`_tcp_read` 把 TCP 读到的整段（≤4096B）塞进单条 `MSG_DATA`，
+     guest 单数据报根本收不下——而 guest 的 `sendto/recvfrom` 在系统调用层都钳制 1400；
+  3. 接收环 `TCP_RXB=1024` 被分块突发写满后 `rx_push` 丢尾部字节（响应缺缝）。
+  环用 `(x) % TCP_RXB` 对任意环长成立，**不存在 power-of-2 掩码回绕 bug**；"换 2304 即全清"恰好是
+  环体量 > 最大逻辑突发才不丢——是**容量证据，不是地址证据**。
+- **修复**：NET_RXMAX 512→2048（≤1400 数据报不被 dispatch 截断）；TCP_RXB 1024→4096；转发器下行
+  单条 MSG_DATA 分块 ≤1392；tcp_send 发送硬墙对齐传输真实上限（TCP_MTU 1472→1400，盖过
+  1472/1600 名目值）。收、发、转发三处是**同一份约束的三个落点**，一次相干改动而非逐条打补丁。
+- **回归**：httpdemo 拉 2000B />1KB 响应，断言 `len>1024` 且尾字节 ==`TAIL`（分块/`NET_RXMAX`/环
+  任一丢字节都会 MISS）；test-tcp 双通道 + host 19/19 + 默认内核构建无告警。
+- **教训**：核验报告把容量症状误判为地址损坏时，dev 要复核根因再修；"换大容量就消失"是**容量**
+  证据，与"地址/回绕语义错误"是两类病；环类实现用 `%` 而非掩码可排除相邻嫌疑，集中排查容量链。
+
+---
+
+## BUG-045 [已修复] v1.1 Step 4 转发器主循环阻塞 recv 饿死串口输入（SLIP 通道失败根因）
+
+- **版本**：v1.1 Step 4（`tests/tcp_proxy.py`）
+- **现象**：UDP（e1000）通道虚拟 TCP demo 全绿；但串口（COM2/SLIP）通道 httpdemo 完成 open、
+  发出 GET 后 `tcp_recv` 超时 -1、无 200 OK；转发器日志停在 `OPENED sid=1`，无下行 DATA。
+- **根因**：`_service_tcp` 对 TCP 下行 socket 用 `settimeout(8s)` **阻塞 recv**；转发器是单线程
+  主循环，阻塞在 `_service_tcp` 期间不再 `select` chardev/udp 输入。guest 在 OPENED 后经 SLIP 发来的
+  GET 帧被滞留在 OS 缓冲无人读；而 guest `tcp_recv` 超时上限 5s **小于**转发器 8s，guest 先超时，
+  之后即便转发器读到也已来不及。
+- **修复**：TCP 下行 socket 改**非阻塞**，主循环用 `select` 同时监听 chardev/udp 与所有 OPEN 的
+  TCP socket，从就绪集非阻塞读（B1 分块也在此落点，见 BUG-044）。主循环永不被单条 recv 卡死。
+- **回归**：SLIP 通道 httpdemo 拉到 200 OK + `RESULT PASS`；test-tcp A/B 双通道断言全绿。
+- **教训**：单线程事件循环里**任何阻塞 I/O 都会饿死其他通道**；读下游 TCP 必须非阻塞 + multiclient
+  select，且各超时（guest 5s vs 转发器 8s）要协调，否则上游先超时。
+
+---
+
+## BUG-046 [已修复] v1.1 Step 4 收尾 test_tcp.sh 自检无等待窗 → CI 稳定误报"HTTP 服务未就绪"
+
+- **版本**：v1.1 Step 4 收尾（PR #16，审核方复验指认）
+- **现象**：PR #16 test 首跑失败、**rerun 同一 commit 复验仍红**（非 flaky——审核方定义
+  "rerun 转绿才叫 flaky，这次没转绿"）；失败点 `[FAIL] HTTP 服务未就绪（端口被占或绑定失败）`；
+  7×layer 全绿、内核 16 项单测过、宿主 19/19 pass fail=0，旁证 exit code 0。
+- **根因**：PR #16 自身把 `python3 -m http.server + sleep 0.5`（**有启动等待窗**）换成内联
+  python socket 服务 + **单次无等待 curl** 存活自检。CI runner 冷启动 python 解释器慢时，curl
+  先到、服务未 `listen()` → `ECONNREFUSED` → 稳定误报"未就绪"；且 `run_http_server` 失败后
+  脚本不退出，后续 `await_log` 全部超时 → 断言连锁红。
+- **修复**：`run_http_server` 自检改**重试循环**（`curl && break`，间隔 0.5s ×10 ≈ 5s 等待窗），
+  持续失败才报"未就绪"；两处调用改 `run_http_server || exit 1`：服务起不来立即红并退出，不再
+  带病跑完制造连锁误报。
+- **回归**：`bash -n` 通过；模拟"慢启 1.2s + 重试轮询"单验自检正确等到服务就绪 200；双通道全量
+  待 qemu 环境复跑确认。
+- **教训**：宿主测试脚本**自改的时序点就是 CI 假红的头号来源**——改动涉及"等外部服务就绪"时
+  必须保留/引入等待窗与重试，不能把等待删成"单次无等待探测"；服务未就绪要 fail-fast（exit）
+  而非继续跑完连锁红。
+
+---
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号 | 场景 | 现象 | 处置/教训 |

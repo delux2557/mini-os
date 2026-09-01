@@ -3,6 +3,39 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.1] - 2026-09-01 · 网络抽象层 netif + 虚拟 TCP 薄包装（Step 1-4）+ 收尾修复（PR #16）
+
+> 把网络从"协议直接驱动 e1000"解开为三层：网卡适配层（e1000 以太 / 串口 SLIP）↔ netif 接口
+> ↔ 协议层；虚拟 TCP 走"宿主转发器做真 TCP、guest 薄包装给连接对象 + 事件通道"。四步落地、
+> 每步 CI 全绿，见 roadmap。收尾修复见 bugs.md BUG-044/045/046。
+
+**Added**（路标 v1.1，Step 1-4，PR #11-15）
+
+* **netif 抽象层**（`src/net/netif.c/h`，Step 1）：ops 表（init/ready/tx/rx/mac）+ 注册表，包单位=
+  IP 数据报；以太网头 / SLIP 帧等链路层封装下沉到各网卡适配层（e1000 适配器 / `uart_netif` COM2）。
+  协议层（src/net）不再出现任何具体网卡符号，`grep e1000_ src/net/` 为空由 CI 守卫强制（Step 3）
+* **串口第二网卡**（`src/drv/uart_netif.c` + `net/slip.c`，Step 2）：COM2 走 SLIP（RFC 1055，
+  END/ESC 转义）；`UART_NETIF_DEFAULT` 编译开关静态绑定网卡（D6）
+* **会话协议**（`src/net/tcp_proto.h`，Step 4）：8B 会话头（session_id/msg_type/version/flags），
+  大端；msg_type 0x01 DATA / 0x02-0x05 事件(host→guest) / 0x06-07 控制(guest→host)；单一事实来源
+  （guest C + 宿主 Python + fuzz 三方共用）。三份语义规定定稿进 docs/（session-proto/thin-api/mtu-fail）
+* **虚拟 TCP 薄包装**（`src/app/tcp.c`，Step 4）：用户态库，`tcp_open/send/recv/close` + `wait_open`，
+  fd=连接对象（非裸整数），事件队列，`tcp_recv` 三态 >0/0/-1 互斥；`httpdemo` 开机自动 HTTP demo
+* **宿主转发器**（`tests/tcp_proxy.py`，Step 4）：会话表 + UDP↔TCP 映射 + 事件回传 + 超时/半开/背压，
+  支持 UDP(e1000)+SLIP(COM2) 双通道
+
+**Fixed**（收尾，PR #16，见 bugs.md BUG-044/045/046）
+
+* **大响应丢尾**（BUG-044）：NET_RXMAX 512→2048、接收环 1024→4096、转发器下行分块 ≤1392、
+  发送硬墙对齐传输钳制 1400——"换 2304 环全清"实为容量而非地址损坏，三条容量症状一次归并
+* **串口通道饿死**（BUG-045）：转发器主循环阻塞 recv → 改非阻塞 + multiclient select，不再卡死
+  chardev/udp 输入
+* **CI 稳定误报"HTTP 未就绪"**（BUG-046）：test_tcp 自检改 retry 循环 + 失败即退（`|| exit 1`），
+  修掉 PR #16 自引入的"单次无等待 curl"时序容错 bug（审核确认非 flaky）
+
+**Tests**：host 19/19（fuzz 8 用例/48 万解析 ASan clean、Step3 e1000 守卫）；test-tcp 双通道
+（>1KB/尾字节==TAIL 完整性断言）；test-slip 串口网卡。注：PR #16 双通道全量需 qemu 环境复跑确认。
+
 ## \[v0.33] - 2026-08-31 · 回归可观测性收口（F-4 行撕裂 / F-5 pid 静默）+ harness 语义 + CI 全链
 
 > 与上一批（v0.32）同为"收尾-加固-沉淀"阶段：不给新功能，只让回归更可信、更可定位。

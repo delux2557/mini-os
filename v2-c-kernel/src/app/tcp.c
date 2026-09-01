@@ -6,7 +6,8 @@
  *   上传:  MSG_DATA  (payload = 应用字节)
  *   回传:  MSG_DATA(下行) + 事件 MSG_OPENED/CLOSED/ERROR/TIMEOUT
  *   注销:  MSG_CLOSE (payload 空)                          -> 宿主关 TCP、回收会话表
- * MTU 硬墙：单包载荷（s + 数据）恒取保守 1472B（e1000 上限；SLIP 1600 被其涵盖），
+ * MTU 硬墙：单数据报（含 8B 会话头）上限 = TCP_MTU(1400)，与 netsock sendto/recvfrom
+ * 钳制一致（e1000 1472/SLIP 1600 链路 MTU 名目由 1400 钳制涵盖）；
  * 超限由 tcp_send 本地返回 -1（见 docs/tcp-mtu-fail.md §2：guest 报错误码，不走转发器）。
  * recv 为有超时上限的阻塞等待（sys_sleep tick 轮询），三态返回 >0/0/-1 互斥。
  */
@@ -16,10 +17,9 @@
 #include "tcp.h"
 #include "tcp_proto.h"
 
-#define TCP_MTU 1472            /* 硬墙：单包载荷（含 8B 会话头）上限；e1000 1472/slip 1600，取小者 */
 #define TCP_PROXY_IP   0x0A000202u   /* 10.0.2.2：宿主转发器所在（SLIRP 网关 / 串口对端） */
 #define TCP_PROXY_PORT 7778
-#define TCP_MAX_PAYLOAD (TCP_MTU - TCP_PHDR)   /* 应用数据单次上限 */
+#define TCP_MAX_PAYLOAD (TCP_MTU - TCP_PHDR)   /* 应用数据单次上限（=数据报 1400-8） */
 
 static tcp_conn_t conns[TCP_CONN_MAX];
 static int  tt_sock = -1;        /* 复用：唯一 UDP socket（懒创建） */
@@ -67,7 +67,7 @@ static void rx_push(tcp_conn_t *c, const uint8_t *data, uint32_t n) {
 /* 排空 UDP：把转发器回传的会话数据报按 session_id 路由进各连接对象（须在 recv 前泵取） */
 static void drain(void) {
     for (;;) {
-        uint8_t tmp[TCP_MTU];
+        uint8_t tmp[TCP_DGRAM_BUF];
         struct net_recv_iov ri;
         ri.src_ip = 0; ri.src_port = 0; ri._pad = 0;
         ri.buf = tmp; ri.max = sizeof(tmp);
