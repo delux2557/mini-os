@@ -85,5 +85,38 @@ int main(void) {
     CHECK(udp_parse(notip, 47, &sip, &sp, &dp, &pay, &plen) == 0);
     CHECK_EQ(sp, 1234u); CHECK_EQ(plen, 5u);
 
+    /* ---- v1.1 Step 1：UDP/IP 数据报级构建/解析（netif 包单位，无链路层头）---- */
+    /* 构建 IP 数据报（IPv4@0, UDP@20, 载荷@28） */
+    uint8_t ip[128];
+    uint32_t iplen = udp_build_ip(ip, src_ip, dst_ip, 1234, 7777, payload, 5);
+    CHECK_EQ(iplen, 33u);                        /* 20 + 8 + 5 */
+    CHECK_EQ((ip[0] >> 4), 4u);                  /* 版本 = IPv4 */
+    CHECK_EQ((ip[2] << 8) | ip[3], 33u);         /* IP 总长 */
+    CHECK_EQ(ip[9], NET_PROTO_UDP);
+    CHECK_EQ(ip_checksum(ip, 20), 0u);           /* IP 头校验和有效 */
+    CHECK_EQ((ip[20] << 8) | ip[21], 1234u);     /* UDP src port */
+    CHECK_EQ((ip[22] << 8) | ip[23], 7777u);     /* UDP dst port */
+    CHECK_EQ((ip[24] << 8) | ip[25], 13u);       /* UDP 长度 = 8+5 */
+    /* 与 eth 帧内嵌的 IP 数据报逐字节一致（udp_build_frame 复用 udp_build_ip） */
+    int same = 1;
+    for (uint32_t i = 0; i < iplen; i++) if (ip[i] != frame[14 + i]) same = 0;
+    CHECK(same);
+    /* 数据报级解析 round-trip */
+    CHECK_EQ(udp_parse_ip(ip, iplen, &sip, &sp, &dp, &pay, &plen), 0);
+    CHECK_EQ(sip, src_ip);
+    CHECK_EQ(sp, 1234u);
+    CHECK_EQ(dp, 7777u);
+    CHECK_EQ(plen, 5u);
+    CHECK(pay == ip + 28);
+    /* 拒绝路径：载荷篡改 -> UDP 校验和拒绝 */
+    for (uint32_t i = 0; i < iplen; i++) notip[i] = ip[i];
+    notip[28] ^= 0xFF;
+    CHECK(udp_parse_ip(notip, iplen, &sip, &sp, &dp, &pay, &plen) < 0);
+    /* 拒绝路径：过短 / 非 UDP 协议 */
+    CHECK(udp_parse_ip(ip, 13, &sip, &sp, &dp, &pay, &plen) < 0);
+    for (uint32_t i = 0; i < iplen; i++) notip[i] = ip[i];
+    notip[9] = 1;                                /* proto=ICMP */
+    CHECK(udp_parse_ip(notip, iplen, &sip, &sp, &dp, &pay, &plen) < 0);
+
     UTEST_SUMMARY("test_udp");
 }

@@ -52,6 +52,7 @@ run_test test_ip      "src/net/ip.c tests/test_ip.c"
 run_test test_udp     "src/net/ip.c src/net/udp.c tests/test_udp.c"
 run_test test_icmp    "src/net/icmp.c src/net/ip.c src/net/udp.c tests/test_icmp.c"
 run_test test_dhcp    "src/net/ip.c src/net/udp.c src/net/dhcp.c tests/test_dhcp.c"
+run_test test_netif   "src/net/netif.c tests/test_netif.c"
 
 # ---- 阶段二加固：宿主侧 fuzz（阶段建议 v0.29）----
 # 对纯逻辑解析模块（fs_walk/elf/arp/ip/udp/icmp/dhcp）注入随机字节/随机路径，

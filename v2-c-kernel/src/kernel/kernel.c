@@ -13,6 +13,7 @@
 #include "storage.h"
 #include "ata.h"
 #include "e1000.h"
+#include "netif.h"     /* v1.1 Step 1：netif 抽象层——协议/系统代码不再直调具体网卡 */
 #include "userprog_offsets.h"
 #include "version.h"   /* v0.30（评估 L-4）：版本单一来源，启动横幅取 MINI_OS_VERSION */
 #include <stdint.h>
@@ -83,7 +84,8 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
 
     ata_init();       /* v0.16：探测 IDE 真盘（无盘则纯内存盘） */
     storage_init();   /* v0.16：ramdisk + 真盘加载/格式化 + initramfs */
-    e1000_init();     /* v0.18：PCI + e1000 网卡（无网卡则跳过） */
+    e1000_netif_register(); /* v1.1 Step 1：注册 e1000 网卡适配层；netif_init_all 内触发 e1000_init */
+    netif_init_all();       /* 初始化并选定当前网卡（无网卡则跳过，netif_ready()=-1） */
     e1000_dhcp_run(); /* v0.25：DISCOVER->OFFER->REQUEST->ACK 动态取 IP/网关（失败回退静态） */
     e1000_selftest(); /* v0.18：ARP 请求/应答自检（验证 TX+RX） */
     e1000_udp_selftest(); /* v0.19：经 SLIRP 网关回环到宿主 UDP echo（PING/PONG） */
@@ -120,7 +122,7 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     /* v0.20：网络可用时启动用户态 UDP socket 演示（sockdemo 用 sys_net_* 系统调用
      * 与宿主 UDP echo 服务端到端回环；依赖 ARP 自检已学到网关 MAC）。
      * 无网卡（e1000_ready()=-1）则不生成，避免无网络环境下的噪音。 */
-    if (e1000_ready() == 0) {
+    if (netif_ready() == 0) {
         int sock_pid = usermode_spawn_elf("sockdemo", APP_LINK, 0);
         serial_printf("[boot] sockdemo pid=%d\n", sock_pid);
     }
