@@ -18,6 +18,7 @@
 #include "udp.h"
 #include "icmp.h"
 #include "dhcp.h"
+#include "slip.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,10 +119,26 @@ int main(void) {
             (void)dhcp_parse_reply(b, n, rng32(), &mt, &yi, &si, &rt, &ls);
             free(b);
         }
+
+        /* 6) SLIP 增量解码（v1.1 Step 2：任意字节流 + 随机分段喂入，转义/END/溢出路径） */
+        {
+            slip_rx_t r; slip_rx_init(&r);
+            uint32_t n; uint8_t *b = rand_buf(&n, 4096);
+            for (uint32_t base = 0; base < n;) {
+                uint32_t chunk = 1 + rng_range(8);           /* 随机一次喂入 1..8 字节 */
+                if (chunk > n - base) chunk = n - base;
+                for (uint32_t i = 0; i < chunk; i++) {
+                    int st = slip_rx_feed(&r, b[base + i]);
+                    if (st == 1 || st < 0) slip_rx_reset(&r); /* 帧就绪/协议错误：复位继收 */
+                }
+                base += chunk;
+            }
+            free(b);
+        }
     }
 
     printf("[fuzz_parse] %ld rounds (%ld parse calls) done, no crash (fixed seed, ASan clean)\n",
-           iters, iters * 6);
+           iters, iters * 7);
     free(fsmem);
     return 0;
 }
