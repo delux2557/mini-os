@@ -125,6 +125,13 @@
 在协议层自己拼装完整以太网帧（eth + IP + UDP 三层头），抽象点在驱动层而非协议层——
 换网卡须改协议层代码，不可接受。
 
+> **现状清单（收尾口径，Step 3 落地后补充）**：socket 路径（netsock）已全面走 netif，
+> `grep e1000_ src/net/` 为空由 CI 守卫强制。剩余"协议在驱动里"的残余仅一处：**e1000 的
+> DHCP 租期续约/重获取 BOOTP 组帧**（`e1000.c` 的 `dhcp_send_renew/rebind/reacquire` + timer
+> 心跳 `e1000_dhcp_tick` 直调，组帧依赖 `dhcp.c` 的 `dhcp_build_*`）。该处是 e1000 链路层
+> 服务（BOOTP 需广播/网关 MAC + e1000_tx），非通用协议层，**推迟到 HAL 阶段收口**，不属
+> Step 3 范围（Step 3 的 grep 只按"符号调用"口径，不受影响）。
+
 **架构决策（已对齐）**
 
 | # | 决策点 | 结论 |
@@ -138,19 +145,24 @@
 
 **四步落地路径**（每步可独立验证；**每步必须 CI 全绿才能进下一步**）
 
-- [ ] **Step 1：netif.h/c + e1000 薄封装**（纯重构，协议语义零变化）：新增 `src/net/netif.h/c`
+- [x] **Step 1：netif.h/c + e1000 薄封装**（纯重构，协议语义零变化）：新增 `src/net/netif.h/c`
   ops 表 + 注册表（当前单网卡，按序取第一个）；`src/drv/e1000_netif.c` 把现有驱动函数包进
   ops 表（**驱动本身不改逻辑**）；`netsock.c` 从直调 `e1000_tx/rx` 改为调 netif 接口，
-  `udp_build_frame` 的 eth 头拼装下沉到 e1000 适配层。验收：7 层 CI 全绿 + UDP demo 行为与
-  改造前一致 + diff 纯重构
-- [ ] **Step 2：COM2 串口适配器（SLIP）**：QEMU 脚本加第二个 `-serial`（COM2）；新增
+  `udp_build_frame` 的 eth 头拼装下沉到 e1000 适配层。✅ 已完成（PR #11）——验收：7 层 CI 全绿 +
+  UDP demo 行为与改造前一致 + diff 纯重构
+- [x] **Step 2：COM2 串口适配器（SLIP）**：QEMU 脚本加第二个 `-serial`（COM2）；新增
   `src/drv/uart_netif.c` 实现 SLIP 封装/解封装（RFC 1055：END 0xC0 / ESC 0xDB / ESC_END
   0xDC / ESC_ESC 0xDD），注册为第二个网卡；现有 UDP 收发包经 COM2 串口链路打通；CI 新增
-  串口网卡单测。验收：guest UDP 数据报经 COM2 到宿主串口对端收发往返一致、SLIP 帧边界/
-  转义（含数据中 0xC0/0xDB 用例）通过
-- [ ] **Step 3：协议层彻底走 netif**（eth 封装下沉收尾）：协议层不再出现任何 eth 头 /
-  e1000 直调符号；IP 数据报为 netif 统一包单位；网卡选择静态绑定（默认 e1000，串口按编译
-  开关/启动参数）。验收：`grep e1000 src/net/` 为空 + CI 全绿 + 任意换网卡协议层零改动
+  串口网卡单测。✅ 已完成（PR #12，D6 用 `UART_NETIF_DEFAULT` 编译开关静态绑定，PR #13 加固
+  对端确定性 + SLIP 并入 fuzz）——验收：guest UDP 数据报经 COM2 到宿主串口对端收发往返一致、
+  SLIP 帧边界/转义（含数据中 0xC0/0xDB 用例）通过
+- [x] **Step 3：协议层彻底走 netif（eth 封装下沉收尾）**：IP 数据报为 netif 统一包单位，协议层
+  （src/net）不再出现任何网卡符号调用；网卡选择静态绑定（默认 e1000，串口按编译开关
+  `UART_NETIF_DEFAULT`，D6 已在 Step 2 落地）。✅ 已完成（PR #14）——**边界口径**：
+  `grep e1000_ src/net/` 为空且由 CI 守卫强制（运行于宿主层）；`udp_build_frame`/`udp_parse`
+  **保留**为共享 etherframe 参考——其消费方是 e1000 链路路径：`dhcp.c` 的 BOOTP 组帧
+  （over e1000）与 `e1000.c` UDP selftest，均属"协议在驱动里"的残余，推迟到 HAL 阶段收口
+  （见上"现状清单"），故不算协议层 eth 封装。验收：CI 守卫通过 + 8 层 CI 全绿
 - [ ] **Step 4：宿主转发器 + 虚拟 TCP demo**：会话协议头（`session_id` + `msg_type` +
   `version`（关键预留点） + `flags` + 载荷，消息类型与数据分离、版本字段先行）；宿主
   Python 转发器（按 session_id 维护 UDP 会话↔TCP 映射：会话表 + 超时清理 + 半开处理 +

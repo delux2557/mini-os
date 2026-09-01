@@ -78,5 +78,17 @@ else
 fi
 
 echo
+# ---- v1.1 Step 3 验收：协议层(src/net)不得出现具体网卡符号调用 ----
+# 协议层只依赖 netif 接口；`e1000_*` 只应出现在 src/drv（适配层）与 src/net 里
+# 描述抽象层的注释中，不允许真实符号引用（换网卡协议层零改动的可执行证明）。
+if grep -rEn 'e1000_[a-zA-Z_]+' src/net/ >/dev/null 2>&1; then
+    echo "[FAIL] src/net/ 出现 e1000 符号调用（协议层不应依赖具体网卡）"
+    FAIL=$((FAIL + 1))
+else
+    echo "[OK]   src/net/ 无 e1000 直调（协议层经 netif 解耦，Step 3 验收成立）"
+    PASS=$((PASS + 1))
+fi
+
+echo
 echo "宿主测试汇总: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1
