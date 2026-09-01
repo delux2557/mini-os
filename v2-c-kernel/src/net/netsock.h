@@ -7,7 +7,8 @@
 #include <stdint.h>
 
 #define NET_SOCK_MAX 4      /* 内核 socket 表容量 */
-#define NET_RXMAX    512    /* 单个数据报载荷上限 */
+#define NET_RXMAX    2048    /* 单个数据报载荷上限（v1.1 Step 4 收尾：512->2048，
+                               使转发器分块的 ≤1400B 会话数据报不被 dispatch 静默截断） */
 #define NET_RXQ      4      /* 每 socket 待收队列深度 */
 
 typedef struct {

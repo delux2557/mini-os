@@ -179,6 +179,8 @@ class Proxy:
                 self._teardown(s); del self.sess[sid]
 
     # 从 select 就绪集中读 TCP 下行：非阻塞，绝不阻塞主循环（否则 chardev/udp 输入被饿死）
+    # B1 修复：单条 MSG_DATA 分块 ≤CHUNK（=netsock 每数据报钳制上限-8），否则 guest 收不下
+    CHUNK = 1392
     def _tcp_read(self, ready):
         for sid in list(self.sess):
             s = self.sess[sid]
@@ -187,7 +189,9 @@ class Proxy:
             except (BlockingIOError, socket.timeout): continue
             except OSError: data = b''
             if data:
-                s.touch(); self.reply(sid, MSG_DATA, data)      # 下行 DATA 回传 guest
+                s.touch()
+                for i in range(0, len(data), self.CHUNK):   # 分块下行，guest 环内重组
+                    self.reply(sid, MSG_DATA, data[i:i + self.CHUNK])
             else:
                 self.reply(sid, MSG_CLOSED); self._teardown(s)
                 self.sess.pop(sid, None)

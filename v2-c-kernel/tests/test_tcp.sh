@@ -11,13 +11,14 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 # v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失
-for c in qemu-system-i386 python3; do
+for c in qemu-system-i386 python3 curl; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
 
-HTTP_PORT=8080
-PROXY_UDP=7778
-SLIP_PORT=7902
+# E-1 环境病防护：端口可被环境覆盖，避开公网/沙箱高频撞车号
+HTTP_PORT="${HTTP_PORT:-8080}"
+PROXY_UDP="${PROXY_UDP:-7778}"
+SLIP_PORT="${SLIP_PORT:-7902}"
 FAIL=0
 RESTORED=0
 QPID=""; PROXY_PID=""; HTTP_PID=""
@@ -36,10 +37,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# 宿主 HTTP 服务：对 "/" 返回 2000 字节 >1KB 响应体，末尾固定 "TAIL"（供完整性断言）
 run_http_server() {
-    python3 -m http.server --bind 127.0.0.1 "$HTTP_PORT" >/dev/null 2>&1 &
+    python3 - "$HTTP_PORT" <<'PY' &
+import socket, sys
+port = int(sys.argv[1])
+body = b'X' * 1992 + b'TAIL'                     # 2000B 响应体，尾标记 TAIL
+resp = (b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() +
+        b'\r\nConnection: close\r\n\r\n' + body)
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', port)); s.listen(5)
+while True:
+    c, _ = s.accept()
+    try:
+        c.recv(2048); c.sendall(resp)
+    except OSError:
+        pass
+    c.close()
+PY
     HTTP_PID=$!
-    sleep 0.5
+    # E-1 存活自检：绑定失败静默进 /dev/null 会把断言红误判成代码病（violate v0.33 exit-2）
+    if ! curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HTTP_PORT/" 2>/dev/null | grep -q '200'; then
+        echo "[FAIL] HTTP 服务未就绪（端口被占或绑定失败）"; return 1
+    fi
+    echo "      http server pid=$HTTP_PID (self-check 200 OK)"
+    return 0
 }
 stop_http() { kill "$HTTP_PID" 2>/dev/null || true; HTTP_PID=""; }
 
@@ -88,9 +110,10 @@ check "tcp_open 返回 fd"          "\[http\] tcp_open -> fd="
 check "tcp_send 发出 GET"         "\[http\] tcp_send -> [0-9][0-9]*B"
 check "收到 HTTP 200 OK"          "\[http\] HTTP 200 OK"
 check "对端正常关闭 -> recv 0"    "\[http\] HTTP 200 OK closed=1"
+check "大响应尾部完整（>1KB + TAIL）" "\[http\] HTTP 200 OK .* len=[1-9][0-9][0-9][0-9]* tail=TAIL"
 check "连接被拒 -> recv -1（与 0 可区分）" "\[http\] refuse recv -> -1"
 check "虚拟 TCP demo 通过"        "\[http\] RESULT PASS"
-# 独立探针：转发器日志交叉验证 wire 语义
+# 独立探针：转发器日志交叉验证 wire 语义 + B1 分块（无单条下行 >1400）
 if grep -aq "MSG_OPEN sid=" build/tcp_proxy_a.log 2>/dev/null && \
    grep -aq "OPENED sid=" build/tcp_proxy_a.log 2>/dev/null; then
     echo "[ok]   转发器日志独立探针: 收到 MSG_OPEN 并回 OPENED（wire 双向成立）"
@@ -131,6 +154,7 @@ check_b() {
 }
 check_b "串口通道收到 HTTP 200 OK" "\[http\] HTTP 200 OK"
 check_b "串口通道对端正常关闭 -> 0" "\[http\] HTTP 200 OK closed=1"
+check_b "串口通道大响应尾部完整"  "\[http\] HTTP 200 OK .* len=[1-9][0-9][0-9][0-9]* tail=TAIL"
 check_b "串口通道虚拟 TCP demo 通过" "\[http\] RESULT PASS"
 if grep -aq "proxy connected to COM2 chardev" build/tcp_proxy_b.log 2>/dev/null; then
     echo "[ok]   转发器已连 COM2（SLIP 通道）"

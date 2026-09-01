@@ -56,15 +56,14 @@ void app_main(int argc, char **argv) {
     if (sn < 0) { ap("[http] HTTP send FAIL"); line(); return; }
 
     uint8_t rxb[512];
-    char resp[640]; uint32_t rlen = 0;
+    char resp[TCP_RXB + 1]; uint32_t rlen = 0;   /* 容纳 >1KB 响应供尾部完整性检查 */
     int rc, got_200 = 0, closed = 0;
-    for (int round = 0; round < 30 && !closed; round++) {
+    for (int round = 0; round < 60 && !closed; round++) {
         rc = tcp_recv(fd, rxb, sizeof(rxb));
         if (rc > 0) {
-            for (int i = 0; i < rc && rlen < sizeof(resp) - 1; i++) resp[rlen++] = (char)rxb[i];
+            for (int i = 0; i < rc && rlen < TCP_RXB; i++) resp[rlen++] = (char)rxb[i];
             resp[rlen] = 0;
             if (has_substr(resp, "200 OK")) got_200 = 1;
-            ap("[http] recv +"); apn((uint32_t)rc); ap("B"); line();
         } else if (rc == 0) {
             closed = 1;                     /* 对端正常关闭 */
         } else {
@@ -72,9 +71,15 @@ void app_main(int argc, char **argv) {
             break;
         }
     }
+    resp[rlen] = 0;
+    /* 尾部完整性（B1/B2/E2 一次性锁死）：转发器分块 + NET_RXMAX + 环都要保住尾字节 */
+    int tail_ok = 0;
+    if (rlen >= 4 && resp[rlen - 4] == 'T' && resp[rlen - 3] == 'A' &&
+        resp[rlen - 2] == 'I' && resp[rlen - 1] == 'L') tail_ok = 1;
     ap("[http] HTTP "); ap(got_200 ? "200 OK" : "NO-200"); ap(" closed=");
-    apn(closed ? 1u : 0u); line();
-    int ok1 = (got_200 && closed);
+    apn(closed ? 1u : 0u); ap(" len="); apn(rlen); ap(" tail=");
+    ap(tail_ok ? "TAIL" : "MISS"); line();
+    int ok1 = (got_200 && closed && tail_ok && rlen > 1024);
     tcp_close(fd);
 
     /* ---- 阶段2：失败路径（连接被拒 -> -1，与 0 可区分） ---- */
