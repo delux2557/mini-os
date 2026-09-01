@@ -13,8 +13,14 @@
 
 #define COM2       0x2F8u
 #define COM2_IER   (COM2 + 1u)
+#define COM2_FCR   (COM2 + 2u)
 #define COM2_LCR   (COM2 + 3u)
 #define COM2_LSR   (COM2 + 5u)
+/* FCR(0xC7) = 使能 FIFO + 重置收发 FIFO + RX 触发阈值 16 字节（对齐 serial.c COM1）。
+ * 根因修复（v1.1 收尾）：此前 COM2 未开 FIFO，16550 仅 1B RBR 缓冲，guest SLIP 轮询
+ * （tcp_recv drain 循环，每轮 ~10ms）窗口内到达字节数远超 1B -> 必然溢出丢帧，导致
+ * SLIP 大响应（分块下行）间歇性丢字节（Part B flaky）。开 16B FIFO 后窗口内暂存容量
+ * 提升，配合下行节拍不再丢。 */
 #define LSR_TX_RDY 0x20u   /* 发送保持寄存器空 */
 #define LSR_RX_RDY 0x01u   /* 接收数据就绪 */
 
@@ -34,6 +40,7 @@ static int uart_if_init(void) {
     outb(COM2_LCR, 0x03);
     if (inb(COM2_LCR) != 0x03) return -1;
     outb(COM2_IER, 0x00);            /* 关中断（纯轮询） */
+    outb(COM2_FCR, 0xC7);            /* 开 16B RX FIFO（对齐 serial.c COM1；FCR 须先于 LCR 波特率设置） */
     outb(COM2_LCR, 0x80);            /* DLAB */
     outb(COM2, 0x03);                /* 38400 波特率低字节 */
     outb(COM2 + 1u, 0x00);           /* 高字节 */
