@@ -60,7 +60,7 @@ run_test test_slip    "src/net/slip.c tests/test_slip.c"
 # 验证"畸形输入被拒绝而不崩溃"。ASan+UBSan 下跑，越界/未初始化读/下溢即失败；
 # 不用共享 CFLAGS 的 -fno-pie（fuzz 程序无 32 位地址假设）。迭代数 FUZZ_ITERS 可调。
 FUZZ_SRCS="src/fs/blockdev.c src/fs/fs.c src/kernel/elf.c src/net/netutil.c \
-           src/net/ip.c src/net/udp.c src/net/icmp.c src/net/dhcp.c tests/fuzz_parse.c"
+           src/net/ip.c src/net/udp.c src/net/icmp.c src/net/dhcp.c src/net/slip.c tests/fuzz_parse.c"
 FUZZ_CFLAGS="-Wall -Wextra -O1 -g -fsanitize=address,undefined \
              -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -Itests \
              -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast"
