@@ -32,8 +32,14 @@ cleanup() {
     [ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
     [ -n "$HTTP_PID" ] && kill "$HTTP_PID" 2>/dev/null || true
+    # v1.1 收尾2（CI 现场取证）：restore_kernel 的 make clean 会清空 build/，
+    # 先把两通道日志转存到 build-logs/（在 v2-c-kernel/ 下、不被 make clean 清除）
+    mkdir -p build-logs 2>/dev/null
+    [ -s build/tcp_a.log ]       && cp build/tcp_a.log       build-logs/ 2>/dev/null || true
+    [ -s build/tcp_b.log ]       && cp build/tcp_b.log       build-logs/ 2>/dev/null || true
+    [ -s build/tcp_proxy_a.log ] && cp build/tcp_proxy_a.log build-logs/ 2>/dev/null || true
+    [ -s build/tcp_proxy_b.log ] && cp build/tcp_proxy_b.log build-logs/ 2>/dev/null || true
     restore_kernel
-    rm -f build/tcp_a.log build/tcp_b.log build/tcp_proxy_a.log build/tcp_proxy_b.log
 }
 trap cleanup EXIT
 

@@ -190,8 +190,13 @@ class Proxy:
             except OSError: data = b''
             if data:
                 s.touch()
-                for i in range(0, len(data), self.CHUNK):   # 分块下行，guest 环内重组
-                    self.reply(sid, MSG_DATA, data[i:i + self.CHUNK])
+                # v1.1 收尾2：串口(SLIP)通道下行加保守节拍——cap=500 + 20ms 分块间隔，
+                # 让 guest UART 轮询(100Hz/16B FIFO)跟得上字节流；e1000 通道维持 1392 全速
+                cap = self.SLIP_CAP if getattr(self, 'mode_is_slip', False) else self.CHUNK
+                for i in range(0, len(data), cap):
+                    self.reply(sid, MSG_DATA, data[i:i + cap])
+                    if cap != self.CHUNK:
+                        time.sleep(0.02)
             else:
                 self.reply(sid, MSG_CLOSED); self._teardown(s)
                 self.sess.pop(sid, None)
@@ -201,6 +206,7 @@ class Proxy:
 
     #### 通道实现：调用方须提供 peer_send(addr, pkt) 与 poll 循环 ####
     def run_udp(self, port):
+        self.mode_is_slip = False
         udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         udp.bind(('127.0.0.1', port))
@@ -242,6 +248,7 @@ class Proxy:
             except OSError:
                 pass
         self.peer_send = peer_send
+        self.mode_is_slip = True; self.SLIP_CAP = 500
         dec = SlipDecoder()
         while True:
             rlist = [conn] + self._readable_tcps()
