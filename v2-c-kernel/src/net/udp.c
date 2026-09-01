@@ -40,6 +40,50 @@ static int udp_checksum_valid(uint32_t src_ip, uint32_t dst_ip,
     return chksum_fin(sum) == 0 ? 0 : -1;
 }
 
+/* 构建 **UDP/IP 数据报**（IPv4 @0，UDP @20，载荷 @28）——netif 抽象层的包单位（D1）。
+ * 链路层封装（以太网头/SLIP）由网卡适配层负责：e1000 适配器把此数据报加以太网头。
+ * 返回数据报总长（20+8+plen）。 */
+uint32_t udp_build_ip(uint8_t *ip, uint32_t src_ip, uint32_t dst_ip,
+                      uint16_t src_port, uint16_t dst_port,
+                      const uint8_t *payload, uint32_t plen) {
+    /* 载荷 @28，UDP 头 @20（校验和先 0） */
+    for (uint32_t i = 0; i < plen; i++) ip[28 + i] = payload[i];
+    put16(ip + 20, src_port);
+    put16(ip + 22, dst_port);
+    put16(ip + 24, (uint16_t)(8u + plen));
+    put16(ip + 26, 0);
+
+    /* UDP 校验和：伪头(12B) + UDP 头(8B) + 载荷 */
+    uint8_t pseudo[12];
+    put32(pseudo, src_ip);  put32(pseudo + 4, dst_ip);
+    pseudo[8] = 0;  pseudo[9] = NET_PROTO_UDP;
+    put16(pseudo + 10, (uint16_t)(8u + plen));
+    uint32_t sum = chksum_add(0, pseudo, 12);
+    sum = chksum_add(sum, ip + 20, 8);
+    sum = chksum_add(sum, ip + 28, plen);
+    uint16_t cs = chksum_fin(sum);
+    if (cs == 0) cs = 0xFFFFu;             /* RFC 768：算得 0 必须以全 1 发送（0 表示"未计算"） */
+    put16(ip + 26, cs);
+
+    /* IP 头 @0（最后填，含自身校验和） */
+    ip[0] = 0x45;
+    ip[1] = 0;
+    put16(ip + 2, (uint16_t)(20u + 8u + plen));
+    put16(ip + 4, 0);
+    put16(ip + 6, 0x4000u);
+    ip[8] = 64;
+    ip[9] = NET_PROTO_UDP;
+    put16(ip + 10, 0);
+    put32(ip + 12, src_ip);
+    put32(ip + 16, dst_ip);
+    put16(ip + 10, ip_checksum(ip, 20));
+
+    return 28u + plen;
+}
+
+/* 构建完整以太网帧（Ethernet+IPv4+UDP）——透传给宿主测试与旧调用方保留；
+ * eth 头由 udp_build_frame 负责（测试参考），净道生产路径（netsock）已改走
+ * udp_build_ip + netif（eth 头下沉到 e1000 适配层）。返回 14+28+plen。 */
 uint32_t udp_build_frame(uint8_t *frame, const uint8_t *dst_mac, const uint8_t *src_mac,
                          uint32_t src_ip, uint32_t dst_ip,
                          uint16_t src_port, uint16_t dst_port,
@@ -48,62 +92,31 @@ uint32_t udp_build_frame(uint8_t *frame, const uint8_t *dst_mac, const uint8_t *
     for (int i = 0; i < 6; i++) { frame[i] = dst_mac[i]; frame[6 + i] = src_mac[i]; }
     put16(frame + 12, NET_ETH_TYPE_IPV4);
 
-    /* 载荷 @42，UDP 头 @34（校验和先 0） */
-    for (uint32_t i = 0; i < plen; i++) frame[42 + i] = payload[i];
-    put16(frame + 34, src_port);
-    put16(frame + 36, dst_port);
-    put16(frame + 38, (uint16_t)(8u + plen));
-    put16(frame + 40, 0);
-
-    /* UDP 校验和：伪头(12B) + UDP 头(8B) + 载荷 */
-    uint8_t pseudo[12];
-    put32(pseudo, src_ip);  put32(pseudo + 4, dst_ip);
-    pseudo[8] = 0;  pseudo[9] = NET_PROTO_UDP;
-    put16(pseudo + 10, (uint16_t)(8u + plen));
-    uint32_t sum = chksum_add(0, pseudo, 12);
-    sum = chksum_add(sum, frame + 34, 8);
-    sum = chksum_add(sum, frame + 42, plen);
-    uint16_t cs = chksum_fin(sum);
-    if (cs == 0) cs = 0xFFFFu;             /* RFC 768：算得 0 必须以全 1 发送（0 表示"未计算"） */
-    put16(frame + 40, cs);
-
-    /* IP 头 @14（最后填，含自身校验和） */
-    frame[14] = 0x45;
-    frame[15] = 0;
-    put16(frame + 16, (uint16_t)(20u + 8u + plen));
-    put16(frame + 18, 0);
-    put16(frame + 20, 0x4000u);
-    frame[22] = 64;
-    frame[23] = NET_PROTO_UDP;
-    put16(frame + 24, 0);
-    put32(frame + 26, src_ip);
-    put32(frame + 30, dst_ip);
-    put16(frame + 24, ip_checksum(frame + 14, 20));
-
-    return 42u + plen;
+    /* IP 数据报 @14 */
+    uint32_t iplen = udp_build_ip(frame + 14, src_ip, dst_ip,
+                                  src_port, dst_port, payload, plen);
+    return 14u + iplen;
 }
 
-int udp_parse(const uint8_t *frame, uint32_t len, uint32_t *src_ip,
-              uint16_t *src_port, uint16_t *dst_port,
-              const uint8_t **payload, uint32_t *plen) {
-    if (len < 14) return -1;
-    if (get16(frame + 12) != NET_ETH_TYPE_IPV4) return -1;
-
+/* UDP/IP 数据报解析核心（IP 头 @0）：校验 IP 头 + UDP 校验和，输出源/目的端口与载荷。 */
+static int udp_parse_ip_core(const uint8_t *ip, uint32_t len, uint32_t *src_ip,
+                             uint16_t *src_port, uint16_t *dst_port,
+                             const uint8_t **payload, uint32_t *plen) {
     const uint8_t *udp = 0;
     uint32_t udp_len = 0;
     uint8_t proto = 0;
     uint32_t sip = 0;
-    if (ip_parse(frame + 14, len - 14, &sip, &proto, &udp, &udp_len) < 0) return -1;
+    if (ip_parse(ip, len, &sip, &proto, &udp, &udp_len) < 0) return -1;
     if (proto != NET_PROTO_UDP) return -1;
     if (udp_len < 8) return -1;
 
     uint32_t ulen = get16(udp + 4);
     if (ulen < 8 || ulen > udp_len) return -1;
 
-    /* v0.24 校验和错误路径：伪头用 IP 头里的 src/dst（dst 从 frame[30..33] 读，
+    /* v0.24 校验和错误路径：伪头用 IP 头里的 src/dst（dst 取 IP 头 [16..19]，
      * IP 头校验和已由 ip_parse 验证），损坏帧一律拒绝（netsock 分发据此丢包） */
-    uint32_t dip = ((uint32_t)frame[30] << 24) | ((uint32_t)frame[31] << 16) |
-                   ((uint32_t)frame[32] << 8) | frame[33];
+    uint32_t dip = ((uint32_t)ip[16] << 24) | ((uint32_t)ip[17] << 16) |
+                   ((uint32_t)ip[18] << 8) | ip[19];
     if (udp_checksum_valid(sip, dip, udp, ulen) != 0) return -1;
 
     if (src_ip) *src_ip = sip;
@@ -112,4 +125,20 @@ int udp_parse(const uint8_t *frame, uint32_t len, uint32_t *src_ip,
     if (payload) *payload = udp + 8;
     if (plen)    *plen = ulen - 8;
     return 0;
+}
+
+/* 解析 UDP/IP 数据报（IP 头 @0）——netif 收包路径用（适配层已剥链路层头）。 */
+int udp_parse_ip(const uint8_t *ip, uint32_t len, uint32_t *src_ip,
+                 uint16_t *src_port, uint16_t *dst_port,
+                 const uint8_t **payload, uint32_t *plen) {
+    return udp_parse_ip_core(ip, len, src_ip, src_port, dst_port, payload, plen);
+}
+
+/* 解析以太网+IPv4+UDP（含链路层头）——宿主测试与旧调用方保留。 */
+int udp_parse(const uint8_t *frame, uint32_t len, uint32_t *src_ip,
+              uint16_t *src_port, uint16_t *dst_port,
+              const uint8_t **payload, uint32_t *plen) {
+    if (len < 14) return -1;
+    if (get16(frame + 12) != NET_ETH_TYPE_IPV4) return -1;
+    return udp_parse_ip_core(frame + 14, len - 14, src_ip, src_port, dst_port, payload, plen);
 }
