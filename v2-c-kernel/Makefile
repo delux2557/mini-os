@@ -41,7 +41,7 @@ OBJS = $(addprefix $(BUILD)/, \
        boot.o kernel.o vga.o serial.o idt.o isr.o timer.o kb.o mem.o guard.o heap.o \
        brk.o usermode.o sched.o sched_policy.o sem.o msg.o blockdev.o fs.o elf.o userptr.o \
        pci.o e1000.o netutil.o ip.o udp.o icmp.o dhcp.o netsock.o \
-       e1000_netif.o netif.o \
+       e1000_netif.o netif.o slip.o uart_netif.o \
        ata.o storage.o userprog_bin.o) \
        $(APP_ELFOBJS) $(SHELL_ELFOBJ)
 # v0.27: cc500 编译器源码 blob（嵌入 initramfs 作 /cc500.c，供 guest 内自举）。
@@ -71,8 +71,13 @@ $(BUILD)/e1000.o: src/drv/e1000.c
 	$(CC) $(CFLAGS) $(DHCP_RENEW_DEF) -c $< -o $@
 
 # 依赖自动生成的头文件（userprog 各进程入口偏移）
+# v1.1 Step 2：UART_NETIF_DEFAULT 非空时，内核编译加 -D：netif 静态绑定串口网卡为当前
+#（tests/test_slip_net.sh 用 `make UART_NETIF_DEFAULT=1` 构建，跑完 `make clean && make` 恢复）。
+ifdef UART_NETIF_DEFAULT
+UART_NETIF_DEFAULT_DEF = -DUART_NETIF_DEFAULT
+endif
 $(BUILD)/kernel.o: src/kernel/kernel.c $(USERPROG_OFFS)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(UART_NETIF_DEFAULT_DEF) -c $< -o $@
 
 $(BUILD)/sched.o: src/kernel/sched.c $(USERPROG_OFFS)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -213,8 +218,12 @@ test-socket:
 test-cc500:
 	bash tests/test_cc500.sh
 
+# v1.1 Step 2 串口网卡回归：COM2 + SLIP（RFC 1055）UDP 数据报与宿主对端往返一致
+test-slip:
+	bash tests/test_slip_net.sh
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500
+test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip
 
 clean:
 	rm -rf build tests/build
@@ -222,4 +231,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip clean
