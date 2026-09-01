@@ -1,7 +1,7 @@
 /* mini-os/v2-c-kernel/src/net/netsock.h
  * 用户态 UDP socket（v0.20）：内核维护的 UDP socket 表 + 网卡轮询分发。
  * 极简、非阻塞：recvfrom 先"排空"网卡一次（把匹配本 socket 本地端口的 UDP
- * 数据报入队），再取队首返回；无包返回 0。与轮询式 e1000 驱动对齐。 */
+ * 数据报入队），再取队首返回；无包返回 0。对齐轮询式网卡（当前后端为 e1000）。 */
 #ifndef NET_NETSOCK_H
 #define NET_NETSOCK_H
 #include <stdint.h>
@@ -25,7 +25,7 @@ typedef struct {
 
 /* 打开 UDP socket：port=0 自动分配；返回 socket id（0..NET_SOCK_MAX-1）或 -1 */
 int  netsock_open(uint16_t port);
-/* 发送：构建完整以太网帧（经 SLIRP 网关 MAC 寻址）-> e1000_tx；成功返回 len */
+/* 发送：构建 UDP/IP 数据报 -> netif_tx；链路层封装由 netif 适配层负责；成功返回 len */
 int  netsock_send(int id, uint32_t dst_ip, uint16_t dst_port,
                   const uint8_t *data, uint32_t len);
 /* 接收：先排空网卡并分发，再取队首数据报拷入 buf（src_ip/src_port 出参）；
