@@ -136,6 +136,14 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
         int sock_pid = usermode_spawn_elf("sockdemo", APP_LINK, 0);
         serial_printf("[boot] sockdemo pid=%d\n", sock_pid);
     }
+#ifdef TCP_DEMO
+    /* v1.1 Step 4：TCP_DEMO 构建时自动 spawn 虚拟 TCP HTTP demo（宿主转发器 + HTTP 服务
+     * 由 tests/test_tcp.sh 提供）。不依赖网卡类型：e1000 走 SLIRP/UDP，串口走 SLIP/IP。 */
+    if (netif_ready() == 0) {
+        int tcp_pid = usermode_spawn_elf("httpdemo", APP_LINK, 0);
+        serial_printf("[boot] httpdemo pid=%d\n", tcp_pid);
+    }
+#endif
 
     /* 切入第一个就绪进程（不返回）；中断由 iret 的 eflags 开启 */
     sched_start();
