@@ -909,3 +909,5 @@
 | OBS-002 | ~~`pcb_t::fork_frames[24]` 硬编码 24 帧（96KB）限制大进程 fork~~ | ✅ 已修复（v0.30 BUG-035）：改为 kmalloc 动态数组，`sched_fork` 按需分配、退出 kfree |
 | OBS-003<br>（=评审残留） | netsock send/recv 无进程归属（`netsock_sendto`/`recvfrom` 不校验调用者是否为该 socket 的打开者） | 现设计语义：单用户教学 OS 将网络 socket 视为进程共享资源。close 已做归属隔离（BUG-038），send/recv 保持共享；威胁模型声明之，需强化时再列缺陷 |
 | OBS-004<br>（=F-6） | `writefile` 整行 128B 截断（shell/kb 行缓冲容量）——超长源码被截断 | F-3 修复前是未闭合字符串崩溃引信；F-3 修复后仅剩教学限制（单行源码 ≤128B，大程序用 ccrun 多次或逐段写）。限速不修，记录之 |
+| OBS-005<br>（压测 2026-09-01） | `qemu-i386` 直跑 cc500 编译产物 ELF 退不出真实退出码（产物假设 mini-os 整机 int 0x80 契约，无内核支持）——`int main(){int a;a=1+2;return a;}` 宿主直跑一律返 1，一度误报为"变量返回算错" | **语义验证必须走整机 ccboot 内核 ccrun**，宿主仅可信"编译 rc 0/1"（畸形 fuzz 3000 例即只测编译阶段）。整机证实 `a=1+2;return a` 实返 3，算法无误，非缺陷 |
+| OBS-006<br>（压测 2026-09-01） | ccrun 判定 `code==0 ? PASS : FAIL`（[shell.c](v2-c-kernel/src/app/shell.c) L473 非 0 一律 FAIL，`main{return 0}` 视为成功） | 验证"某个正确的非零值"不能靠 `return 该值`（必被标 FAIL）；应程序内部 `if(x==期望)return 0;return 1;`。已据此把 test-cc500 guest 层扩为 `a=1+2;a==3` 整机真值断言，顺带覆盖 `==`（此前 guest 层只测 `<`）

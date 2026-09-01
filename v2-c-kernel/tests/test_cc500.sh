@@ -103,6 +103,14 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tlt.c /tlt.elf"
     gwait "guest < 编译" "cc500: compiled OK" 60
     gwait "guest < 运行 exit0" "'/tlt.elf' exited code=0 PASS" 90
+    # 变量/四则/== 语义（整机真值）：宿主无法运行 cc500 产物（qemu-i386 无内核给不了
+    # 真实退出码），须靠整机 ccboot 内核 ccrun。注意 ccrun 仅认 code==0 为 PASS（shell.c
+    # `code==0 ? PASS : FAIL`），故验证"a=1+2 后 a==3"要用内部 if 分支决定 return 0/1：
+    # 加法/变量/== 任一错 -> return 1 -> code=1 FAIL。这也顺带覆盖 ==（已有 t_lt 覆盖 < ）。
+    gsend 'writefile /sv.c int main(){int a;a=1+2;if(a==3)return 0;return 1;}'
+    gsend "ccrun /sv.c /sv.elf"
+    gwait "guest 变量四则编译" "cc500: compiled OK" 60
+    gwait "guest a=1+2==3 return 0" "'/sv.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
