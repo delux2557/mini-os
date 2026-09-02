@@ -18,8 +18,19 @@
 #define TCP_MTU      1400     /* 发送硬墙：单数据报（含 8B 会话头）上限，与 netsock sendto
                                 钳制一致（见 tcp-mtu-fail v1.1 收尾）；应用数据≤TCP_MAX_PAYLOAD */
 #define TCP_MAX_PAYLOAD (TCP_MTU - TCP_PHDR)   /* 单报应用数据上限（单条上行载荷副本大小） */
-#define TCP_RECV_TICKS 500    /* recv 阻塞超时上限（100Hz * 5s = 500 tick） */
-#define TCP_TX_TICKS   250    /* 上行重传间隔（tick，100Hz*2.5s=250）：须 ≥ 慢通道单报回环 */
+#define TCP_RECV_TICKS 500    /* recv/发送让步阻塞超时上限（100Hz * 5s = 500 tick） */
+#define TCP_TX_TICKS   250    /* 上行超时重传间隔（tick，100Hz*2.5s=250）：须 ≥ 慢通道单报回环 */
+#define TCP_TXWIN      8      /* v1.3 上行滑动窗口：最多 W 个数据报同时在途（未确认） */
+
+/* 运行期发送槽：保存一个已发送、尚未被累计 ACK 确收的上行数据报载荷副本（重传依据）。
+   seq = 该载荷的上行序列号；len = 载荷字节数；tick = 最近一次发送/重传时刻。 */
+typedef struct {
+    uint16_t seq;
+    uint16_t len;
+    uint32_t tick;
+    uint8_t  busy;            /* 槽在途（seq ∈ [tx_base, tx_seq)） */
+    uint8_t  data[TCP_MAX_PAYLOAD];
+} tx_slot_t;
 
 /* 连接对象（docs/tcp-thin-api.md §2；本实现为用户态 per-process，故不含内核 pid/内核栈缓冲） */
 typedef enum {
@@ -34,12 +45,14 @@ typedef struct {
     uint16_t     dst_port;
     uint8_t      rxb[TCP_RXB];  uint16_t rx_head, rx_tail;
     uint16_t     rx_next;       /* v1.2 可靠下行：下一个期望的数据序列号 seq（stop-and-wait） */
-    /* v1.2 可靠上行（stop-and-wait）：guest 是发送方，保留在途载荷副本 + seq + 上一发送时刻，
-       tcp_send 阻塞等 host→guest 的 MSG_ACK（下一期望上行 seq）以推进；超时重发在途载荷。 */
-    uint16_t     tx_seq;        /* 下一个要分配的上行 DATA 序列号 */
-    uint8_t      tx_inflight[TCP_MAX_PAYLOAD]; /* tcp.h 需提供该宏；在途上行载荷副本（等 ACK） */
-    uint16_t     tx_inflight_len;   /* 在途载荷字节数；0 = 空闲 */
-    uint32_t     tx_inflight_t;     /* 在途载荷的发送 tick（重传判定基准） */
+    /* v1.3 上行滑动窗口：guest 是发送方，保留至多 TCP_TXWIN 个在途载荷副本（各带独立 seq），
+       发满窗口即让步等累计 ACK（host→guest MSG_ACK = 下一期望上行 seq）推进 tx_base；
+       最老未确认槽每 TCP_TX_TICKS 超时重传（幂等，转发器遇重复/乱序 seq 丢弃并回累计 ACK）。
+       in-flight = tx_seq - tx_base（seq 单调，滑动窗口内恒 ≤ TCP_TXWIN）。 */
+    uint16_t     tx_seq;        /* 下一个要分配的上行 DATA 序列号（分配递增） */
+    uint16_t     tx_base;       /* 最老未确认 seq（= 已累计确认的边界；ACK 下一期望即推进到此） */
+    uint32_t     tx_pending_start; /* 本连接最后入窗时刻（tcp_send 让步等待的防挂死基准） */
+    tx_slot_t    tx_win[TCP_TXWIN]; /* 发送窗口（环，槽下标 = seq % TCP_TXWIN） */
     /* 状态事件队列（DATA 直接进 rxb，不占此队；状态事件绝不丢弃，见 spec §3） */
     struct { uint8_t type; } ev[TCP_EVQ];
     uint16_t     ev_head, ev_tail;

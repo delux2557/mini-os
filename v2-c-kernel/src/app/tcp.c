@@ -56,6 +56,35 @@ static tcp_conn_t *conn_by_session(uint32_t sid) {
     return 0;
 }
 
+/* === v1.3 上行滑动窗口：发送侧状态辅助（guest=发送方） === */
+
+/* 在途（未确认）包数 = tx_seq - tx_base。seq 单调递增且窗口内恒 ≤ TCP_TXWIN，差值取模 2^16 不溢出。 */
+static uint16_t tx_inflight(tcp_conn_t *c) {
+    return (uint16_t)(c->tx_seq - c->tx_base);
+}
+
+/* 超时重传"最老未确认槽"（头部）。每 TCP_TX_TICKS 只重发一个在途包并复位其 tick——
+   SR 风格、最温和；幂等（转发器遇重复 seq 丢弃并回累计 ACK，接收侧自愈）。 */
+static void tx_retrans(tcp_conn_t *c) {
+    if (c->state != TCP_OPEN || tx_inflight(c) == 0) return;
+    tx_slot_t *s = &c->tx_win[c->tx_base % TCP_TXWIN];
+    if (s->busy && sys_getticks() - s->tick >= TCP_TX_TICKS) {
+        sendpkt_f(c->session_id, MSG_DATA, c->tx_base, s->data, s->len);
+        s->tick = sys_getticks();
+    }
+}
+
+/* 累计 ACK 推进：next = 转发器"下一期望上行 seq" → 所有 seq < next 均已确收。
+   仅当 next 严格落在 (tx_base, tx_seq] 内才推进（重复/越界 ACK 忽略），并清被确收槽 busy。 */
+static void tx_ack(tcp_conn_t *c, uint16_t next) {
+    uint16_t count = tx_inflight(c);
+    uint16_t adv = (uint16_t)(next - c->tx_base);
+    if (adv == 0 || adv > count) return;           /* 重复 ACK / 超出窗口：忽略 */
+    for (uint16_t i = 0; i < adv; i++)
+        c->tx_win[(c->tx_base + i) % TCP_TXWIN].busy = 0;
+    c->tx_base = next;
+}
+
 /* 状态事件入队（spec §3：状态事件绝不丢弃；队满覆盖最旧，latest wins） */
 static void ev_push(tcp_conn_t *c, uint8_t type) {
     c->ev[c->ev_tail].type = type;
@@ -108,11 +137,10 @@ static void drain(void) {
     else if (mt == MSG_CLOSED)  { c->state = TCP_CLOSED; ev_push(c, mt); }
     else if (mt == MSG_ERROR)   { c->state = TCP_ERROR;  ev_push(c, mt); }
     else if (mt == MSG_TIMEOUT) { c->state = TCP_ERROR;  ev_push(c, mt); }
-    else if (mt == MSG_ACK)     { /* host→guest 的 MSG_ACK = 上行确认（payload 2B 下一期望上行 seq） */
-        if (n >= TCP_PHDR + 2 && c->tx_inflight_len != 0) {
+    else if (mt == MSG_ACK)     { /* host→guest 的 MSG_ACK = 上行累计确认（payload 2B 下一期望上行 seq） */
+        if (n >= TCP_PHDR + 2) {
             uint16_t next = (uint16_t)(((uint16_t)tmp[TCP_PHDR] << 8) | tmp[TCP_PHDR + 1]);
-            if (next == (uint16_t)(c->tx_seq + 1))  /* 本在途报已确收：清空在途，允许发下一报 */
-                c->tx_inflight_len = 0;
+            tx_ack(c, next);     /* v1.3：累计推进 tx_base，清被确收槽 */
         }
     }
     /* MSG_OPEN/CLOSE 是 guest→host 方向，guest 收到即方向非法：忽略 */
@@ -135,7 +163,8 @@ int tcp_open(uint32_t ip, uint16_t port) {
     c->dst_ip = ip; c->dst_port = port;
     c->rx_head = c->rx_tail = c->ev_head = c->ev_tail = 0;
     c->rx_next = 0;                  /* v1.2 可靠下行：从 seq 0 开始期待 */
-    c->tx_seq = 0; c->tx_inflight_len = 0; c->tx_inflight_t = 0;  /* 上行可靠从 seq 0 起 */
+    c->tx_seq = 0; c->tx_base = 0; c->tx_pending_start = 0;  /* v1.3 上行滑动窗口：从 seq 0 起，窗口空 */
+    /* tx_win 槽为静态零初始化（busy=0=空闲），连接复用前无需逐槽清零 */
     c->ev_overflow = 0;
     /* MSG_OPEN：把目标地址一次性带给转发器（dst_ip + dst_port，大端） */
     uint8_t pay[6];
@@ -151,29 +180,26 @@ int tcp_send(int fd, const uint8_t *d, uint32_t n) {
     if (TCP_PHDR + n > TCP_MTU) return -1;            /* MTU 硬墙：本地早返（docs §2） */
     tcp_conn_t *c = &conns[fd];
     if (c->state != TCP_OPEN) return -1;              /* 未建立/已关/失败：本地立即拒绝 */
-    /* === v1.2 可靠上行（stop-and-wait）：保存在途副本、带上行 seq 发送，阻塞等 host→guest
-     * ACK 以推进；ACK 超时按 TCP_TX_TICKS 重发在途载荷（幂等，转发器遇重复 seq 去重视降）。 === */
-    for (uint32_t i = 0; i < n; i++) c->tx_inflight[i] = d[i];   /* 副本（重传依据） */
-    c->tx_inflight_len = (uint16_t)n;
-    uint16_t s = c->tx_seq;                        /* 本数据块的 seq（in-flight 期间不变，重传复用） */
+    /* === v1.3 上行滑动窗口：载荷写入发送窗口（分配上行 seq），有窗位即刻发出并返回；窗口满则
+     * 让步等累计 ACK 推进 tx_base（期间 drain 收 ACK + 每 tick 驱动最老槽超时重传）。
+     * 返回 n 即载荷已入窗并发出——可靠性由转发器累计确认 + 本函数让步期重传保证，调用方无需再等确收。
+     * 大文件上传=循环 tcp_send：窗口带流水线，按扇出去即可无需逐包等 ACK。 === */
     uint32_t start = sys_getticks();
     for (;;) {
-        if (c->tx_inflight_len != 0) {             /* 在途未清 → 发（首次/重传），并记发送时刻 */
-            if (sendpkt_f(c->session_id, MSG_DATA, s, c->tx_inflight, c->tx_inflight_len) < 0)
-                return -1;
-            c->tx_inflight_t = sys_getticks();
-        }
-        /* drain 收单报：收到 host ACK 且 next==s+1 → tx_inflight_len 被清 0 */
-        for (;;) {
-            drain();
-            if (c->tx_inflight_len == 0) { c->tx_seq = (uint16_t)(s + 1); return (int)n; }
-            if (c->state == TCP_CLOSED || c->state == TCP_ERROR) return -1;
-            if (sys_getticks() - start >= TCP_RECV_TICKS) return -1;  /* 超时上限：失败 */
-            uint32_t now = sys_getticks();
-            if (now - c->tx_inflight_t >= TCP_TX_TICKS) break;  /* 到重传间隔：跳出重发 */
-            sys_sleep(1);
-        }
+        drain();                                      /* 收上行 ACK 推进窗口 */
+        if (c->state == TCP_CLOSED || c->state == TCP_ERROR) return -1;
+        if (sys_getticks() - start >= TCP_RECV_TICKS) return -1;  /* 让步等待防挂死上限 */
+        tx_retrans(c);                                /* 每 tick 驱动最老槽超时重传 */
+        if (tx_inflight(c) >= TCP_TXWIN) { sys_sleep(1); continue; } /* 窗口满：让出等 ACK 腾位 */
+        break;
     }
+    tx_slot_t *s = &c->tx_win[c->tx_seq % TCP_TXWIN];
+    for (uint32_t i = 0; i < n; i++) s->data[i] = d[i];
+    s->len = (uint16_t)n; s->seq = c->tx_seq;
+    s->busy = 1; s->tick = sys_getticks();
+    if (sendpkt_f(c->session_id, MSG_DATA, c->tx_seq, s->data, s->len) < 0) return -1;
+    c->tx_seq = (uint16_t)(c->tx_seq + 1);
+    return (int)n;
 }
 
 int tcp_recv(int fd, uint8_t *buf, uint32_t max) {
@@ -201,6 +227,7 @@ int tcp_recv(int fd, uint8_t *buf, uint32_t max) {
         }
         /* 3) 超时上限防挂死 */
         if (sys_getticks() - start >= TCP_RECV_TICKS) return -1;
+        tx_retrans(c);        /* v1.3：app 转入收读阶段仍驱动在途上行包超时重传 */
         sys_sleep(1);
     }
 }
@@ -221,6 +248,7 @@ int tcp_wait_open(int fd) {
             if (t == MSG_ERROR || t == MSG_TIMEOUT) return -1;
         }
         if (sys_getticks() - start >= TCP_RECV_TICKS) return -1;
+        tx_retrans(c);        /* v1.3：等待 OPENED 期间也驱动在途上行包重传 */
         sys_sleep(1);
     }
 }
