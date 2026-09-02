@@ -122,8 +122,9 @@ class Session:
         self.inflight_t = 0.0
         self.eof = False                    # host TCP 已 EOF（pending 发完后可关）
         self.finished = False               # 已发 MSG_CLOSED
-        # ---- 可靠上行（stop-and-wait，v1.2 上行可靠）状态 ----
-        self.up_next = 0                    # 下一个期望的上行 DATA 序列号（guest→host）
+        # ---- 可靠上行（v1.3 滑动窗口，guest→host）状态 ----
+        self.up_next = 0                    # 下一个期望的上行 DATA 序列号（累计确认边界）
+        self.up_buf = {}                    # 窗口内乱序包暂存 {seq: payload}（凑齐连续后按序转发）
     def touch(self): self.last = time.monotonic()
 
 class Proxy:
@@ -132,6 +133,7 @@ class Proxy:
     # 实测 60ms 卡死）；e1000 回环 <10ms，正常无丢不触发重传，2s 只在真丢时用于恢复。
     RETX_MS = 2.0
     CHUNK   = 1392          # 单数据报载荷上限（= netsock 每数据报钳制上限-8）
+    UP_WIN  = 8             # v1.3 上行滑动窗口：接收侧允许在途/乱序暂存的包数上限（= guest TCP_TXWIN）
 
     def __init__(self, logfile=None, idle=30.0, timeout=8.0):
         self.sess = {}
@@ -192,14 +194,23 @@ class Proxy:
             self.sess[sid] = sess
             t = threading.Thread(target=self._connect, args=(sess,), daemon=True)
             t.start()
-        elif mtype == MSG_DATA:        # guest→host 上传：可靠上行（stop-and-wait，v1.2）
+        elif mtype == MSG_DATA:        # guest→host 上传：可靠上行（v1.3 滑动窗口接收）
             if s and s.state == 'OPEN' and s.tcp:
-                if seq == s.up_next:            # 顺序包：转发到真 TCP，回 ACK
+                if seq == s.up_next:            # 期待的连续包：转发到真 TCP，推进并按序排空暂存
                     try: s.tcp.sendall(payload)
                     except OSError: self._teardown(s)
                     s.up_next = (s.up_next + 1) & 0xFFFF
+                    while s.up_next in s.up_buf:      # 排空已凑齐的连续乱序包
+                        p = s.up_buf.pop(s.up_next)
+                        try: s.tcp.sendall(p)
+                        except OSError:
+                            self._teardown(s); break
+                        s.up_next = (s.up_next + 1) & 0xFFFF
                     self._up_ack(s)
-                else:                           # 重发/乱序：丢弃载荷，重发 ACK 让 guest 前进
+                elif ((seq - s.up_next) & 0xFFFF) < self.UP_WIN:  # 窗口内乱序/重复：暂存凑齐
+                    s.up_buf[seq] = payload           # 重复 seq 覆盖同值，无重复投递
+                    self._up_ack(s)                   # 显式累计 ACK（仍=up_next），让 guest 知道已到
+                else:                           # 超窗：丢弃载荷，仅重发 ACK（防发送侧推进过头）
                     self._up_ack(s)
         elif mtype == MSG_ACK:         # guest→host 累计 ACK：payload= 下一期望下行 seq(2BE)
             if s and len(payload) >= 2 and s.inflight is not None:
@@ -213,7 +224,8 @@ class Proxy:
             if s: self._teardown(s)
             self.sess.pop(sid, None)
 
-    # 可靠上行：向 guest 回累计 ACK（payload = 下一期望上行 seq，2BE）。
+    # 可靠上行：向 guest 回"累计 ACK"（payload = 下一个期望上行 seq，2BE）。
+    # 窗口末位到齐即 cumul 推进 up_next；乱序暂存时仍回当前 up_next（未推进）。
     # MSG_ACK 按方向双向复用：host→guest 的 MSG_ACK 语义即"上行确认"。
     def _up_ack(self, s):
         p = (s.up_next >> 8) & 0xFF, s.up_next & 0xFF

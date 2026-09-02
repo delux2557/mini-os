@@ -3,6 +3,60 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.3] - 2026-09-02 · 虚拟 TCP 上行滑动窗口（stop-and-wait→N 在途，吞吐 W/RTT）
+
+> 上行停-等升级为**滑动窗口**：guest `tcp_send` 把载荷写入发送窗口（`TCP_TXWIN=8` 槽×独立 seq），
+> 窗位有空即发、返回 `n` 即已入窗发往转发器；窗口满才让步等累计 ACK（host→guest `MSG_ACK` 的
+> payload = 下一期望上行 seq，**累计确认**一次性推进 `tx_base` 多个槽位），最老未确认槽每
+> `TCP_TX_TICKS` 超时重传。转发器为滑动窗口接收端（乱序包暂存 `up_buf` 凑齐连续后按序投
+> `tcp.sendall`、回累计 ACK；重复 seq 覆盖不重投）。`MSG_ACK` 语义从"单报确认"提升为"累计确认"，
+> 仍双向复用，**不新增消息类型、不改协议头结构**。吞吐从"1/RTT"提到"W/RTT"。
+
+**Changed**（guest 薄包装，`src/app/tcp.h`）
+
+* **tx_conn_t 发送侧重构**：移除 `tx_inflight`/`tx_inflight_len`/`tx_inflight_t`（停-等单槽），
+  新增 `tx_base`（累计 ACK 边界，滑窗最老未确认 seq）、`tx_pending_start`、`tx_win[TCP_TXWIN]`
+  （发送窗口槽数组，各带 seq/len/tick/busy/data）；`tx_seq` 保留为递增分配器。
+* **新增 `tx_slot_t` 结构体**：承载单槽 seq/len/tick/busy/data，`tx_win` 下标 = `seq % TCP_TXWIN`。
+* **`TCP_TXWIN` 宏**（`src/app/tcp.h`）新增：`#define TCP_TXWIN 8`，上行发送窗口最大在途包数。
+
+**Changed**（guest 薄包装，`src/app/tcp.c`）
+
+* **`tcp_send` 重写**：v1.3 起为"入窗即发出"的滑窗可靠发送——载荷写入 `tx_win[tx_seq%TCP_TXWIN]`，
+  窗位有空即发、返回 `n` 即已入窗发往转发器；窗口满则阻塞让步等累计 ACK 推进 `tx_base` 后继续。
+* **新增 `tx_inflight` 辅助函数**：返回 `tx_seq - tx_base`（在途未确认包数）。
+* **新增 `tx_retrans` 辅助函数**：最老未确认槽（`tx_win[tx_base % TCP_TXWIN]`）每 `TCP_TX_TICKS`
+  超时重传（SR 风格、幂等，转发器遇重复 seq 丢弃并回累计 ACK 自愈）。
+* **新增 `tx_ack` 辅助函数**：累计 ACK 推进——`next` 落在 `(tx_base, tx_seq]` 内时，清被确收槽
+  busy、`tx_base = next`；重复/越界 ACK 忽略。
+* **`drain` 中 MSG_ACK 处理**：从"单报确认比较"升级为调用 `tx_ack(c, next)`（累计推进）。
+* **`tcp_recv`/`tcp_wait_open` 循环**：加 `tx_retrans(c)` 调用，确保 app 转入收读阶段仍在途包
+  仍可超时重传。
+* **`tcp_open` 初始化**：`tx_inflight_len`/`tx_inflight_t` 改为 `tx_base=0`、`tx_pending_start=0`。
+
+**Changed**（宿主转发器，`tests/tcp_proxy.py`）
+
+* **Session 上行状态**：`up_next` 保持为累计确认边界；新增 `up_buf = {}`（乱序包暂存 dict）。
+* **Proxy 类**：新增 `UP_WIN = 8` 常量（与 `TCP_TXWIN` 对齐）。
+* **`MSG_DATA` 上行处理**（`handle_msg`）：seq == `up_next` → 连续，转发到真 TCP、`up_next++`、
+  排空 `up_buf` 中已凑齐的连续包，回累计 ACK；seq 在窗口内乱序 → 暂存 `up_buf`，仍回当前
+  `up_next`（未推进）；超窗 → 丢弃，仅回 ACK。
+* **`_up_ack` 注释**：更新为"累计 ACK"语义。
+
+**Added**（Tests）
+
+* **`tests/test_upstream_window.py`**：宿主侧滑动窗口确定性单测——W=8 在序流水线齐发→累计 ACK 到 8；
+  乱序 seq=9 被暂存 ACK 保持；补 seq=8 后累计跳到 W+2；重复 seq 不重新投递。验证：转发器乱序缓冲、
+  累计 ACK 推进、去重均正确，上游 TCP 收到每块恰好一次按序。
+
+**Engineering / Docs**
+
+* `tcp-session-proto.md`：头部注记 v1.3 + §6 重写（6.1 下行可靠停-保持不变、6.2 上行滑动窗口、
+  6.3 下行滑动窗口候选）；`MSG_ACK` 语义从"单报确认"提升为"累计确认"。
+* `tcp-thin-api.md`：v1.3 注记 + tcp_send 语义表更新为"入窗即发出"的滑窗可靠发送。
+* `roadmap.md`：「上行滑动窗口」从候选标记为 **✅ v1.3 已落地**，新增"下行滑动窗口（候选）"。
+* `changelog.md`：本条目。
+
 ## \[v1.2] - 2026-09-02 · 虚拟 TCP 下行可靠（stop-and-wait）+ 大文件下载 demo + 路线图文档化
 
 > 语义边界与演进方向写入 roadmap：下行可靠 + **上行可靠**停-等（v1.2 均落地）是"薄→厚"第一级
