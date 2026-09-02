@@ -244,8 +244,20 @@ test-slip:
 test-tcp:
 	bash tests/test_tcp.sh
 
+# record/replay 地基 P1：两次 -icount 冷启动串口日志逐字节 diff（确定性验收，非网络层）
+test-det:
+	bash tests/test_determinism.sh
+
+# record/replay 地基 P2：transcript 固化——输入/输出固化 + 失败自动归档 + 复现性雏形
+test-tr:
+	bash tests/test_transcript.sh
+
+# record/replay 地基 P3：回放差分——消费 transcript 两次重放差分一致 + 已修 bug 触发链路
+test-rp:
+	bash tests/test_replay.sh
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp
+test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp
 
 clean:
 	rm -rf build tests/build
@@ -253,4 +265,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp clean
