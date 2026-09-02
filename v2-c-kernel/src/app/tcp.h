@@ -30,6 +30,7 @@ typedef struct {
     uint32_t     dst_ip;        /* open 目标（仅薄包装侧语义记录；wire 只在 MSG_OPEN 传一次） */
     uint16_t     dst_port;
     uint8_t      rxb[TCP_RXB];  uint16_t rx_head, rx_tail;
+    uint16_t     rx_next;       /* v1.2 可靠下行：下一个期望的数据序列号 seq（stop-and-wait） */
     /* 状态事件队列（DATA 直接进 rxb，不占此队；状态事件绝不丢弃，见 spec §3） */
     struct { uint8_t type; } ev[TCP_EVQ];
     uint16_t     ev_head, ev_tail;

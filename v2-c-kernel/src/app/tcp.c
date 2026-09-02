@@ -37,6 +37,14 @@ static int sendpkt(uint32_t session_id, uint8_t type, const uint8_t *pay, uint32
         .buf = pkt, .len = TCP_PHDR + plen });
 }
 
+/* v1.2 可靠下行：向转发器回送累计 ACK（payload = 下一个期望 seq，2BE）。 */
+static int send_ack(tcp_conn_t *c) {
+    uint8_t pay[2];
+    pay[0] = (uint8_t)(c->rx_next >> 8);
+    pay[1] = (uint8_t)c->rx_next;
+    return sendpkt(c->session_id, MSG_ACK, pay, 2);
+}
+
 static tcp_conn_t *conn_by_session(uint32_t sid) {
     for (int i = 0; i < TCP_CONN_MAX; i++)
         if (conns[i].used && conns[i].session_id == sid) return &conns[i];
@@ -66,7 +74,10 @@ static void rx_push(tcp_conn_t *c, const uint8_t *data, uint32_t n) {
 
 /* 泵取 UDP：从转发器回传队列只取"一个"会话数据报并路由进对应连接对象。
  * v1.2 BUG-047：原 for(;;) 全量 pump 把整段响应一次性挤进 rxb 环，超过 TCP_RXB 即丢尾；
- * 改为单报泵取，令 tcp_recv 每轮 drain 后立即排空，环永不涨破 TCP_RXB。 */
+ * 改为单报泵取，令 tcp_recv 每轮 drain 后立即排空，环永不涨破 TCP_RXB。
+ * v1.2 可靠下行（stop-and-wait）：host→guest 的 MSG_DATA 携带序列号 seq，本函数
+ * 只在 seq 恰为期望的 rx_next 时推入 rxb 并回 ACK，转发器收到 ACK 才发下一个；
+ * 重复/乱序（ACK 丢后重发）直接丢弃并重发 ACK，保证大文件尾字节不丢。 */
 static void drain(void) {
     uint8_t tmp[TCP_DGRAM_BUF];
     struct net_recv_iov ri;
@@ -78,12 +89,21 @@ static void drain(void) {
     if (tcp_parse_hdr(tmp, (uint32_t)n, &sid, &mt) != 0) return;   /* 非法头丢弃 */
     tcp_conn_t *c = conn_by_session(sid);
     if (!c) return;
-    if (mt == MSG_DATA)      rx_push(c, tmp + TCP_PHDR, (uint32_t)n - TCP_PHDR);
+    if (mt == MSG_DATA) {
+        uint16_t seq = tcp_hdr_get_seq(tmp);
+        if (seq == c->rx_next) {
+            rx_push(c, tmp + TCP_PHDR, (uint32_t)n - TCP_PHDR);
+            c->rx_next++;
+            send_ack(c);                 /* 累计 ACK：请继续发下一个 */
+        } else {
+            send_ack(c);                 /* 重发/乱序：丢弃载荷，重发 ACK 触发端对端自愈 */
+        }
+    }
     else if (mt == MSG_OPENED)  { c->state = TCP_OPEN; }
     else if (mt == MSG_CLOSED)  { c->state = TCP_CLOSED; ev_push(c, mt); }
     else if (mt == MSG_ERROR)   { c->state = TCP_ERROR;  ev_push(c, mt); }
     else if (mt == MSG_TIMEOUT) { c->state = TCP_ERROR;  ev_push(c, mt); }
-    /* MSG_OPEN/CLOSE 是 guest→host 方向，guest 收到即方向非法：忽略 */
+    /* MSG_OPEN/CLOSE/ACK 是 guest→host 方向，guest 收到即方向非法：忽略 */
 }
 
 int tcp_open(uint32_t ip, uint16_t port) {
@@ -102,6 +122,7 @@ int tcp_open(uint32_t ip, uint16_t port) {
     c->state = TCP_OPENING;
     c->dst_ip = ip; c->dst_port = port;
     c->rx_head = c->rx_tail = c->ev_head = c->ev_tail = 0;
+    c->rx_next = 0;                  /* v1.2 可靠下行：从 seq 0 开始期待 */
     c->ev_overflow = 0;
     /* MSG_OPEN：把目标地址一次性带给转发器（dst_ip + dst_port，大端） */
     uint8_t pay[6];
