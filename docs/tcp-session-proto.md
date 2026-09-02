@@ -5,6 +5,9 @@
 > v1.2（2026-09-02）：`MSG_DATA` 的 `flags` 低 16 位复用为**下行序列号 seq**（host→guest），
 > 新增 guest→host `MSG_ACK`（0x08）——"薄→厚"第一级台阶：下行可靠停-等。上行可靠 / 滑动窗口
 > 为后续候选（见 §6），本次协议头结构不变（GRANT 预留点）。
+> **附录 A（2026-09-02）**：补齐跨通道的**传输封装规格**——会话消息在 e1000 / SLIP 两种
+> 网卡后端的线上一跳如何封装（谁监听、谁发往谁、SLIP 帧内是完整 IPv4/UDP 数据报）。这是
+> 供第三方从头实现兼容转发器 / 配套设施的唯一依据，务必先读附录 A 再读 §2 会话头。
 
 ## 1. 载体与字节序
 
@@ -136,3 +139,78 @@ wire 增补 host→guest ACK 控制类（或复用 flags 占位），与下行�
 时序维持累计 ACK、仅重传丢的那一报 → 吞吐随窗口线性提升。seq 机制已具备；窗口上限由 L2/MTU 与
 两端缓冲决定，初期取保守小值（如 4），"先跑通再优化"（对应 roadmap"…演进候选·滑动窗口"）。
 与上行可靠正交、可独立推进。
+
+## 附录 A：传输封装规格（第三方实现指南，2026-09-02）
+
+> 正文 §1-§6 描述的是**会话层**：一条虚拟 TCP 会话 = 一条**会话消息**（8B 会话头 + 载荷）。
+> 但会话消息在链路上怎么走，决定第三方能否写出可互操作的转发器。本附录补齐"线上这一跳"。
+> 一句话：**两台网卡后端（e1000 / SLIP）的会话消息都是同一个字节串**，只是到达转发器时被
+> 包了一层不同的 IP/UDP 封装。转发器对两种后端做**同一套会话处理**，只在"收发帧"处接入。
+> 参考实现：`tests/tcp_proxy.py`（`run_udp` / `run_slip` + `SlipDecoder` / `udp_session` / `make_udp`）。
+
+### A.1 会话消息 = 跨通道统一的"载荷单元"
+
+无论哪种后端，转发器眼里都是**一段会话消息** `会话头(8B) + payload`：
+
+| 消息类型 | 编号 | 载荷（payload） |
+|---|---|---|
+| `MSG_DATA`（下行 host→guest） | 0x01 | flags 低 16 位 = 下行 seq；载荷 = 应用字节 |
+| `MSG_DATA`（上行 guest→host） | 0x01 | 载荷 = 应用字节 |
+| `MSG_ACK`（guest→host） | 0x08 | 下一期望 seq（2B 大端） |
+| `MSG_OPEN` / `MSG_CLOSE` | 0x06 / 0x07 | 6B 目标寻址 / 空 |
+| 事件 `OPENED/CLOSED/ERROR/TIMEOUT` | 0x02-0x05 | 载荷（多为空） |
+
+> **基本盘**：会话消息本身**不再被任何东西再封装一层自定义协议**。两种通道只做"IP/UDP 打包 ±
+> SLIP 成帧"，不会再往里加私有 magic。第三方若要写转发器，只需：识别会话消息 → 按 §2-§3
+> 解析 → 按 §6 推进可靠传输。
+
+### A.2 e1000 通道（UDP socket，udp 模式）
+
+- **端点**：guest 用**单条 UDP socket**（懒创建，`src/app/tcp.c`），发往转发器
+  `10.0.2.2:7778`（`TCP_PROXY_IP=10.0.2.2`、`TCP_PROXY_PORT=7778`，QEMU/SLIRP 网关视角下即宿主）。
+- **封装**：**会话消息整体直接作为 UDP 数据报载荷**——无再封装。UDP 源端口由 guest 自动分配，
+  转发器以 `(guest_ip, guest_udp_src_port)` 作为回传目的地址（`Session.addr`）。
+- **转发器侧**：`run_udp(port=7778)` 绑 `127.0.0.1:7778`；收包后 `parse_hdr(pkt)` 直接解析
+  （`pkt[0:8]` = 会话头，`pkt[8:]` = 载荷）。回传 `peer_send(addr, 会话消息)` → 原样 UDP sendto。
+- **第三方要点**：绑定 UDP 端口 **7778**；每个收包 = 一条完整会话消息；回包目的 = 收包的源地址。
+
+### A.3 SLIP 通道（COM2 串口，slip 模式）
+
+- **端点**：转发器连到 **QEMU COM2 的 TCP 串口对端**（`--host 127.0.0.1 --port 7901`），
+  上层是 SLIP 流；转发器用 `SlipDecoder` 从字节流里拆出 SLIP 帧。
+- **封装（关键，最易踩坑）**：SLIP 帧里装的**不是**裸会话消息，而是**完整 IPv4 数据报**——
+  `[SLIP 帧] → [IPv4 头] → [UDP 头] → [会话消息]`。理由见 roadmap D1：netif 包单位 = **IP 数据报**
+  （串口无以太网语义，SLIP 就是 "IP over 串口"）。第三方转发器必须做 **IP+UDP 的解析与反向组帧**。
+- **解析**：`SlipDecoder.feed` 拆帧后，`udp_session(frame)` 剥 IPv4+UDP，得到
+  `(sip, sport, dip, dport, payload)`，其中 `payload` = 会话消息。SLIP 成帧按 **RFC 1055**
+  （END `0xC0` / ESC `0xDB` / ESC-END `0xDC` / ESC-ESC `0xDD`）。
+- **回传（源/目的对调）**：`peer_send` 收到的是四元组 `(sip, sport, dip, dport)`（guest 视角），
+  回包要**交换源/目的**，用 `make_udp(dip, dport, sip, sport, 会话消息)` 重建 IPv4+UDP（含
+  **UDP 校验和与 IPv4 伪头**，RFC 768/1071），再 SLIP 成帧写回串口。
+- **第三方要点**：串口上看到的是 IPv4 数据报流；必须做 IP/UDP 组帧与校验和；源/目的 IP 与端口
+  在应答方向对调。SLIP 收发都用 RFC 1055。以下是转发器侧的装箱对照：
+
+| 方向 | 处理流程 |
+|---|---|
+| guest→host（收） | SLIP 拆帧 → `udp_session` 解析 IPv4/UDP → 得到会话消息 → `handle_msg` |
+| host→guest（发） | 构造会话消息 → `make_udp` 组 IPv4/UDP（源=原目的、目的=原源）→ SLIP 成帧 → 写串口 |
+
+### A.4 与"会话头地址无关"原则的关系
+
+会话头本身**不含任何 IP/端口**（§4）。SLIP 模式下的 IP 是**名义地址**（guest 常为 10.0.2.15、
+对端可冒充 10.0.2.2）；转发器**不假设地址语义**，只把四元组当"往返目的地址"看待（收什么、回
+给谁，原样对调）。因此第三方实现无论跑在哪个真实地址上都不影响会话互操作。
+
+### A.5 最小互操作清单（第三方写转发器前的自查）
+
+1. 绑定/连接正确的端点：e1000 → UDP `:7778`；SLIP → QEMU COM2 的 TCP 串口。
+2. 从通道里取出"完整会话消息"：e1000 直接是 UDP 载荷；SLIP 需先拆 RFC1055 帧、再剥 IPv4/UDP。
+3. 解析 `8B 会话头`（§2）：session_id / msg_type / version / flags，字节序大端。
+4. 按 msg_type 建会话、路由：OPEN→发起真 TCP；DATA→upstream 转发 / downstream 回传；
+   ACK→推进下行；OPENED/CLOSED/ERROR/TIMEOUT→回传事件。
+5. 可靠下行（§6.1）：下行 DATA 带 seq，in-flight ≤1，收到 guest `MSG_ACK` 才发下一个，
+   超时 `RETX_MS=2.0s` 重传。
+6. 注意 MTU：单条会话消息（含 8B 头）≤1400B（见 `tcp-mtu-fail.md`）。
+
+> 若以上 6 步与参考实现 `tcp_proxy.py` 行为一致，即视为互操作达成；验证用 `tests/test_tcp_dl.sh`
+> / `test_tcp.sh`（双通道 200 OK + 尾字节完整）。

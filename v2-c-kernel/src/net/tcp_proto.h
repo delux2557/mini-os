@@ -4,7 +4,7 @@
  *   - 用户侧薄包装（src/app/tcp.c）按此组帧/解帧
  *   - 宿主转发器（tests/tcp_proxy.py）按镜像常量解析（Python 侧）
  *   - 宿主 fuzz（tests/fuzz_parse.c case 7）复用本函数做畸形头模糊
- * 语义以 docs/tcp-session-proto.md 为准（版本 v1.1，§2.1 含控制类消息）。
+ * 语义以 docs/tcp-session-proto.md 为准（版本 v1.2：包含 MSG_ACK/下行 seq/附录A 传输封装）。
  * 头布局（8 字节定长，大端）：[session_id(4) | msg_type(1) | version(1) | flags(2)]。
  */
 #ifndef NET_TCP_PROTO_H
