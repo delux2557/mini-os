@@ -101,7 +101,7 @@
   统计对账（泄漏/双重释放/写越界破坏块头都会漂移）；报告碎片；宿主单测 + QEMU selftest
   双重锁定（`[audit] heap ok`）
 
-* **record/replay 地基（工程进度：P1 ✅ 落地，P2/P3 待做；dev 侧基建，对接"AI agent 演练场/测评"）**
+* **record/replay 地基（工程进度：P1 ✅ P2 ✅，P3 待做；dev 侧基建，对接"AI agent 演练场/测评"）**
   **技术前提（先对齐再动工）**：QEMU `-icount` 只保证**内核执行**确定（虚拟时间=指令计数，
   定时器/中断/调度同输入同输出），**不约束整场测试**——三门外部输入（串口 FIFO 注入 / 网络
   SLIRP·宿主转发器 / host 侧 kill·sleep 时序）不受 icount 约束。故完整形态 = 两层：**icount
@@ -117,10 +117,17 @@
     **不回编**这些脚本；icount 确定性验证独立收编为 `test-det`。网络层**不承诺** icount（SLIRP
     依赖 host 时间，见下"边界"降级），`test-det` 用纯冷启动含 DHCP 握手证明在**无注入输入流**
     下确定性已成立；未来交互确定性交给 P2 transcript 录放。
-  * **P2 transcript 固化（录放雏形，待做）**：FIFO 驱动脚本输入侧把"发送内容+相对 tick"写 `*.in.tr`、
-    输出侧日志存 `*.out.tr`；失败自动归档（对齐"失败 transcript 固化回归"）；icount 模式失败 =
-    带确定性锚点。验收：人为触发一次失败 → 可得可复现的 `.in.tr`/`.out.tr` 归档。
-  * **P3 replay 验证（地基闭环）**：回放器按 `*.in.tr` 时间关系重放、比对 `*.out.tr` 逐字节一致
+  * **✅ P2 transcript 固化（v1.4.1 落地，`tests/transcript.sh` + `tests/test_transcript.sh` +
+    `make test-tr`）**：录制内核 `tr_start/tr_send/tr_snapshot/tr_abort/tr_finish` 把输入命令流
+    （`*.in.tr`，列=序号/相对ms/命令，可重放审计）与输出字节流（`*.out.tr`）固化到
+    `build/transcripts/<runid>/`。验收三连：① 成功固化（in/out/RESULT=PASS 产物完整）；
+    ② **失败自动归档**——`tr_abort` 在失败点名固化现场并标 `RESULT=FAIL`（"人为触发失败可得可复现
+    transcript"达成）；③ 复现性雏形——两次冷启同命令集、里程碑语义行逐字节一致。
+    **诚实发现**：非 icount 两次运行 `Hello ticks=296/297` 差 1——guest tick 值随墙钟调度浮动，
+    非语义差异（**印证"公共时钟须用 icount 虚拟时钟、非 guest tick"**）；故复现性比对按 `ticks=N`
+    pin 掉噪音，真逐字节确定性交给 P1 test-det。**相对 ms 用 host 墙钟（起记时刻打点）；icount
+    虚拟时钟锚点与 P3 严格回放差分（含时间关系）留待 P3**。
+  * **P3 replay 验证（地基闭环，待做）**：回放器按 `*.in.tr` 时间关系重放、比对 `*.out.tr` 逐字节一致
     （确定性差分）；repro_bugs.sh 升级为消费 transcript。验收：从 bugs.md 抽 1 个已修 bug——录旧版
     失败 transcript → 修复版回放 → 输出**不一致**（证明抓住 bug 本质）+ 新测试全绿。
   **边界（诚实）**：`-icount` × SLIRP/外部进程时序是 QEMU 文档明示的交互点 → 网络层若红则降级为

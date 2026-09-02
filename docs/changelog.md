@@ -3,6 +3,23 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.4.2] - 2026-09-02 · record/replay 地基 P2：transcript 固化（`make test-tr`）
+
+> 承接 P1（icount 确定性）的录制侧：把串口输入命令流与输出字节流固化为可归档、可复现、
+> 可差分的 transcript，失败自动归档现场。为 P3 回放差分铺数据源。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/transcript.sh`（新增，录制内核，`source` 用）：`tr_start/tr_send/tr_snapshot/tr_abort/
+  tr_finish`。`*.in.tr` 列=序号/相对ms/命令（可重放审计），`*.out.tr` 原始字节流，`RESULT` 标
+  PASS/FAIL 及失败点。
+* `tests/test_transcript.sh`（新增，`make test-tr`）：验收三连——① 成功固化产物完整；
+  ② **失败自动归档**（`tr_abort` 固化现场并标 FAIL，"人为触发失败可得可复现 transcript"）；
+  ③ 复现性雏形（两次冷启同命令集，里程碑语义行逐字节一致）。
+* **诚实发现**：非 icount 两次运行 `Hello ticks=296/297` 差 1——guest tick 随墙钟调度浮动，
+  印证 roadmap"公共时钟须用 icount 虚拟时钟、非 guest tick"；复现性按 `ticks=N` pin 掉噪音，
+  真逐字节确定性交给 P1 test-det。相对 ms 用 host 墙钟，icount 锚点留 P3。
+
 ## \[v1.4.1] - 2026-09-02 · record/replay 地基 P1：icount 确定性启动验收（`make test-det`）
 
 > 承接 roadmap「阶段二·加固」record/replay 地基的第一档：先用 `-icount` 把**内核执行**钉到

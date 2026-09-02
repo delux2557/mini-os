@@ -248,8 +248,12 @@ test-tcp:
 test-det:
 	bash tests/test_determinism.sh
 
+# record/replay 地基 P2：transcript 固化——输入/输出固化 + 失败自动归档 + 复现性雏形
+test-tr:
+	bash tests/test_transcript.sh
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det
+test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr
 
 clean:
 	rm -rf build tests/build
@@ -257,4 +261,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr clean
