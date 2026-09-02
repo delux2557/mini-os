@@ -129,12 +129,20 @@ void get_token()
 	takechar();
 	if (nextc == '*') {
 	  nextc = getchar();
-	  while (nextc != '/') {
-	    while (nextc != '*')
+	  /* v0.32 BUG-048：块注释未闭合读至 EOF 死循环，加 EOF 守卫（复用 str_done 标志）。 */
+	  str_done = 0;
+	  while ((str_done == 0) & (nextc != '/')) {
+	    while ((str_done == 0) & (nextc != '*')) {
 	      nextc = getchar();
-	    nextc = getchar();
+	      if (nextc == 0 - 1) str_done = 1;
+	    }
+	    if (str_done == 0) {
+	      nextc = getchar();
+	      if (nextc == 0 - 1) str_done = 1;
+	    }
 	  }
-	  nextc = getchar();
+	  if (str_done == 0)
+	    nextc = getchar();
 	  w = 1;
 	}
       }
@@ -407,7 +415,11 @@ int primary_expr()
   if (('0' <= token[0]) & (token[0] <= '9')) {
     int n = 0;
     i = 0;
+    /* v0.32 BUG-049：数字字面量逐字符校验，拒绝混入字母（如 0x10/123abc）。
+     * 此前 tokenizer 混吃字母数字、此处又未校验，非十进制字符被静默算错。 */
     while (token[i]) {
+      if ((token[i] < '0') | ('9' < token[i]))
+	error();
       n = (n << 1) + (n << 3) + token[i] - '0';
       i = i + 1;
     }

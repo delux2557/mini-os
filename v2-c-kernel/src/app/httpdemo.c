@@ -56,7 +56,7 @@ void app_main(int argc, char **argv) {
     if (sn < 0) { ap("[http] HTTP send FAIL"); line(); return; }
 
     uint8_t rxb[512];
-    char resp[TCP_RXB + 1]; uint32_t rlen = 0;   /* 容纳 >1KB 响应供尾部完整性检查 */
+    static char resp[TCP_RXB + 1]; uint32_t rlen = 0;   /* 容纳大响应供尾部检查（static 避免 16KB 压栈） */
     int rc, got_200 = 0, closed = 0;
     for (int round = 0; round < 60 && !closed; round++) {
         rc = tcp_recv(fd, rxb, sizeof(rxb));
