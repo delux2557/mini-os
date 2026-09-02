@@ -28,6 +28,27 @@
 
 * `roadmap.md`「record/replay 地基」：补充"无网络路径 `-nic none` + sqlite 分析索引"工程收尾说明。
 
+## \[v1.4.5] - 2026-09-02 · record/replay 接 repro_bugs.sh：BUG 复现命令流固化为可回放证据
+
+> 把 BUG-A（文件槽泄漏）/ BUG-B（cc500 argv）的复现脚本接进 P2/P3 录放机制——修复版复现
+> 命令流经 transcript 录制固化为 `.in.tr/.out.tr`（补上 roadmap 指出的"repro_bugs.sh 只脚本化、
+> 未录时间关系"缺口），并实测可被 `replay.sh` 消费重放，形成首方复现回归。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/repro_bugs.sh`：`source transcript.sh`，`send()` 改调 `tr_send`（写 fd9 + 录制 in.tr 含
+  **真实相对 ms**——wait 驱动的实际打拍也一并固化）；boot 后 `tr_start repro`，收尾 `tr_snapshot +
+  tr_finish`（按 FAIL 状态标 RESULT PASS/FAIL）。QEMU 加 `-nic none`（非网络路径，去启动期 DHCP 开销）。
+* `Makefile`：新增独立目标 `test-repro`（不在 `test:` 聚合内，语义同"首方复现/回归"）。
+* **实测闭环**：录制生成 `build/transcripts/repro-<ts>/in.tr`（ccboot / exec / ls / writefile ×2 /
+  ccrun ×3 共 9 条命令 + 真实相对 ms）→ `replay_into` 重新驱动内核 → 固定行为复现（`[ccboot]
+  byte-identical PASS`、`out2.elf` 已建、`bad.c`→`cc500: error at`/`compile FAIL code=1`、
+  good2.elf `exited code=0 PASS`）——BUG-A/BUG-B 在修复版均未复现。
+
+**Docs**
+
+* `roadmap.md`「record/replay 地基」：补 repro_bugs 接入录放的说明。
+
 ## \[v1.4.3] - 2026-09-02 · record/replay 地基 P3：replay 回放差分闭环（`make test-rp`）
 
 > P1/P2/P3 地基三元闭环：icount 定内核确定性（P1）→ transcript 录输入/输出（P2）→ 回放消费
