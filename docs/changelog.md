@@ -3,6 +3,31 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.4.4] - 2026-09-02 · record/replay 地基工程收尾：无网络路径 `-nic none` + sqlite 分析索引
+
+> P3 闭环后的两件零侵入加固：① 为回放/编译/录制这三条**不需要网络**的路径统一去掉默认网卡，
+> 消除启动期 e1000/DHCP 等待（icount 下更省墙钟）并少一个非确定源；② 给 `.tr` 文本加一个
+> **旁路 sqlite 分析索引**——录放主路径仍是文本"证据原件"，sqlite 只作只读"放大镜"，坏了绝不影响
+> 录放正确性。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `-nic none`：`tests/replay.sh` / `tests/test_transcript.sh` / `tests/test_cc500.sh` 的 QEMU 启动
+  统一加 `-nic none`。实测内核无网卡时优雅跳过（`[net] e1000 not found on PCI` + `selftest skipped
+  (no e1000)`，探针窗口内出 shell 提示符、不挂起）；网络回归（test_net/tcp/socket/slip）保持
+  `-netdev user -device e1000` 不动。
+* **理由澄清**：`icount` 下 cc500 编译慢 + 后台 `[B]`/recvfrom 抢 tick，是用户态 demo（procB /
+  sockdemo）抢指令预算所致，**非网卡导致**；网卡只对启动期（默认 e1000 + DHCP 握手）有墙钟贡献。
+* `tests/tr2sqlite.py`（新增，分析索引"放大镜"）：把 `*.in.tr` / `*.out.tr` 增量导入 sqlite。
+  三表 `transcripts`（元数据/血统）/ `in_events`（seq/rel_ms/cmd/payload）/ `out_rows`（输出逐行）。
+  **幂等 DELETE+INSERT**（按 runid，可重跑/增量补）；**只读旁路**——不读不写 `.tr`。用例：
+  `python3 tests/tr2sqlite.py --dirs build/transcripts build/transcripts.sqlite --demo`
+  （跨 runid 命令直方图 / 时间跨度 / 提示符计数 / FAIL 血统 / `LIKE` 检索编译结果行如 `cc500: error at`）。
+
+**Docs**
+
+* `roadmap.md`「record/replay 地基」：补充"无网络路径 `-nic none` + sqlite 分析索引"工程收尾说明。
+
 ## \[v1.4.3] - 2026-09-02 · record/replay 地基 P3：replay 回放差分闭环（`make test-rp`）
 
 > P1/P2/P3 地基三元闭环：icount 定内核确定性（P1）→ transcript 录输入/输出（P2）→ 回放消费

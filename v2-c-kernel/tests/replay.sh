@@ -29,7 +29,7 @@ replay_into() {
     rm -f "$out_log" "$TIN" "$TOUT"; mkfifo "$TIN" "$TOUT"
     (cat "$TOUT" > "$out_log") & CAT_PID=$!
     qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown \
-        -m 64 -serial stdio -monitor none $icount_flag < "$TIN" > "$TOUT" 2>/dev/null &
+        -m 64 -nic none -serial stdio -monitor none $icount_flag < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!
     exec 9>"$TIN"
 
