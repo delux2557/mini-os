@@ -3,6 +3,116 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.4] - 2026-09-02 · record/replay 地基工程收尾：无网络路径 `-nic none` + sqlite 分析索引
+
+> P3 闭环后的两件零侵入加固：① 为回放/编译/录制这三条**不需要网络**的路径统一去掉默认网卡，
+> 消除启动期 e1000/DHCP 等待（icount 下更省墙钟）并少一个非确定源；② 给 `.tr` 文本加一个
+> **旁路 sqlite 分析索引**——录放主路径仍是文本"证据原件"，sqlite 只作只读"放大镜"，坏了绝不影响
+> 录放正确性。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `-nic none`：`tests/replay.sh` / `tests/test_transcript.sh` / `tests/test_cc500.sh` 的 QEMU 启动
+  统一加 `-nic none`。实测内核无网卡时优雅跳过（`[net] e1000 not found on PCI` + `selftest skipped
+  (no e1000)`，探针窗口内出 shell 提示符、不挂起）；网络回归（test\_net/tcp/socket/slip）保持
+  `-netdev user -device e1000` 不动。
+
+* **理由澄清**：`icount` 下 cc500 编译慢 + 后台 `[B]`/recvfrom 抢 tick，是用户态 demo（procB /
+  sockdemo）抢指令预算所致，**非网卡导致**；网卡只对启动期（默认 e1000 + DHCP 握手）有墙钟贡献。
+
+* `tests/tr2sqlite.py`（新增，分析索引"放大镜"）：把 `*.in.tr` / `*.out.tr` 增量导入 sqlite。
+  三表 `transcripts`（元数据/血统）/ `in_events`（seq/rel\_ms/cmd/payload）/ `out_rows`（输出逐行）。
+  **幂等 DELETE+INSERT**（按 runid，可重跑/增量补）；**只读旁路**——不读不写 `.tr`。用例：
+  `python3 tests/tr2sqlite.py --dirs build/transcripts build/transcripts.sqlite --demo`
+  （跨 runid 命令直方图 / 时间跨度 / 提示符计数 / FAIL 血统 / `LIKE` 检索编译结果行如 `cc500: error at`）。
+
+**Docs**
+
+* `roadmap.md`「record/replay 地基」：补充"无网络路径 `-nic none` + sqlite 分析索引"工程收尾说明。
+
+## \[v1.4.5] - 2026-09-02 · record/replay 接 repro\_bugs.sh：BUG 复现命令流固化为可回放证据
+
+> 把 BUG-A（文件槽泄漏）/ BUG-B（cc500 argv）的复现脚本接进 P2/P3 录放机制——修复版复现
+> 命令流经 transcript 录制固化为 `.in.tr/.out.tr`（补上 roadmap 指出的"repro\_bugs.sh 只脚本化、
+> 未录时间关系"缺口），并实测可被 `replay.sh` 消费重放，形成首方复现回归。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/repro_bugs.sh`：`source transcript.sh`，`send()` 改调 `tr_send`（写 fd9 + 录制 in.tr 含
+  **真实相对 ms**——wait 驱动的实际打拍也一并固化）；boot 后 `tr_start repro`，收尾 `tr_snapshot +
+  tr_finish`（按 FAIL 状态标 RESULT PASS/FAIL）。QEMU 加 `-nic none`（非网络路径，去启动期 DHCP 开销）。
+
+* `Makefile`：新增独立目标 `test-repro`（不在 `test:` 聚合内，语义同"首方复现/回归"）。
+
+* **实测闭环**：录制生成 `build/transcripts/repro-<ts>/in.tr`（ccboot / exec / ls / writefile ×2 /
+  ccrun ×3 共 9 条命令 + 真实相对 ms）→ `replay_into` 重新驱动内核 → 固定行为复现（`[ccboot]
+  byte-identical PASS`、`out2.elf` 已建、`bad.c`→`cc500: error at`/`compile FAIL code=1`、
+  good2.elf `exited code=0 PASS`）——BUG-A/BUG-B 在修复版均未复现。
+
+**Docs**
+
+* `roadmap.md`「record/replay 地基」：补 repro\_bugs 接入录放的说明。
+
+## \[v1.4.6] - 2026-09-02 · in.tr TSV 防御：`tr_send` 拒绝含 TAB/换行的 payload
+
+> **预防**已指出的隐患：若未来 `.in.tr` 走 heredoc 多行 payload，混入原始 TAB/换行会破坏
+> TSV 列分隔（`seq \t rel_ms \t payload`）。当前单行 writefile 确无此输入（暂无实际触发），
+> 但为杜绝"坏 TSV 证据"静默深入，在**唯一写入钳制点**（`tr_send`）加 fail-fast 守卫。
+
+* `tests/transcript.sh`：`tr_send` 检测到 payload 含原始 TAB/换行即**拒绝（不发送、不记录、rc=1）**，
+  并 `%q` 报出违规命令 + 单行规约提示；拒绝写入 → 归档 TSV 永不脱列，差分/回放不会拿到坏列。
+  实测：单行照常记录（`1 <tab> 6 <tab> ls /`），含 TAB 与含换行的 payload 各被拒（rc=1）、
+  `seq` 不递增、`in.tr` 无污染。
+
+* `tr_start` 文件头新增规约行：`payload 禁原始 TAB/换行，须单行；多行需显式编码 \t\n\\ 并同步回放解码`
+  ——"为什么被拒"在证据文件里就地可见，自解释。
+
+* **未来多行扩展点**（仅预言，未实现）：真需 heredoc 时再引入显式转义（`\\`/`\t`/`\n`）+ replay.sh
+  同型解码后放开守卫；保证录放主路径仍 `.in.tr` 文本"证据原件"，且不回归现有单行差分。
+
+* 自测：`make test-tr`（P2）/ `test-rp`（P3）全绿，守卫对合法单行零影响。
+
+Docs：本条目。
+
+## \[v1.4.7] - 2026-09-02 · 压测壳修复：确定性判定空判据 + 打点节奏，落地"结果集复原"语义
+
+> 用 record/replay 地基做**业内最佳实践测试**（`tests/rp_torture.sh` 新增：确定性差分 + 压力/边界
+> 扫描 + 结果集复原）。初测抓出**两处测试壳"假绿"缺陷**（非内核），修复后两轮 `-icount` 冷启
+> 确定性成立、内核无意外缺陷标记、现场可复原。这正是"用录放基因为测试本身照镜子"的成果。
+
+**Fixed**（Tests，dev 侧基建）
+
+* **空判据假绿**（`tests/rp_torture.sh` 的 `func()`）：旧实现 `grep -aE "…"` **未把文件参数 `$1`
+  传给 grep** → grep 读空 stdin → `runA.func`/`runB.func` 恒空文件 → 确定性判定是对"两个空文件"
+  比对，**无条件 PASS**。修复：`func(){ … "$1"; }`，判定真实落到输出文件上。审计后 `norm()`/`kmark()`
+  均已正确使用 `$1`。
+
+* **打点节奏缺陷**（`boot_battery`）：旧命令集 26 条连续 `tr_send` 无间隔灌入，shell 异步跟不上；
+  末尾固定 `sleep 3` 快照把末条 `run hello` 掐在半路（runA 末 echo `o`/runB `run de`），且并发
+  继承 demo 的 PID 顺序随之抖动（`[fork] pid=8` vs `pid=9`）。修复：改为**提示符同步打点**
+  `tsend`（每条等下一个 `mini-os$ ` 再发下一条，计数自增），命令完成确定、尾部不再依赖盲 sleep。
+
+* **复原判定语义**（新增 section D）：跨打点路径（record 用提示符同步 / replay 用 in.tr 相对毫秒）
+  叠加并发继承 demo 的 icount×host 调度，`isol` 子进程 `ISOLATED OK` 与 shell `exited code=0`
+  尾部两行偶发对调 → GO/NO-GO 改用**结果集相等（排序后）**，顺序差单列已知边界提示；避免把
+  顺序噪声误报为重构/回归。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/rp_torture.sh`（新增，`record/replay 工作流实战`，用法 `bash tests/rp_torture.sh`）：
+  A 两轮 `-icount` 冷启功能契约差分 · B 内核致命/越权/溢出标记扫描（区分预期 procCrash 隔离演示）·
+  C tr2sqlite 检索 · D 重放黄金 transcript 做结果集复原。
+
+**自测实录**
+
+* 修复后 A 段：两轮 `-icount` 冷启**功能契约逐字节一致**，out\_lines 均精确 =1165 行。
+* B 段：唯一命中 = `[user] PAGE FAULT pid=5 … -> killed`（procCrash 故意越权，前置 `crash demo`
+  行标注为预期隔离演示）；无意外缺陷标记；churn 后 `free=62668KB` 稳定，无泄漏迹象。
+* D 段：重放黄金 transcript 复现全部 **24 条** ISOLATED OK / exited code（结果集一一对应），仅
+  `isol` 尾部两行顺序偶发对调（已知边界）。
+
+Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
+
 ## \[v1.4.3] - 2026-09-02 · record/replay 地基 P3：replay 回放差分闭环（`make test-rp`）
 
 > P1/P2/P3 地基三元闭环：icount 定内核确定性（P1）→ transcript 录输入/输出（P2）→ 回放消费
@@ -11,11 +121,13 @@
 **Engineering**（Tests，dev 侧基建）
 
 * `tests/replay.sh`（新增，回放器）：`replay_into <in.tr> <out.log> <runid> <done_regex>` 按
-  seq/rel_ms/payload 打拍注入串口、等完成信号驱动真实内核路径。**不用"日志静止"作结束判据**
+  seq/rel\_ms/payload 打拍注入串口、等完成信号驱动真实内核路径。**不用"日志静止"作结束判据**
   （本内核有后台 demo 应用持续打印）。
+
 * `tests/test_replay.sh`（新增，`make test-rp`）：bug 本质闭环——从 bugs.md 抽 **BUG-026**
   （cc500 形参列表 EOF 未闭合→死循环），录 `writefile` 写 `int main(int x` + `ccrun` 的
   transcript → 回放 → 修复版见 `cc500: error at`（exit(1)，不死循环）。
+
 * **诚实发现**（P3 实测边界，已规避）：icount(TCG) 下 cc500 编译分钟级 + 后台 demo 抢 tick →
   回放不用 icount，bug 闭环靠信号断言（逐字节确定性由 P1 test-det 承担）；跨独立冷启里程碑
   一致不机械稳定 → 两遍一致性作 `REPLAY_VERIFY=1` soft 检查。
@@ -30,9 +142,11 @@
 * `tests/transcript.sh`（新增，录制内核，`source` 用）：`tr_start/tr_send/tr_snapshot/tr_abort/
   tr_finish`。`*.in.tr` 列=序号/相对ms/命令（可重放审计），`*.out.tr` 原始字节流，`RESULT` 标
   PASS/FAIL 及失败点。
+
 * `tests/test_transcript.sh`（新增，`make test-tr`）：验收三连——① 成功固化产物完整；
   ② **失败自动归档**（`tr_abort` 固化现场并标 FAIL，"人为触发失败可得可复现 transcript"）；
   ③ 复现性雏形（两次冷启同命令集，里程碑语义行逐字节一致）。
+
 * **诚实发现**：非 icount 两次运行 `Hello ticks=296/297` 差 1——guest tick 随墙钟调度浮动，
   印证 roadmap"公共时钟须用 icount 虚拟时钟、非 guest tick"；复现性按 `ticks=N` pin 掉噪音，
   真逐字节确定性交给 P1 test-det。相对 ms 用 host 墙钟，icount 锚点留 P3。
@@ -46,8 +160,10 @@
 
 * `tests/test_determinism.sh`（新增，`make test-det`）：两次 QEMU `-icount shift=auto,align=on,
   sleep=on` 冷启动，串口日志**逐字节 diff** 判定确定性——定时器/中断/调度/网络握手同输入同输出。
+
 * **实测铁证**：icount 下启动段（含 **DHCP OFFER/ACK 网络握手**）两次运行逐字节一致。
-* **诚实发现**：交互回归脚本（qemu_regression 的 HMP sendkey / serial / persist / cc500）基于
+
+* **诚实发现**：交互回归脚本（qemu\_regression 的 HMP sendkey / serial / persist / cc500）基于
   host 墙钟轮询（`wait_for`/`sleep`），与 icount 虚拟时钟流速不匹配 → icount 下 run 窗内超时
   误报。此即 roadmap P1 所述"暴露交互脚本的 host 墙钟时序依赖"，故**不回编**这些脚本；icount
   确定性验证独立收编为 `test-det`，交互确定性留待 P2 transcript 录放。
@@ -67,7 +183,9 @@
 * **heredoc 多行模式**：检测 `args` 以 `<<` 开头 → 解析 `<<DELIM <path>` → create/open → 循环
   `sys_readline` 逐行收集，独立 DELIM 行（去首尾空白后精确匹配）终结；每行 `SYS_FS_WRITE` 追加
   其内容 + `\n`（空行保留行结构）；输出 `[writefile] '<path>' wrote <N> bytes (heredoc)`。
+
 * **`cmd_help`**：补 `writefile <<D <p>` 语法行。
+
 * **`shell_heredoc.h`（新增）**：DELIM 终结判定抽为**纯函数** `wf_delim_hit`（无 syscall 依赖，
   可宿主单测），heredoc 循环改为调用之。
 
@@ -83,7 +201,8 @@
 
 * `tests/test_serial.sh`：heredoc 回归用例——`writefile <<EOF /multi.c` 写 >128B 多行源码 →
   `ccrun` 编译运行 `exited code=0 PASS`（源码合法可编译运行，反证未被截断）。
-* `tests/test_heredoc.c`（宿主单测，并入 run_host_tests）：DELIM 精确匹配 / 去空白 / 前缀不误
+
+* `tests/test_heredoc.c`（宿主单测，并入 run\_host\_tests）：DELIM 精确匹配 / 去空白 / 前缀不误
   终结 / 空行不终结 / **根因回归**（path 长度误当 DELIM 长度 → 判 0）——秒级锁定本 bug，防
   "本地未验证直达 CI"复发。宿主 20 项全绿。
 
@@ -91,6 +210,7 @@
 
 * `bugs.md` OBS-004（=F-6）标记 **✅ 已缓解（v1.4）**：单行截断被 heredoc 绕开，仅保留"键盘单行
   物理上限"这一合理约束。
+
 * `changelog.md`：本条目。
 
 ## \[v1.3] - 2026-09-02 · 虚拟 TCP 上行滑动窗口（stop-and-wait→N 在途，吞吐 W/RTT）
@@ -104,34 +224,45 @@
 
 **Changed**（guest 薄包装，`src/app/tcp.h`）
 
-* **tx_conn_t 发送侧重构**：移除 `tx_inflight`/`tx_inflight_len`/`tx_inflight_t`（停-等单槽），
+* **tx\_conn\_t 发送侧重构**：移除 `tx_inflight`/`tx_inflight_len`/`tx_inflight_t`（停-等单槽），
   新增 `tx_base`（累计 ACK 边界，滑窗最老未确认 seq）、`tx_pending_start`、`tx_win[TCP_TXWIN]`
   （发送窗口槽数组，各带 seq/len/tick/busy/data）；`tx_seq` 保留为递增分配器。
-* **新增 `tx_slot_t` 结构体**：承载单槽 seq/len/tick/busy/data，`tx_win` 下标 = `seq % TCP_TXWIN`。
-* **`TCP_TXWIN` 宏**（`src/app/tcp.h`）新增：`#define TCP_TXWIN 8`，上行发送窗口最大在途包数。
+
+* **新增** **`tx_slot_t`** **结构体**：承载单槽 seq/len/tick/busy/data，`tx_win` 下标 = `seq % TCP_TXWIN`。
+
+* **`TCP_TXWIN`** **宏**（`src/app/tcp.h`）新增：`#define TCP_TXWIN 8`，上行发送窗口最大在途包数。
 
 **Changed**（guest 薄包装，`src/app/tcp.c`）
 
-* **`tcp_send` 重写**：v1.3 起为"入窗即发出"的滑窗可靠发送——载荷写入 `tx_win[tx_seq%TCP_TXWIN]`，
+* **`tcp_send`** **重写**：v1.3 起为"入窗即发出"的滑窗可靠发送——载荷写入 `tx_win[tx_seq%TCP_TXWIN]`，
   窗位有空即发、返回 `n` 即已入窗发往转发器；窗口满则阻塞让步等累计 ACK 推进 `tx_base` 后继续。
-* **新增 `tx_inflight` 辅助函数**：返回 `tx_seq - tx_base`（在途未确认包数）。
-* **新增 `tx_retrans` 辅助函数**：最老未确认槽（`tx_win[tx_base % TCP_TXWIN]`）每 `TCP_TX_TICKS`
+
+* **新增** **`tx_inflight`** **辅助函数**：返回 `tx_seq - tx_base`（在途未确认包数）。
+
+* **新增** **`tx_retrans`** **辅助函数**：最老未确认槽（`tx_win[tx_base % TCP_TXWIN]`）每 `TCP_TX_TICKS`
   超时重传（SR 风格、幂等，转发器遇重复 seq 丢弃并回累计 ACK 自愈）。
-* **新增 `tx_ack` 辅助函数**：累计 ACK 推进——`next` 落在 `(tx_base, tx_seq]` 内时，清被确收槽
+
+* **新增** **`tx_ack`** **辅助函数**：累计 ACK 推进——`next` 落在 `(tx_base, tx_seq]` 内时，清被确收槽
   busy、`tx_base = next`；重复/越界 ACK 忽略。
-* **`drain` 中 MSG_ACK 处理**：从"单报确认比较"升级为调用 `tx_ack(c, next)`（累计推进）。
-* **`tcp_recv`/`tcp_wait_open` 循环**：加 `tx_retrans(c)` 调用，确保 app 转入收读阶段仍在途包
+
+* **`drain`** **中 MSG\_ACK 处理**：从"单报确认比较"升级为调用 `tx_ack(c, next)`（累计推进）。
+
+* **`tcp_recv`/`tcp_wait_open`** **循环**：加 `tx_retrans(c)` 调用，确保 app 转入收读阶段仍在途包
   仍可超时重传。
-* **`tcp_open` 初始化**：`tx_inflight_len`/`tx_inflight_t` 改为 `tx_base=0`、`tx_pending_start=0`。
+
+* **`tcp_open`** **初始化**：`tx_inflight_len`/`tx_inflight_t` 改为 `tx_base=0`、`tx_pending_start=0`。
 
 **Changed**（宿主转发器，`tests/tcp_proxy.py`）
 
 * **Session 上行状态**：`up_next` 保持为累计确认边界；新增 `up_buf = {}`（乱序包暂存 dict）。
+
 * **Proxy 类**：新增 `UP_WIN = 8` 常量（与 `TCP_TXWIN` 对齐）。
-* **`MSG_DATA` 上行处理**（`handle_msg`）：seq == `up_next` → 连续，转发到真 TCP、`up_next++`、
+
+* **`MSG_DATA`** **上行处理**（`handle_msg`）：seq == `up_next` → 连续，转发到真 TCP、`up_next++`、
   排空 `up_buf` 中已凑齐的连续包，回累计 ACK；seq 在窗口内乱序 → 暂存 `up_buf`，仍回当前
   `up_next`（未推进）；超窗 → 丢弃，仅回 ACK。
-* **`_up_ack` 注释**：更新为"累计 ACK"语义。
+
+* **`_up_ack`** **注释**：更新为"累计 ACK"语义。
 
 **Added**（Tests）
 
@@ -143,8 +274,11 @@
 
 * `tcp-session-proto.md`：头部注记 v1.3 + §6 重写（6.1 下行可靠停-保持不变、6.2 上行滑动窗口、
   6.3 下行滑动窗口候选）；`MSG_ACK` 语义从"单报确认"提升为"累计确认"。
-* `tcp-thin-api.md`：v1.3 注记 + tcp_send 语义表更新为"入窗即发出"的滑窗可靠发送。
+
+* `tcp-thin-api.md`：v1.3 注记 + tcp\_send 语义表更新为"入窗即发出"的滑窗可靠发送。
+
 * `roadmap.md`：「上行滑动窗口」从候选标记为 **✅ v1.3 已落地**，新增"下行滑动窗口（候选）"。
+
 * `changelog.md`：本条目。
 
 ## \[v1.2] - 2026-09-02 · 虚拟 TCP 下行可靠（stop-and-wait）+ 大文件下载 demo + 路线图文档化
@@ -155,23 +289,27 @@
 
 **Changed**（wire，`src/net/tcp_proto.h`）
 
-* **`MSG_DATA` flags 复用为"该方向序列号"**：会话头 flags 低 16 位由 v1.1 恒定 `0x0000` 改为
+* **`MSG_DATA`** **flags 复用为"该方向序列号"**：会话头 flags 低 16 位由 v1.1 恒定 `0x0000` 改为
   按方向携带可靠 seq（host→guest = 下行 seq、guest→host = 上行 seq）——启用 v1.1 §2.1/§5
   预留的"为厚包装加序列号/ACK 占位"
-* **新增 `MSG_ACK`（0x08）且双向复用**：payload = 该方向"下一期望 seq"（2BE 大端）。guest→host =
+
+* **新增** **`MSG_ACK`（0x08）且双向复用**：payload = 该方向"下一期望 seq"（2BE 大端）。guest→host =
   下行确认（推进转发器发下行）；host→guest = 上行确认（推进 guest 发上行）。同一类型按方向归属，
   不新增编号；移除 `tcp_parse_hdr` 的"flags 必须为 0"校验
-* **msg_type 方向合法性与 `flags` 规格更新**：`MSG_ACK` 双向合法（§2.3）；`MSG_DATA` 双向带方向 seq（§5）
+
+* **msg\_type 方向合法性与** **`flags`** **规格更新**：`MSG_ACK` 双向合法（§2.3）；`MSG_DATA` 双向带方向 seq（§5）
 
 **Changed**（guest 薄包装，`src/app/tcp.c/h`）
 
 * **可靠下行接收**：`drain()` 只接受 `seq == rx_next` 的顺序包，推入 rxb 并回累计 ACK
   （`send_ack`）；重复/乱序包幂等丢弃并重发 ACK——端到端自愈；连接对象增 `rx_next` 期待序号
+
 * **可靠上行发送（v1.2 新增）**：`tcp_send` 改为**阻塞停-等**——保存 `tx_inflight` 副本、分配上行
   seq（`tx_seq`）发 `MSG_DATA`，阻塞等 host→guest `MSG_ACK`（上行确认）后返回 `n`；超时按
   `TCP_TX_TICKS=2.5s` 重发在途副本（复用 seq，转发器幂等去重）。连接对象增 tx 状态字段；`sendpkt`
   拆出 `sendpkt_f` 支持携带 seq
-* **demo**（`src/app/dldemo.c`）：真·大文件下载，不复用固定 `TCP_RXB`，每轮 tcp_recv 取 2KB
+
+* **demo**（`src/app/dldemo.c`）：真·大文件下载，不复用固定 `TCP_RXB`，每轮 tcp\_recv 取 2KB
   边收边累加，总长推至 **128KB 无总字节上限**，剥 HTTP 头后校验 body 尾 7B `EOFTAIL` 完整；
   注册进 initramfs，`DL_DEMO` 构建开关开机 spawn（Makefile / storage.c / kernel.c）
 
@@ -179,18 +317,21 @@
 
 * **可靠下行 stop-and-wait**：Session 增 `pending/inflight/seq/inflight_t/eof/finished`，
   in-flight 恒 ≤1 报，收到下行确认才发下一个（`_send_next`）；ACK 丢失按 `RETX_MS=2.0s`
-  定时重发（`_retransmit`），SLIP 慢通道单报回环 ~1s，60ms 会灌爆慢 UART；e1000 快通道正常不触发
-* **可靠上行（v1.2 新增）**：Session 增 `up_next` 计数器；`MSG_DATA` 上行按 up_next 校验、顺序转发
+  定时重发（`_retransmit`），SLIP 慢通道单报回环 \~1s，60ms 会灌爆慢 UART；e1000 快通道正常不触发
+
+* **可靠上行（v1.2 新增）**：Session 增 `up_next` 计数器；`MSG_DATA` 上行按 up\_next 校验、顺序转发
   到真 TCP 并回 `MSG_ACK`（上行确认 `_up_ack`），重复/乱序去重不转发、重发 ACK；`parse_hdr` 返回
   `(sid, mtype, seq)`，`handle_msg` 增 seq 形参
+
 * `_tcp_read` 改为读入 `pending` 后由 stop-and-wait 逐步下发，host EOF 标记后 data 发尽才发
   `MSG_CLOSED`——保证不缺尾
 
 **Tests**
 
-* **test_tcp_dl.sh**：宿主 128KB 文件服务 + QEMU 跑 dldemo，校验 200 OK / 总长==131072 /
+* **test\_tcp\_dl.sh**：宿主 128KB 文件服务 + QEMU 跑 dldemo，校验 200 OK / 总长==131072 /
   body 尾 `EOFTAIL` 完整；既有全量回归（test-tcp/slip-net/socket/persist/host）越跑越稳
-* **test_upstream_reliable.py（新增）**：宿主侧确定性单测——伪造 guest 上传 3 块 + 注入重复块，
+
+* **test\_upstream\_reliable.py（新增）**：宿主侧确定性单测——伪造 guest 上传 3 块 + 注入重复块，
   断言转发器按序转发、重复去重、逐块回上行 ACK、上游收到完整有序字节（不依赖 QEMU）
 
 **Engineering / Docs**
@@ -198,7 +339,9 @@
 * `tcp-session-proto.md`：升 v1.2——`MSG_ACK` 双向 / 方向合法性 / flags 双向语义 / §6.1-6.2 上下行
   可靠（6.2 由候选转落地）/ 新增 **附录 A 传输封装规格**（第三方实现指南：e1000 与 SLIP 的端点、
   端口 7778、SLIP 帧内完整 IPv4/UDP、A.5 最小互操作清单 7 步）
-* `tcp-thin-api.md`：tcp_send 语义表改"阻塞停-等可靠发送"；v1.2 注记含上下行可靠、不破 API 互斥性
+
+* `tcp-thin-api.md`：tcp\_send 语义表改"阻塞停-等可靠发送"；v1.2 注记含上下行可靠、不破 API 互斥性
+
 * `roadmap.md`：薄→厚演进候选标记「上行可靠 ✅ v1.2 已落地」，滑动窗口仍为候选
 
 ## \[v1.1] - 2026-09-01 · 网络抽象层 netif + 虚拟 TCP 薄包装（Step 1-4）+ 收尾修复（PR #16）
@@ -212,23 +355,29 @@
 * **netif 抽象层**（`src/net/netif.c/h`，Step 1）：ops 表（init/ready/tx/rx/mac）+ 注册表，包单位=
   IP 数据报；以太网头 / SLIP 帧等链路层封装下沉到各网卡适配层（e1000 适配器 / `uart_netif` COM2）。
   协议层（src/net）不再出现任何具体网卡符号，`grep e1000_ src/net/` 为空由 CI 守卫强制（Step 3）
+
 * **串口第二网卡**（`src/drv/uart_netif.c` + `net/slip.c`，Step 2）：COM2 走 SLIP（RFC 1055，
   END/ESC 转义）；`UART_NETIF_DEFAULT` 编译开关静态绑定网卡（D6）
-* **会话协议**（`src/net/tcp_proto.h`，Step 4）：8B 会话头（session_id/msg_type/version/flags），
-  大端；msg_type 0x01 DATA / 0x02-0x05 事件(host→guest) / 0x06-07 控制(guest→host)；单一事实来源
+
+* **会话协议**（`src/net/tcp_proto.h`，Step 4）：8B 会话头（session\_id/msg\_type/version/flags），
+  大端；msg\_type 0x01 DATA / 0x02-0x05 事件(host→guest) / 0x06-07 控制(guest→host)；单一事实来源
   （guest C + 宿主 Python + fuzz 三方共用）。三份语义规定定稿进 docs/（session-proto/thin-api/mtu-fail）
+
 * **虚拟 TCP 薄包装**（`src/app/tcp.c`，Step 4）：用户态库，`tcp_open/send/recv/close` + `wait_open`，
   fd=连接对象（非裸整数），事件队列，`tcp_recv` 三态 >0/0/-1 互斥；`httpdemo` 开机自动 HTTP demo
+
 * **宿主转发器**（`tests/tcp_proxy.py`，Step 4）：会话表 + UDP↔TCP 映射 + 事件回传 + 超时/半开/背压，
   支持 UDP(e1000)+SLIP(COM2) 双通道
 
 **Fixed**（收尾，PR #16，见 bugs.md BUG-044/045/046）
 
-* **大响应丢尾**（BUG-044）：NET_RXMAX 512→2048、接收环 1024→4096、转发器下行分块 ≤1392、
+* **大响应丢尾**（BUG-044）：NET\_RXMAX 512→2048、接收环 1024→4096、转发器下行分块 ≤1392、
   发送硬墙对齐传输钳制 1400——"换 2304 环全清"实为容量而非地址损坏，三条容量症状一次归并
+
 * **串口通道饿死**（BUG-045）：转发器主循环阻塞 recv → 改非阻塞 + multiclient select，不再卡死
   chardev/udp 输入
-* **CI 稳定误报"HTTP 未就绪"**（BUG-046）：test_tcp 自检改 retry 循环 + 失败即退（`|| exit 1`），
+
+* **CI 稳定误报"HTTP 未就绪"**（BUG-046）：test\_tcp 自检改 retry 循环 + 失败即退（`|| exit 1`），
   修掉 PR #16 自引入的"单次无等待 curl"时序容错 bug（审核确认非 flaky）
 
 **Tests**：host 19/19（fuzz 8 用例/48 万解析 ASan clean、Step3 e1000 守卫）；test-tcp 双通道
@@ -243,6 +392,7 @@
 * **F-4 selftest 汇总行撕裂**（BUG-042，`src/app/shell.c`）：`cmd_selftest` 的 PASS/FAIL 汇总行
   此前用多次 `sys_print` 拼，片段间可被内核异步打印（孤儿 reap / DHCP 续约）插入撕裂 → 整行锚
   定回归假阴性。改走 `nl_*` 缓冲原子行（一次 flush，与 netping/ccboot/writefile 同机制）
+
 * **F-5 pid 表耗尽静默**（BUG-043，`src/kernel/sched.c`）：`alloc_pid` 耗尽静默 `return -1`，三处
   调用方对 `pid<0` 无声返回（A4 fork 炸弹先到的是无声槽耗尽而非有日志深拷贝 OOM）。`alloc_pid`
   增"每耗尽周期报一次" `[sched] pid table full`（防 spawn/bomb 风暴刷屏）；`sched_audit` 补
@@ -253,9 +403,11 @@
 * **harness 退出码语义统一**（T3）：7 个测试脚本统一"缺依赖 → `[ERR]` + exit 2"（此前缺 socat
   等会退化成全断言超时 `[FAIL]/exit 1`，环境病伪装代码病）。约定：`0` 全绿 / `1` 断言失败 /
   `2` 环境或依赖缺失（记于 changelog 头部，CI 显式将 `2` 标环境错误）
+
 * **CI 全链 + 分步矩阵**（T4，审核方落地）：每步 `make test-*` 各自全量重建 → 单 job `make test`
   全 7 层门禁 + 失败上传 build-logs 工件 + `workflow_dispatch`；新增 `layers.yml` 并行矩阵（host/
   qemu/serial/persist/net/socket/cc500 每层独立 job 定位）；含 test-cc500 层
+
 * **账本收口**（T5）：bugs.md 追加 BUG-042/043 与 OBS-003/004；版本串 v0.32→v0.33 并同步 motd
   断言；新增 `docs/external-reviews/` 外部评估报告索引（F-xx ↔ BUG 号 ↔ commit 对照）
 
@@ -271,10 +423,12 @@
   EOF 仍让 `token` 无限增长；`primary_expr` 解码 `while(token[j]!='"')` 无 NUL 守卫，越过
   token 尾部越界读写直到堆里偶遇 `"`。修复：两处加守卫，命中 NUL 未闭合即
   `cc500: bad string` 干净报错（前：guest 被内核击杀 exit=-1 / hostcc SIGSEGV rc=139）
+
 * **F-2 只声明未定义函数 → 静默编出 "call 自身 ELF 头" 的废产物**（BUG-040）：纯原型声明
   走 `program()` 函数声明分支不触发 `sym_define_global` 回填，符号恒留 `'U'=code_offset`
   （0x800A0000），调用即 `PAGE FAULT`。修复：`be_finish` 收尾遍历符号表（锚点=名字 NUL 位），
   检出残留 'U' 且 `value != code_offset` → `cc500: undefined symbol`
+
 * **F-1 关系运算残缺（只有 <=）+ error() 零诊断**（BUG-041）：`relational_expr` 只识别 `<=`，
   `<`/`>`/`>=` 缺失；`error()` 裸 `exit(1)`。修复：`error()` 打印 `cc500: error at <token>`；
   补齐四元关系运算（setle=0x9e/setl=0x9c/setge=0x9d/setg=0x9f，操作数序 objdump 实测锁定）；
@@ -284,9 +438,11 @@
 
 * 收编 `tools/cc500/host_crt.c` 为 hostcc 基座（把 cc500 编成 Linux 宿主程序，缺陷与内核无关，
   秒级红绿 + gdb 可调）
+
 * 新增 `tests/test_cc500.sh`（挂入 `make test`）：**症状对立断言**（"新症状必须出现 + 旧症状必须
   缺席"，杜绝假绿）——宿主 T 系列 8/8 + `<` 编码 0f 9c 锁定；guest ccboot 自举不动点 P1==P2 +
   关系运算 `<` 运行语义（源码 <128B 避开 F-6 writefile 行截断）
+
 * 全回归绿：宿主 16/16 + QEMU(195 断言, 含自举) + 串口 + 持久化 + 网络 + socket + cc500 +
   `repro_bugs.sh`（BUG-031/032 双断言）；尺寸锚点 `entry=800a0054` 未动，cc500 产物 18079B→21283B
   随代码体积自然漂移（无硬编码字节断言）
@@ -303,6 +459,7 @@
   "本进程私有号"；`sys_open/read/write/close` 一律在当前进程自己的 fd 表上做，`sys_fork`
   深拷贝子进程 fd 表、`exec/exit` 清本进程 fd 表——不再有 BUG-031 式的跨进程槽号互污染与
   异常退出泄漏（v0.30 方案是记 pid 归属清理，此举把它彻底收进 PCB）
+
 * `userprog.c` 的 `procFSB` 改用与 `procFSA` 相同的 `fd=1` 打开自己的文件，作为 per-process
   隔离性的负对照演示
 
@@ -311,6 +468,7 @@
 * **F-0a socket 表退出泄漏**：`net_sock_t` 增 `pid` 归属，`terminate_current` 调新
   `netsock_close_pid(pid)` 归还其所有 socket——此前开 socket 不关即退出使槽位永久失踪，
   直到表满网络降级
+
 * **F-0b 任意 close 可关内核 DHCP 保留槽**：`net_sock_t` 增 `reserved` 标志标记端口 68 槽；
   `case 33` 改为 `netsock_close_if_owner`——仅可关本进程打开、非保留的槽，保留槽拒绝关闭，
   DHCP 续约链不再被打断
@@ -319,8 +477,10 @@
 
 * **F-0c 观测收口**：`netsock_audit()` 并入 `kern_audit`（socket 表占用计数 + 保留槽恒计数），
   socket 创建失败加"表满"专项日志
+
 * 新增 `tests/test_socket.sh`（挂入 `make test`）：F-0a 退出回收（leak2 后 netping 仍 PONG）+
   F-0b 保留槽防 close + 观测断言；`qemu_regression.sh` 的 `slot` 断言同步改 `fd`
+
 * 全层回归绿；socket 攻击回归（F-0a/F-0b）在修复前后红→绿区分成立
 
 ## \[v0.30] - 2026-08-30 · 修复工具链严重 BUG（文件槽泄漏 + 自编译产物丢 argv）
@@ -335,19 +495,23 @@
   修复：文件槽记**打开者 pid**（`fs_file_t.pid`），`terminate_current` 调
   `fs_files_close_pid(pid)` 按归属归还；**不**关闭其他并发进程的槽（首版"关全部槽"被
   repro 抓到误伤 procSemB 与 P1 并存的场景）
+
 * **BUG-032：cc500 自编译产物静默丢 argv**（`tools/cc500/cc500.c` `be_start`）：
   入口桩裸 `call` 不编组 argc/argv，自编译产物 exec 带 argv 时静默走默认路径写
   /out.elf 且退出 0。修复：`call` 前把内核栈 `[esp+4]=argc、[esp+8]=argv` 压给首函数
   （`mov eax,[esp+8]; push eax` ×2），与 cc500 "首参 8(%esp)/末参 4(%esp)" 约定精确
   对齐；`e_entry` 不变，`call` rel32 回填偏移 85→95
-* **BUG-033：`map_page_in` 页表帧 OOM 写物理 0 破坏内核**（`src/mm/mem.c/h`，
+
+* **BUG-033：`map_page_in`** **页表帧 OOM 写物理 0 破坏内核**（`src/mm/mem.c/h`，
   代码审查 P0）：新页表 `frame_alloc()` 失败返回 0 未检查 → `(uint32_t*)0` 清零低 4KB
   且页目录项指向物理 0；`pf_handler` 栈生长静默失败 → 假增长死循环。修复：`map_page_in`
   改返回 `int`（-1 页表帧 OOM），`pf_handler` 检查失败转 `STACK_BOOM` 并释放已分配帧
-* **BUG-034：kb 行缓冲在 `line_ready` 期间仍追加输入**（`src/drv/kb.c`，代码审查 P2）：
+
+* **BUG-034：kb 行缓冲在** **`line_ready`** **期间仍追加输入**（`src/drv/kb.c`，代码审查 P2）：
   行就绪未取时新可打印字符追加到旧行后，`kb_line_take` 取行时丢失。修复：仅
   `!line_ready` 才入缓冲；`test_kb.c` 补用例 13
-* **BUG-035：`fork_frames[24]` 硬编码限制大进程 fork**（`src/kernel/sched.c/h`，=OBS-002，
+
+* **BUG-035：`fork_frames[24]`** **硬编码限制大进程 fork**（`src/kernel/sched.c/h`，=OBS-002，
   代码审查 P1）：深拷贝超 24 页即 `fork_oom`（bigdemo 28 页已超限）。修复：改 kmalloc
   动态数组（同 `own_frames`），`sched_fork` 先数页数再按需分配、退出 kfree
 
@@ -356,16 +520,20 @@
 * 新增 `tests/repro_bugs.sh`（QEMU 串口复现/回归）：BUG-A（good.c 编译 OK → 坏源
   FAIL → 同源 good2.c 再编译必须成功）与 BUG-B（ccboot 产 P1 → `exec /out.elf
   /cc500.c /out2.elf` → /out2.elf 必须被创建）双断言
+
 * 修复后实测：`[ls] out2.elf size=19217`（argv 生效）；good2.c 二次编译
   `[ccrun] ... code=0 PASS`（槽不污染）；ccboot P1==P2 逐字节一致仍成立
+
 * 五层回归全绿：宿主 16/16 + QEMU + 串口 + 持久化 + 网络（cc500 桩改动经自举
   不动点 + 全量 QEMU 复验）
+
 * 独立评估 L-4/L-5：版本串单一来源——新增 `src/version.h` 的 `MINI_OS_VERSION`，
   内核启动横幅（kernel.c）/ shell banner / initramfs motd 统一取宏，两处回归断言
-  （qemu_regression.sh / test_serial.sh）同步 v0.30；Makefile cc500 单文件豁免
+  （qemu\_regression.sh / test\_serial.sh）同步 v0.30；Makefile cc500 单文件豁免
   精简为 `-Wno-int-conversion -w`（GCC 8+ 两者并存均有效——GCC 14 中
   `-Wint-conversion` 是 permerror 硬错误，`-w` 压不住，必须显式 `-Wno-*`；GCC 13
   下 `-w` 单独够用是曾误删此项的根源，见 BUG-036）
+
 * **BUG-036（v0.30 内部回归）**：L-5 误删 `-Wno-int-conversion` 只留 `-w` →
   GCC 14 环境 `make` EXIT=2 构建失败（-Wint-conversion ×13）；恢复该项后
   修复。记录于 docs/bugs.md，教训：`-w` 不压 permerror，GCC>=14 需显式 `-Wno-*`
@@ -378,43 +546,54 @@
 
 * **宿主侧 fuzz**（`tests/fuzz_parse.c`）：确定性 PRNG（xorshift32，固定种子可复现）
   对纯逻辑解析模块注入随机路径/随机字节，ASan+UBSan 下验证"畸形输入被拒绝而不崩溃"：
+
   * 覆盖 `fs_walk`（随机路径：`/`、`.`、`..`、空白、超长、写/建/删/列混合）、
     `elf_load_range`（畸形头/段表越界读）、`net_eth_type` / `net_parse_arp_reply`、
     `ip_parse` / `udp_parse` / `icmp_parse`（帧内载荷指针越界）、`dhcp_parse_reply`
     （畸形选项长度）；FS 内存盘每 4096 轮重置防 inode/块耗尽
+
   * 缺省 60000 轮（36 万次解析调用），`FUZZ_ITERS` 可调；已集成
     `run_host_tests.sh` 强制回归（第 16 项）
+
 * **内核堆审计**（`src/mm/heap.c/h` `heap_audit()`，挂入 `kern_audit`）：
+
   * 遍历 `block_t` 链表：校验 magic/free 一致性、size 上界，块数超上界即判 next 成环
     停止（防死循环）
+
   * 新增 `used_bytes` / `free_bytes` 记账计数器，与遍历统计对账——泄漏（块游离于计数
     外）、双重释放（计数提前减）、写越界破坏块头的场景都会使两者漂移而暴露
+
   * 报告碎片（空闲块数/字节）；宿主 `test_heap.c` + QEMU selftest 双重锁定
 
 **Fixed**
 
-* **BUG-029：`icmp_parse` 短帧越界读**（fuzz 抓到）：`len < 14` 时 `frame + 14` 越过帧尾、
+* **BUG-029：`icmp_parse`** **短帧越界读**（fuzz 抓到）：`len < 14` 时 `frame + 14` 越过帧尾、
   `len - 14` 无符号下溢成巨大值，`ip_parse` 按巨大长度扫载荷 → 堆缓冲区越界读。修复：
   `icmp_parse` 开头 `if (len < 14) return -1`；`test_icmp.c` 补 13/0 字节短帧回归断言
   （BUG-029 已在 `docs/bugs.md` 记录）
+
 * **BUG-030：fork 子进程在继承的已生长栈上继续递归被误判缺页**（回归盲区补格抓到）：
   `sched_fork` 把子进程 `user_esp_top/stack_bottom` 原样继承 → 子进程栈在**父进程栈槽**；
-  `stack_guard_hit` 却按**子 pid** 反推槽位，子进程下探时 fault 判"槽外"（STACK_OK）→
-  走普通缺页被隔离终止。修复：槽位改由**实际栈位置 `stack_bottom`** 推导
+  `stack_guard_hit` 却按**子 pid** 反推槽位，子进程下探时 fault 判"槽外"（STACK\_OK）→
+  走普通缺页被隔离终止。修复：槽位改由**实际栈位置** **`stack_bottom`** 推导
   （`stack_bottom & ~(USER_STACK_SLOT-1)`），普通进程=自身槽、fork 子进程=继承的父槽，
   两者皆正确；v0.15 边界语义由真实栈槽天然保持（`src/kernel/guard.c`）
 
 **Engineering**
 
 * **回归盲区补格**：新增 `deepfork`（已生长栈×fork）与 `deepexec`（已生长栈×exec）
-  演示应用，挂入 qemu_regression.sh / test_serial.sh（交互 + 全量校验双层断言）；
+  演示应用，挂入 qemu\_regression.sh / test\_serial.sh（交互 + 全量校验双层断言）；
   第三个盲区项「brk 收缩-再涨」由 heapdemo 既有 step 4 覆盖、「编译产物×持久化」
-  由 test_persist.sh 的 S10（writefile→ccrun→save→重启→run）覆盖
+  由 test\_persist.sh 的 S10（writefile→ccrun→save→重启→run）覆盖
+
 * `test_guard.c`：补 4 条 fork 继承栈守卫断言（旧 pid 推导逻辑下必失败）
+
 * `test_heap.c`：宿主为 64 位、`block_t` 实际占 24 字节（`next` 8B），审计篡改用例用同构
   probe 结构 + `offsetof` 定位 magic 字段，跨 32/64 位宿主通用；并在高强度
   分配/释放（分裂/不分裂/合并/复用全路径）后断言 `heap_audit()==0`
+
 * `qemu_regression.sh` selftest 断言新增 `[audit] heap ok`
+
 * 验证：宿主测试 16/16 全绿；内核 -m32 编译零告警；QEMU 回归全量通过
   （含 deepfork/deepexec 组合 + selftest `[audit] heap ok`：
   `4 blocks, free 3 blocks/102320B used 16B pages=25`，used+free+4×16B 头 = 25×4096
@@ -428,65 +607,76 @@
   T2=0.875×lease（tick 化，100Hz）；`e1000_dhcp_tick()` 由 timer 心跳每 tick 驱动
   （`timer_cb` 里、`sched_tick` 前，保证不被上下文切换跳过），状态机
   `RENEW_NONE / RENEW_SENT / REBIND_SENT / REACQ_OFFER / REACQ_ACK`：
+
   * 到 T1 发**单播 RENEW**（ciaddr=已租 IP，带 server id(54)+请求 IP(50)）；
     到 T2 仍未 ACK 升**广播 REBIND**（ciaddr，仅带 50，任意服务器可续，RFC 2131）；
     ACK 后重置定时器继续下一租期；NAK/超时 → 重新走 DISCOVER->OFFER->REQUEST->ACK
     重新获取 → 彻底失败回静态兜底
+
   * 每 tick 至多"发一帧 + 收一帧"，绝不在 ISR 上下文忙等
 
 * **端口 68 专用 DHCP 接收端点**（`src/net/netsock.c` `netsock_dhcp_open/recv`）：
-  用户 socket 的 recvfrom 会"排空"网卡（netsock_drain 取走 NIC 环所有帧），无匹配
+  用户 socket 的 recvfrom 会"排空"网卡（netsock\_drain 取走 NIC 环所有帧），无匹配
   本地端口的 DHCP 应答会被抢先丢弃（sockdemo 每 tick 轮询即踩中）；注册端口 68 的
   DHCP socket 后，分发路径把应答入其队列，续约 tick 经它读取（与用户流量共享分发）
 
 * **续约帧构建**（`src/net/dhcp.c/h`）：`build_bootp` 支持 ciaddr 与
-  with_server_id（REBIND 不含 54）；新增 `dhcp_build_renew`（单播）/ `dhcp_build_rebind`（广播）
+  with\_server\_id（REBIND 不含 54）；新增 `dhcp_build_renew`（单播）/ `dhcp_build_rebind`（广播）
 
 **Fixed**
 
-* **BUG-027：`sys_map_page` 记账槽满时帧泄漏**：`map_frames[8]` 满后第 9+ 张帧被映射
+* **BUG-027：`sys_map_page`** **记账槽满时帧泄漏**：`map_frames[8]` 满后第 9+ 张帧被映射
   但不记账、进程退出不回收。改为**分配前拒绝**（`map_fcount >= 8` 返回 -1），诚实暴露
   教学上限而非悄悄泄漏
-* **BUG-028：exec 路径泄漏 `load_frames` 记账数组**：v0.26#3 把 load_frames 改为 kmalloc
+
+* **BUG-028：exec 路径泄漏** **`load_frames`** **记账数组**：v0.26#3 把 load\_frames 改为 kmalloc
   动态数组时，spawn 路径补了 `load_frames_free()` 但 exec 路径漏了——每次 exec（成功或失败）
   泄漏该数组。修复：`sched_exec` 复制进 `own_frames` 后 `kfree(frames)`（参数改非 const，
   语义=移交），exec 失败路径补 `load_frames_free()`
-* **e1000_dhcp_tick 用户页目录下访问高地址 MMIO 缺页**：e1000 MMIO 位于
+
+* **e1000\_dhcp\_tick 用户页目录下访问高地址 MMIO 缺页**：e1000 MMIO 位于
   0xFEB00000（PDE≥512），用户进程页目录只克隆低 1GB PDE；timer ISR 可能在任意用户进程
   上下文运行 → 访问设备寄存器即 `[FATAL] page fault @feb83818`。修复：tick 内临时切内核
-  页目录（与 netsock 收发同款），用完切回（须在 sched_tick 前恢复）
-* **print_ip 缺 `& 0xFF`**：`(ip>>24)` 等未掩码导致 IP 显示成 `10.2560.655362.167772687`
+  页目录（与 netsock 收发同款），用完切回（须在 sched\_tick 前恢复）
+
+* **print\_ip 缺** **`& 0xFF`**：`(ip>>24)` 等未掩码导致 IP 显示成 `10.2560.655362.167772687`
   （预存在 v0.25 的显示 bug，功能不受影响；续约日志与 OFFER/ACK 均走该函数，一并修正）
 
 **Engineering**
 
 * 宿主单测 `tests/test_dhcp.c` 38→61 断言：RENEW/REBIND 帧结构——ciaddr 写入 BOOTP 头、
-  RENEW 单播（dst_mac/目标 IP）带 54+50、REBIND 广播仅带 50（无 54）、UDP round-trip
+  RENEW 单播（dst\_mac/目标 IP）带 54+50、REBIND 广播仅带 50（无 54）、UDP round-trip
+
 * `tests/test_net.sh`：用短租期内核（`make DHCP_RENEW_SECS=2`，Makefile `-D` 注入
   e1000.o）在秒级窗口内观察续约闭环——新增断言 `renew: sent RENEW (unicast)` 与
   `renew ACK`；DURATION 循环会因 sockdemo 提前 break，须等续约出现再杀 QEMU（否则
   早杀漏掉 tick=100 的首次 RENEW）；pcap UDP 计数 10→12（RENEW+ACK 双向）
+
 * Makefile：新增 `DHCP_RENEW_SECS` 变量（缺省用服务器租期，SLIRP 为 24h）；
-  test_net 跑完恢复常规内核
+  test\_net 跑完恢复常规内核
+
 * 代码审查驱动：design.md §3 明确**单核假设**并发模型（sem/msg 的 try+block 在单核 +
   关中断模型下安全）；shell.c `file_copy/equal` 标注全局 fs 槽位 1/2 占用（per-process
-  fd 表 TODO 见 roadmap 支线 C）；bugs.md 新增 BUG-027/028 与 OBS-002（fork_frames[24]
+  fd 表 TODO 见 roadmap 支线 C）；bugs.md 新增 BUG-027/028 与 OBS-002（fork\_frames\[24]
   硬编码上限观察项，动态化列入后续版本）
+
 * **项目方向调整**：roadmap 纳入"收尾-加固-沉淀"三阶段路线 + 红线清单（README 定位同步）
   ——功能闭环已达成，后续不追逐版本号，转向 fuzz/record-replay 加固与教学文档沉淀
+
 * 五层回归全绿（宿主 15/15 + qemu + serial + persist + net）
 
 ## \[v0.27c] - 2026-08-30 · 评估反馈修复（GCC 14 构建卫生 + brk 守卫口径 + 回归补格 + 文档回补）
 
 **Fixed**
 
-* **S8：`brk_pages_up` 容量守卫记账口径**（`src/kernel/usermode.c` `sys_brk`）：原守卫
+* **S8：`brk_pages_up`** **容量守卫记账口径**（`src/kernel/usermode.c` `sys_brk`）：原守卫
   `brk_pages_up(old,a) > USER_HEAP_PAGES - heap_fcount` 用"旧 brk→新 brk 跨度"判定，
   收缩后旧映射保留（`heap_fcount` 不减、帧从不释放），再涨过同一段会**重复计数**、
   在真实预算内误拒；映射页恒为 `[heap_base, top)` 前缀，故改为
   `(a - heap_base + 0xFFF) >> 12 > USER_HEAP_PAGES` 判定（目标 top 覆盖页数）。单调增长
   下两式等价，收缩-再涨下本式正确。当前 bump-only 场景不可触发（cc500 不 free），
   属潜在缺陷修复
+
 * **S7 告警清零**：`src/app/abuse.c` 两处 `unsigned < 0` 死断言改 `(int)` 窄化（此前已修）；
   `src/app/cc500_crt.c` 的 `char** -> char*` 不兼容指针加显式 cast；
   Makefile 给 `cc500.o` 规则加 `-w`（该源受 CC500 子集约束、无 cast 可用，
@@ -498,12 +688,15 @@
 * **S10：persist 回归补「工具链 × 持久化」组合格**（`tests/test_persist.sh`）：
   第 1 次运行 `writefile /persist/p.c` + `ccrun /persist/p.c /persist/p.elf` → `save` 落盘；
   第 2 次重启 `run /persist/p.elf` → 编译产物仍可被加载运行（跨子系统回归盲区补格）
+
 * **S2：design.md 文档回补**（停滞 10 版后补齐）：
   §2 内存布局总表更新（栈区 0x80010000-0x80090000 / shell 0x80090000 / app 1MB 0x800A0000 /
-  共享内存 0x801A0000 / 堆区 0x801A4000 320KB / USER_SPACE_END 0x81000000）；
+  共享内存 0x801A0000 / 堆区 0x801A4000 320KB / USER\_SPACE\_END 0x81000000）；
   §10 测试层数四层→五层（+网络回归）+ selftest 计数 5→6；
   新增 §17 网络子系统（v0.18-0.25）、§18 容量三连（v0.26）、§19 工具链与自举（v0.27）
+
 * **S3：README 版本矩阵**补 v0.10-v0.27b 行（此前停在 v0.9，连续第 3 次被点名）
+
 * GCC 14.2 clean build 验证：`make` 零告警，`kernel.elf` 329KB；五层回归全绿
   （宿主 15/15 + qemu 176 项 + serial + persist（含 S10 新用例）+ net）
 
@@ -516,10 +709,10 @@
   无 int\* 解引用/类型转换），缺省回退 `/cc500.c` → `/out.elf`（`run cc500` 保持原行为）；
   入口/CRT 声明顺序对齐 CC500 反向压参与内核 `[esp+4]=argc,[esp+8]=argv` 的差异
 
-* **shell `writefile <path> <content...>`**：把命令行剩余部分（保留空格）写入文件，
-  让 agent 能在 guest 内经 shell 写源码（ARG_MAX 32→128 解除内容截断）
+* **shell** **`writefile <path> <content...>`**：把命令行剩余部分（保留空格）写入文件，
+  让 agent 能在 guest 内经 shell 写源码（ARG\_MAX 32→128 解除内容截断）
 
-* **shell `ccrun <src> <out>`**：fork+exec cc500 编译 `<src>` 为 `<out>` → `run <out>`
+* **shell** **`ccrun <src> <out>`**：fork+exec cc500 编译 `<src>` 为 `<out>` → `run <out>`
   → 校验退出码，端到端「写-编-跑」一键命令
 
 **自举仪式（验收达成）**
@@ -538,6 +731,7 @@
 
 * 页错误日志增强：`pf_handler` 附打印 fault EIP / eax / ebx（`PAGE FAULT … eip=… eax=…`），
   便于定位用户态故障指令（本次调试 cc500 越界即靠此定位）
+
 * 回归升级：`tests/test_serial.sh` 新增 writefile + ccrun 用例（写源码 → 编译 OK →
   编译产物被加载 → PASS），与 ccboot（自举不动点）互补：前者证"能编译任意程序"、
   后者证"编译器对自身是不动点"
@@ -547,10 +741,10 @@
 **Added**
 
 * **CC500 编译器移植**（`tools/cc500/cc500.c`，E. Grimley-Evans 自托管 C 子集编译器
-  ~750 行）——v0.27-29「工具链与自举」的核心一步，**一步到位实现完整自举闭环**
+  \~750 行）——v0.27-29「工具链与自举」的核心一步，**一步到位实现完整自举闭环**
   （原规划 27a 汇编器+链接器 / 27b C 前端 分两版，现以整机自托管编译器直接达成）
 
-  * 链接基址改 `code_offset=0x800A0000`（APP_LINK），ELF 头 e_entry/p_vaddr/p_paddr
+  * 链接基址改 `code_offset=0x800A0000`（APP\_LINK），ELF 头 e\_entry/p\_vaddr/p\_paddr
     同步改为 0x800A 基址，入口 stub 适配 mini-os ABI（`SYS_EXIT=0`）
 
   * **唯一机器码 stub = 通用系统调用** `syscall3(n,a,b,c)`（eax=n ebx=a ecx=b edx=c，
@@ -563,13 +757,13 @@
 
   * **专用 CRT**（`src/app/cc500_crt.c`）：`_start` 以 `cc500_main()` 返回值
     `sys_exit`（普通 crt.o 固定退出 0，无法把编译成败传给 shell）；不 include
-    user_lib.h（其 static inline `syscall3` 会与外部 `syscall3` 重名冲突）
+    user\_lib.h（其 static inline `syscall3` 会与外部 `syscall3` 重名冲突）
 
 * **initramfs 嵌入**：`cc500`（编译器 ELF）+ `cc500.c`（自举源，objcopy 原始字节）
   两个文件；Makefile 新增 cc500 构建链（`tools/cc500/cc500.c` → 独立编译 →
   专用 crt 链接 → ELF blob + 源码 blob 嵌入内核）
 
-* **shell `ccboot` 自举命令**：run cc500（gcc 版）编译自身 → `/out.elf`=P1；
+* **shell** **`ccboot`** **自举命令**：run cc500（gcc 版）编译自身 → `/out.elf`=P1；
   再 run `/out.elf`（=P1）编译自身 → `/out.elf`=P2；校验 P1/P2 的 FNV-1a 校验和
   与字节数一致，单行输出 `[ccboot] sha1=.. sha2=.. bytes=.. PASS/FAIL`
 
@@ -591,10 +785,13 @@
 * 编译器 C 子集约束记录：无 `break/continue/for/switch/&&/||/!/</>/%/*(乘)/类型转换`，
   循环退出用 done 标志、`>=` 用操作数交换为 `<=`、换行用 `\x0a`（非 `\n`）——自举
   源本身必须能被自己编译
+
 * Makefile 依赖陷阱：`$(KERNEL): $(OBJS)` 的 prereq 即时展开，`OBJS +=` 须在其前
   （否则 recipe 引用 blob 而 make 不先构建），已加注释
+
 * 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 ccboot 用例
   （编译自身 OK → P1 加载 → 自举 PASS），版本横幅/motd 更新为 v0.27
+
 * 全量回归（宿主 + qemu + serial + persist + net）五层全绿
 
 ## \[v0.26] - 2026-08-29 · 容量三连#1：用户栈按需生长
@@ -628,7 +825,7 @@
 * **地址空间重布局**：栈区上移扩为 0x80010000-0x80090000，shell 迁至 0x80090000、
   app 槽迁至 0x800A0000、共享内存迁至 0x800A4000，避开扩展后的栈区
 
-* **`deep` 演示程序**（`src/app/deep.c`）：递归分配 1KB 局部数组 ×12 层，在 4KB
+* **`deep`** **演示程序**（`src/app/deep.c`）：递归分配 1KB 局部数组 ×12 层，在 4KB
   初始栈上触发 3 次按需生长后存活（`survived 12KB recursion via stack growth`）
 
 **Engineering**
@@ -651,7 +848,7 @@
 
 * **用户堆系统调用**（`SYS_BRK=35`，`src/kernel/usermode.c` 分发）：`sys_brk(addr)`
   查询/设置 program break、`sys_sbrk(incr)` 相对增长（返回旧 brk）；堆区
-  [USER_HEAP_BASE, USER_HEAP_MAX) 在共享内存之后（v0.26#3 定为 0x801A4000-0x801F4000，
+  \[USER\_HEAP\_BASE, USER\_HEAP\_MAX) 在共享内存之后（v0.26#3 定为 0x801A4000-0x801F4000，
   320KB = 80 页），每进程独立、相互隔离
 
 * **堆状态纯逻辑**（`src/mm/brk.h` `brk.c`）：`brk_pages_up`（扩展需补映射页数）、
@@ -659,15 +856,16 @@
   记账进 PCB（`heap_frames[]` + `heap_fcount`），收缩只更新 `heap_brk` 保留映射复用
 
 * **页错误堆处理**（`src/mm/mem.c` `pf_handler`）：访问已分配但未映射的堆页时按需补映射，
-  与栈生长共用页错误路径；堆页访问越界（越过 heap_brk 且映射缺失）按普通缺页拒绝
+  与栈生长共用页错误路径；堆页访问越界（越过 heap\_brk 且映射缺失）按普通缺页拒绝
 
-* **`heapdemo` 演示程序**（`src/app/heapdemo.c`）：初始 brk 查询 → sbrk(4K) 写入校验 →
+* **`heapdemo`** **演示程序**（`src/app/heapdemo.c`）：初始 brk 查询 → sbrk(4K) 写入校验 →
   sbrk(16K) 写入校验 → 收缩回 8KB 处（内核保留映射）→ sbrk 复用已映射页 → 极简
   bump-allocator 冒烟（编译器 malloc 铺路）
 
 **Engineering**
 
 * 宿主单测 `tests/test_brk.c`（21 断言）：brk 状态机边界——不动/收缩/页对齐扩展/超上限
+
 * 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 `heapdemo` 用例
   （brk 查询 → 扩页日志 → 收缩保留映射 → 存活 → 退出码 0）
 
@@ -680,18 +878,19 @@
   PCB、`release_priv_frames` 归还），解除 32KB/8 帧约束，支持 MB 级 ELF；
   `APP_MAXFRAMES`/65536B 旧上限检查移除（上限改为 app 区同量级 1MB）
 
-* **地址空间重布局**：用户空间扩至 16MB（USER_SPACE_END=0x81000000）；app 区扩为
+* **地址空间重布局**：用户空间扩至 16MB（USER\_SPACE\_END=0x81000000）；app 区扩为
   1MB（0x800A0000-0x801A0000），共享内存迁至 app 区之后（0x801A0000）、堆区迁至
   0x801A4000（v0.26#2 首版曾驻 0x800B0000，随本次迁址后断言同步更新）
 
-* **`bigdemo` 演示程序**（`src/app/bigdemo.c`）：70KB 初值数据（.data 段）使 ELF 文件
+* **`bigdemo`** **演示程序**（`src/app/bigdemo.c`）：70KB 初值数据（.data 段）使 ELF 文件
   78KB > 旧上限 65536B，加载需 21 帧（旧 8 帧上限时代无法加载）；逐字节填充校验和
   验证数据完好
 
 **Engineering**
 
-* 宿主单测 `tests/test_userptr.c` 边界更新：USER_SPACE_END 扩为 0x81000000 后
+* 宿主单测 `tests/test_userptr.c` 边界更新：USER\_SPACE\_END 扩为 0x81000000 后
   上限内末 4 字节 / 越界 / 长度溢出断言随新边界调整
+
 * 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 `bigdemo` 用例
   （启动 → 70KB 校验 → 存活 → 退出码 0），并断言加载帧数突破旧 8 帧上限
 

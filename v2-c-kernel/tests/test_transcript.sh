@@ -16,7 +16,7 @@ for c in qemu-system-i386; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
 
-CFG="-display none -vga std -no-reboot -no-shutdown -m 64 -serial stdio -monitor none"
+CFG="-display none -vga std -no-reboot -no-shutdown -m 64 -nic none -serial stdio -monitor none"
 # 固定命令集：跨内核子系统的代表性读/运行/检视（复现性比对的"里程碑行"来源）
 CMDS=(
   "help"
