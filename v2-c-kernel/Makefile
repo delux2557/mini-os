@@ -81,8 +81,13 @@ endif
 ifdef TCP_DEMO
 TCP_DEMO_DEF = -DTCP_DEMO
 endif
+# v1.2 BUG-047 大文件下载：DL_DEMO 非空时加 -D，开机自动 spawn dldemo 拉 128KB
+#（tests/test_tcp_dl.sh 用它，跑完恢复）。
+ifdef DL_DEMO
+DL_DEMO_DEF = -DDL_DEMO
+endif
 $(BUILD)/kernel.o: src/kernel/kernel.c $(USERPROG_OFFS)
-	$(CC) $(CFLAGS) $(UART_NETIF_DEFAULT_DEF) $(TCP_DEMO_DEF) -c $< -o $@
+	$(CC) $(CFLAGS) $(UART_NETIF_DEFAULT_DEF) $(TCP_DEMO_DEF) $(DL_DEMO_DEF) -c $< -o $@
 
 $(BUILD)/sched.o: src/kernel/sched.c $(USERPROG_OFFS)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -113,7 +118,7 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo
+APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -176,6 +181,9 @@ $(BUILD)/apps/cc500.elf: $(BUILD)/apps/cc500.o $(BUILD)/apps/cc500_crt.o
 # ---- netif Step 4：httpdemo（虚拟 TCP 薄包装演示）。薄包装 lib（src/app/tcp.c）
 # 与演示共享同一套 CFLAGS（-Isrc/net 已含 tcp_proto.h），链接进 httpdemo.elf ----
 $(BUILD)/apps/httpdemo.elf: $(BUILD)/apps/httpdemo.o $(BUILD)/apps/tcp.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $(BUILD)/apps/tcp.o $<
+# v1.2 大文件下载 demo：与 httpdemo 同套虚拟 TCP 薄包装 lib（tcp.o）
+$(BUILD)/apps/dldemo.elf: $(BUILD)/apps/dldemo.o $(BUILD)/apps/tcp.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $(BUILD)/apps/tcp.o $<
 # 源码以原始字节嵌入（符号 _binary_cc500_c_start/end，由输入文件名 cc500.c 决定）
 $(BUILD)/apps/cc500.c: tools/cc500/cc500.c

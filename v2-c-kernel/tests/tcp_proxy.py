@@ -12,8 +12,8 @@ import socket, sys, threading, time, select, argparse
 
 END, ESC = 0xC0, 0xDB
 HDR = 8
-MSG_DATA, MSG_OPENED, MSG_CLOSED, MSG_ERROR, MSG_TIMEOUT, MSG_OPEN, MSG_CLOSE = (
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07)
+MSG_DATA, MSG_OPENED, MSG_CLOSED, MSG_ERROR, MSG_TIMEOUT, MSG_OPEN, MSG_CLOSE, MSG_ACK = (
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08)
 PROTO_VERSION = 1
 
 logf = None
@@ -101,6 +101,9 @@ def make_udp(sip, sport, dip, dport, payload):
     return bytes(ip) + bytes(udp)
 
 # ---------------- 会话 / 转发逻辑 ----------------
+# v1.2 可靠下行（stop-and-wait）：host→guest 的 MSG_DATA 每报带递增 seq，代理每会话
+# 只有 ≤1 个数据报在途（ACK 才发下一个）；ACK 丢则按 RETX_MS 定时重发该报，guest 幂等
+# 丢弃重发并回 ACK，自愈。彻底消除 burst 在 NIC/socket 界面的随机丢包，128KB 大文件不缺尾。
 class Session:
     def __init__(self, sid, peer, addr, target):
         self.sid = sid; self.peer = peer
@@ -110,9 +113,23 @@ class Session:
         self.last = time.monotonic()
         self.target = target
         self.closed = False
+        # ---- 可靠下行（stop-and-wait）状态 ----
+        self.pending = bytearray()          # host TCP 读到的、尚未分派到数据报的待发字节
+        self.seq = 0                        # 下一个要分配的序列号
+        self.inflight = None                # 在途数据报载荷（等 ACK）；None=空闲
+        self.inflight_seq = None
+        self.inflight_t = 0.0
+        self.eof = False                    # host TCP 已 EOF（pending 发完后可关）
+        self.finished = False               # 已发 MSG_CLOSED
     def touch(self): self.last = time.monotonic()
 
 class Proxy:
+    # 可靠下行重传间隔（秒）：需 ≥ 最慢通道的单报回环。SLIP 下 guest UART 收 1400B 数据报
+    # 约需 ~1s（100Hz/16B FIFO），RTX 过短会在 ACK 到前疯狂重发灌爆慢 UART（test_tcp 串口通道
+    # 实测 60ms 卡死）；e1000 回环 <10ms，正常无丢不触发重传，2s 只在真丢时用于恢复。
+    RETX_MS = 2.0
+    CHUNK   = 1392          # 单数据报载荷上限（= netsock 每数据报钳制上限-8）
+
     def __init__(self, logfile=None, idle=30.0, timeout=8.0):
         self.sess = {}
         self.idle = idle; self.timeout = timeout
@@ -124,6 +141,39 @@ class Proxy:
         if a is None: return
         self.peer_send(a, hdr(sid, mtype) + payload)
         log(f'send sid={sid} type={mtype} -> {a}')
+
+    # 发一个带 seq 的下行数据报（payload 必须 ≤CHUNK）
+    def send_data(self, sess, seq, payload):
+        h = bytearray(hdr(sess.sid, MSG_DATA))
+        h[6] = (seq >> 8) & 0xFF; h[7] = seq & 0xFF
+        self.peer_send(sess.addr, bytes(h) + payload)
+        log(f'send sid={sess.sid} data seq={seq} {len(payload)}B -> {sess.addr}')
+
+    # 推进一次发送（stop-and-wait）：空闲才填一个数据报；pending 发尽且 eof 则发 CLOSED
+    def _send_next(self, sess):
+        if sess.finished: return
+        if sess.state == 'CLOSING': return
+        if sess.inflight is not None:        # 上一个还没 ACK，不能再发
+            return
+        if len(sess.pending) > 0:
+            payload = bytes(sess.pending[:self.CHUNK])
+            del sess.pending[:len(payload)]
+            sess.inflight_seq = sess.seq
+            sess.seq = (sess.seq + 1) & 0xFFFF
+            sess.inflight = payload
+            sess.inflight_t = time.monotonic()
+            self.send_data(sess, sess.inflight_seq, payload)
+        elif sess.eof:
+            sess.finished = True
+            sess.state = 'CLOSING'          # 数据全送达后才告知 guest 关闭（保证不缺尾）
+            self.reply(sess.sid, MSG_CLOSED)
+            self._teardown(sess)
+
+    # 超时重传在途数据报（ACK 丢失自愈）。幂等：guest 收到重复 seq 丢弃并回 ACK
+    def _retransmit(self, sess):
+        if sess.inflight is not None and (time.monotonic() - sess.inflight_t) >= self.RETX_MS:
+            sess.inflight_t = time.monotonic()
+            self.send_data(sess, sess.inflight_seq, sess.inflight)
 
     def handle_msg(self, addr, mtype, sid, payload):
         s = self.sess.get(sid)
@@ -139,10 +189,17 @@ class Proxy:
             self.sess[sid] = sess
             t = threading.Thread(target=self._connect, args=(sess,), daemon=True)
             t.start()
-        elif mtype == MSG_DATA:
+        elif mtype == MSG_DATA:        # guest→host 上传：尽力而为（大文件方向是下行）
             if s and s.state == 'OPEN' and s.tcp:
                 try: s.tcp.sendall(payload)
                 except OSError: self._teardown(s)
+        elif mtype == MSG_ACK:         # guest→host 累计 ACK：payload= 下一期望 seq(2BE)
+            if s and len(payload) >= 2 and s.inflight is not None:
+                ack = int.from_bytes(payload[0:2], 'big')
+                # 期望下一个 == 在途 seq+1 → 该报已被接收，清空在途，发下一个
+                if ack == ((s.inflight_seq + 1) & 0xFFFF):
+                    s.inflight = None; s.inflight_seq = None
+                    self._send_next(s)
         elif mtype == MSG_CLOSE:
             log(f'MSG_CLOSE sid={sid}')
             if s: self._teardown(s)
@@ -171,6 +228,9 @@ class Proxy:
         now = time.monotonic()
         for sid in list(self.sess):
             s = self.sess[sid]
+            # 可靠下行：定时重传在途数据报；EOF 且 pending 发尽时驱动发 CLOSED（无新数据/ACK 也能推进）
+            self._retransmit(s)
+            self._send_next(s)
             if s.state == 'OPENING' and now - s.last > self.timeout:
                 self.reply(sid, MSG_TIMEOUT); self._teardown(s); del self.sess[sid]
             elif s.closed and now - s.last > 2:
@@ -178,28 +238,26 @@ class Proxy:
             elif now - s.last > self.idle:
                 self._teardown(s); del self.sess[sid]
 
-    # 从 select 就绪集中读 TCP 下行：非阻塞，绝不阻塞主循环（否则 chardev/udp 输入被饿死）
-    # B1 修复：单条 MSG_DATA 分块 ≤CHUNK（=netsock 每数据报钳制上限-8），否则 guest 收不下
-    CHUNK = 1392
+    # 从 select 就绪集中读 TCP 下行：非阻塞，绝不阻塞主循环（否则 chardev/udp 输入被饿死）。
+    # v1.2 可靠下行：读来的字节进了 pending 后由 stop-and-wait 逐步按 ACK 下发，不再 burst。
     def _tcp_read(self, ready):
         for sid in list(self.sess):
             s = self.sess[sid]
             if s.tcp is None or s.tcp not in ready: continue
-            try: data = s.tcp.recv(4096)
-            except (BlockingIOError, socket.timeout): continue
-            except OSError: data = b''
+            try:
+                data = s.tcp.recv(4096)
+            except (BlockingIOError, socket.timeout):
+                continue
+            except OSError:
+                data = b''
+            s.touch()
             if data:
-                s.touch()
-                # v1.1 收尾2：串口(SLIP)通道下行加保守节拍——cap=500 + 20ms 分块间隔，
-                # 让 guest UART 轮询(100Hz/16B FIFO)跟得上字节流；e1000 通道维持 1392 全速
-                cap = self.SLIP_CAP if getattr(self, 'mode_is_slip', False) else self.CHUNK
-                for i in range(0, len(data), cap):
-                    self.reply(sid, MSG_DATA, data[i:i + cap])
-                    if cap != self.CHUNK:
-                        time.sleep(0.02)
-            else:
-                self.reply(sid, MSG_CLOSED); self._teardown(s)
-                self.sess.pop(sid, None)
+                s.pending += data
+                self._send_next(s)
+            elif s.state == 'OPEN' and s.eof is False:
+                # host TCP EOF：标记 eof，pending 发尽且 ACK 齐后由 _send_next 一次性发 CLOSED
+                s.eof = True
+                self._send_next(s)
 
     def _readable_tcps(self):
         return [s.tcp for s in self.sess.values() if s.tcp is not None and s.state == 'OPEN']

@@ -82,6 +82,7 @@ extern char _binary_cc500_elf_start[],  _binary_cc500_elf_end[];     /* v0.27 �
 extern char _binary_cc500_c_start[],    _binary_cc500_c_end[];       /* v0.27 编译器源码 */
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 extern char _binary_httpdemo_elf_start[], _binary_httpdemo_elf_end[];  /* v1.1 Step 4 虚拟 TCP */
+extern char _binary_dldemo_elf_start[],    _binary_dldemo_elf_end[];    /* v1.2 大文件下载 */
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
     int ino = fs_create(fs_device(), name);
@@ -162,6 +163,10 @@ static void initramfs_setup(void) {
     initramfs_file("httpdemo",
                    _binary_httpdemo_elf_start,
                    (uint32_t)(_binary_httpdemo_elf_end - _binary_httpdemo_elf_start));
+    /* v1.2 大文件下载 demo（开机按 DL_DEMO spawn；亦可 shell `run dldemo` 触发） */
+    initramfs_file("dldemo",
+                   _binary_dldemo_elf_start,
+                   (uint32_t)(_binary_dldemo_elf_end - _binary_dldemo_elf_start));
 }
 
 void storage_init(void) {
