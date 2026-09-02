@@ -3,6 +3,59 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.4.3] - 2026-09-02 · record/replay 地基 P3：replay 回放差分闭环（`make test-rp`）
+
+> P1/P2/P3 地基三元闭环：icount 定内核确定性（P1）→ transcript 录输入/输出（P2）→ 回放消费
+> transcript 驱动内核并证 bug 表现（P3，本轮）。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/replay.sh`（新增，回放器）：`replay_into <in.tr> <out.log> <runid> <done_regex>` 按
+  seq/rel_ms/payload 打拍注入串口、等完成信号驱动真实内核路径。**不用"日志静止"作结束判据**
+  （本内核有后台 demo 应用持续打印）。
+* `tests/test_replay.sh`（新增，`make test-rp`）：bug 本质闭环——从 bugs.md 抽 **BUG-026**
+  （cc500 形参列表 EOF 未闭合→死循环），录 `writefile` 写 `int main(int x` + `ccrun` 的
+  transcript → 回放 → 修复版见 `cc500: error at`（exit(1)，不死循环）。
+* **诚实发现**（P3 实测边界，已规避）：icount(TCG) 下 cc500 编译分钟级 + 后台 demo 抢 tick →
+  回放不用 icount，bug 闭环靠信号断言（逐字节确定性由 P1 test-det 承担）；跨独立冷启里程碑
+  一致不机械稳定 → 两遍一致性作 `REPLAY_VERIFY=1` soft 检查。
+
+## \[v1.4.2] - 2026-09-02 · record/replay 地基 P2：transcript 固化（`make test-tr`）
+
+> 承接 P1（icount 确定性）的录制侧：把串口输入命令流与输出字节流固化为可归档、可复现、
+> 可差分的 transcript，失败自动归档现场。为 P3 回放差分铺数据源。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/transcript.sh`（新增，录制内核，`source` 用）：`tr_start/tr_send/tr_snapshot/tr_abort/
+  tr_finish`。`*.in.tr` 列=序号/相对ms/命令（可重放审计），`*.out.tr` 原始字节流，`RESULT` 标
+  PASS/FAIL 及失败点。
+* `tests/test_transcript.sh`（新增，`make test-tr`）：验收三连——① 成功固化产物完整；
+  ② **失败自动归档**（`tr_abort` 固化现场并标 FAIL，"人为触发失败可得可复现 transcript"）；
+  ③ 复现性雏形（两次冷启同命令集，里程碑语义行逐字节一致）。
+* **诚实发现**：非 icount 两次运行 `Hello ticks=296/297` 差 1——guest tick 随墙钟调度浮动，
+  印证 roadmap"公共时钟须用 icount 虚拟时钟、非 guest tick"；复现性按 `ticks=N` pin 掉噪音，
+  真逐字节确定性交给 P1 test-det。相对 ms 用 host 墙钟，icount 锚点留 P3。
+
+## \[v1.4.1] - 2026-09-02 · record/replay 地基 P1：icount 确定性启动验收（`make test-det`）
+
+> 承接 roadmap「阶段二·加固」record/replay 地基的第一档：先用 `-icount` 把**内核执行**钉到
+> QEMU 虚拟时钟，证明"同输入同输出"，为后续 P2 transcript 固化 / P3 回放差分铺确定性锚点。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/test_determinism.sh`（新增，`make test-det`）：两次 QEMU `-icount shift=auto,align=on,
+  sleep=on` 冷启动，串口日志**逐字节 diff** 判定确定性——定时器/中断/调度/网络握手同输入同输出。
+* **实测铁证**：icount 下启动段（含 **DHCP OFFER/ACK 网络握手**）两次运行逐字节一致。
+* **诚实发现**：交互回归脚本（qemu_regression 的 HMP sendkey / serial / persist / cc500）基于
+  host 墙钟轮询（`wait_for`/`sleep`），与 icount 虚拟时钟流速不匹配 → icount 下 run 窗内超时
+  误报。此即 roadmap P1 所述"暴露交互脚本的 host 墙钟时序依赖"，故**不回编**这些脚本；icount
+  确定性验证独立收编为 `test-det`，交互确定性留待 P2 transcript 录放。
+
+**Docs**
+
+* `roadmap.md`「record/replay 地基」：P1 标记 ✅ 落地，记录实测结论与边界降级，P2/P3 仍待做。
+
 ## \[v1.4] - 2026-09-02 · shell writefile heredoc 多行写入（绕开 128B 单行截断）
 
 > 面向"AI agent 在 guest 内写较大源码"：`writefile <<DELIM <path>` 多行写入，逐行收集直至
