@@ -256,6 +256,14 @@ test-det:
 test-tr:
 	bash tests/test_transcript.sh
 
+# BUG-052 稳定性回归：test-tr 连跑 N 次（默认 3），任一次失败即 exit 1。
+# 意图：加固"0 假红"判据——单跑偶发放过因串口撕裂/捕获窗引发的 flake，
+# 连跑把这层"judging 信噪比"的老毛病显性化（修复前 ~40-67% flake）。
+# 慢（多次 QEMU 冷启），故仅挂在非 required 的 regression-rr job；`make test` 仍单跑。
+TR_STA_RUNS ?= 3
+test-tr-stable:
+	@for i in $$(seq 1 $(TR_STA_RUNS)); do echo "test-tr run#$$i/$(TR_STA_RUNS)..."; bash tests/test_transcript.sh || { echo "[FAIL] test-tr run#$$i flake/回归"; exit 1; }; done; echo "[ok] test-tr $(TR_STA_RUNS)/$(TR_STA_RUNS) pass (0 假红)"
+
 # record/replay 地基 P3：回放差分——消费 transcript 两次重放差分一致 + 已修 bug 触发链路
 test-rp:
 	bash tests/test_replay.sh
@@ -281,4 +289,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp test-repro test-tcp-attack clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack clean
