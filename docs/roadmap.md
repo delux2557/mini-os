@@ -155,6 +155,13 @@
     录放主路径仍 `.tr` 文本"证据原件"（确定性/可 diff/可归档），sqlite 只作"放大镜"，坏了绝不影响
     录放正确性；归档量大起来才有跨 runid 聚合/`LIKE` 检索的爽感，是"想试随时能试"的纯增量工具。
 
+  * **✅ record/replay 接 repro_bugs.sh（v1.4.5，`make test-repro`）**：首方复现脚本接入录放——
+    BUG-A/BUG-B 复现命令流改经 `tr_send` 录制为 `.in.tr/.out.tr`（含 wait 驱动的**真实相对 ms**，
+    补上"repro_bugs.sh 只脚本化、未录时间关系"缺口）；修复版"未复现"即 RESULT=PASS 证据，若回归
+    （`compile FAIL`/`output setup fail`）当场标 FAIL。录制 transcript 实测可被 `replay.sh` 消费
+    重放复现固定行为（`[ccboot] byte-identical PASS` / `out2.elf` 构建 / `bad.c`→`cc500: error at`），
+    无网络路径同加 `-nic none`。
+
 * ✅ **回归盲区补格**（v0.29）：
 
   * `deep`/已生长栈 × fork/exec 组合：新增 `deepfork` / `deepexec` 演示并挂入
