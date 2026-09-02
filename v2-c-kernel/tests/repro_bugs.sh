@@ -6,6 +6,7 @@ source "$SCRIPT_DIR/transcript.sh"   # record/replay · P2 录制：把下面复
 cd "$SCRIPT_DIR/.." || exit 1        # 相对路径定位到 v2-c-kernel/，任意机器可跑
 make >/dev/null 2>&1
 LOG=build/repro.log
+export TR_LOG="$LOG"
 TIN=build/repro_in.fifo
 TOUT=build/repro_out.fifo
 QPID=""; CAT_PID=""

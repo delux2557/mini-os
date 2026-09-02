@@ -27,6 +27,7 @@ echo "== [2/5] 录制含「已修 bug 触发输入」的 transcript（BUG-026 �
 # ccrun = writefile(heredoc) + 编译热运行；触发输入走 writefile 保持 cc500 可如常读到源码
 rm -rf build/transcripts
 LOG=build/tr_record.log; TIN=rp_record
+export TR_LOG="$LOG"
 mkfifo build/${TIN}_in.fifo build/${TIN}_out.fifo
 (cat build/${TIN}_out.fifo > "$LOG") & cp=$!
 qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown \
