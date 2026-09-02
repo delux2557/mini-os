@@ -55,7 +55,8 @@
 #define TCTL_PSP  (1u << 3)      /* 短包自动填充到 60 字节 */
 
 #define MMIO_SIZE 0x20000u       /* 128KB */
-#define RX_N  16
+#define RX_N  16                 /* RX 环描述符数。v1.2 BUG-047 收尾：可靠下行改 stop-and-wait
+                                    （每会话在途恒 1 报，ACK 才发下一个），不再需要大环抗 burst */
 #define TX_N  8
 #define BUF_SIZE 2048
 
