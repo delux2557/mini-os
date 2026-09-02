@@ -107,6 +107,34 @@ tr_snapshot() {
     cp "$log" "$TR_DIR/out.tr" 2>/dev/null || : > "$TR_DIR/out.tr"
 }
 
+# F4（交接单 处理项）：tr_mark 开窗锚点——把 transcript 从"原始字节流"升级为"逻辑会话"。
+# 在就绪点（如 shell 提示符就位后）打一个命名锚，把该刻的串口日志字节偏移与相对毫秒固化进转录：
+#   * in.tr 记事件行 `# MARK <label> @ <rel_ms> (log_off=<n>)`——'#' 前缀使 replay_into 跳过，回放安全；
+#   * marks 表（$TR_DIR/marks：label\tlog_off\trel_ms）供窗口化判据读取。
+# 这样各测试脚本不再各自用 grep 全日志判据（易被 boot 期同名输出误匹配），而是统一"在就绪锚后"归一化扫描。
+tr_mark() {
+    local label="${1:?tr_mark: 需要锚点标签}" log="${2:-${TR_LOG:-build/serial_term.log}}"
+    [ -n "$TR_DIR" ] || { echo "[transcript] warn: tr_mark 需先 tr_start" >&2; return 1; }
+    local rel=0 off=0
+    [ -n "$TR_FIRST" ] && rel=$(( $(date +%s%3N) - TR_FIRST ))
+    [ -f "$log" ] && off="$(wc -c < "$log")"
+    printf '# MARK %s @ %d (log_off=%d)\n' "$label" "$rel" "$off" >> "$TR_DIR/in.tr"
+    printf '%s\t%d\t%d\n' "$label" "$off" "$rel" > "$TR_DIR/marks"
+    echo "[transcript] mark '$label' @ ${rel}ms (log_off=${off})"
+}
+
+# 输出某锚点之后串口日志的字节流（判据归一化扫描源）。锚点未知/无日志 -> 空流 -> 上层判断自然失败。
+tr_window_after() {
+    local label="${1:?tr_window_after: 需要锚点标签}" log="${2:-${TR_LOG:-build/serial_term.log}}"
+    local off=0 found=0 lbl o r
+    if [ -f "$TR_DIR/marks" ]; then
+        while IFS=$'\t' read -r lbl o r; do
+            [ "$lbl" = "$label" ] && { off="$o"; found=1; break; }
+        done < "$TR_DIR/marks"
+    fi
+    [ "$found" -eq 1 ] && [ -f "$log" ] && [ "$off" -gt 0 ] && tail -c +"$((off+1))" "$log"
+}
+
 # 归档最终 transcript：把 in/out 拷贝到 runid 目录已成（in.tr/out.tr 常驻故无需重复）。
 # 真正要"固化"的是一次失败的可复现现场——这里写一个 README 标记成功/失败语义。
 tr_finish() {

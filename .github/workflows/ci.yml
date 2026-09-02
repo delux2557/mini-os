@@ -34,3 +34,33 @@ jobs:
         with:
           name: build-logs
           path: v2-c-kernel/build/*.log
+
+  # RR 处理项重型回归（F3/F6 修复落点）：独立 job，不绑定 main 分支保护的 required check `test`，
+  # 避免拖慢/抖动强制门禁；但每次 push/PR 都会执行，红绿可见，用于把"修复过的测试 harness"接进 CI 回归。
+  # - make test-repro   ：repro_bugs.sh（BUG-A/BUG-B 不复现 + F6 argv 生效硬断言）
+  # - make test-tcp-attack：test_tcp_attack.sh（F3 端口占用→exit 2 环境病，不误杀）
+  regression-rr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-multilib nasm qemu-system-x86 socat
+
+      - name: 录制/回放复现回归（BUG-A/BUG-B + argv 硬断言）
+        run: make test-repro
+        working-directory: v2-c-kernel
+
+      - name: 虚拟 TCP 压力/攻击回归（端口占用=环境病 exit 2）
+        run: make test-tcp-attack
+        working-directory: v2-c-kernel
+
+      - name: 失败上传构建日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-rr-logs
+          path: v2-c-kernel/build/*.log
