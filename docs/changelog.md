@@ -3,6 +3,30 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.4] - 2026-09-02 · shell writefile heredoc 多行写入（绕开 128B 单行截断）
+
+> 面向"AI agent 在 guest 内写较大源码"：`writefile <<DELIM <path>` 多行写入，逐行收集直至
+> 独立 DELIM 行、逐行追加（每行≤128B 但任意行数拼接），大程序一次写入。128B 单行物理上限保留
+> （键盘行缓冲），但不再是"只能写小 demo"的天线。这是把单行写盘升级为可用的源码写入通道。
+
+**Added**（`src/app/shell.c`，`cmd_writefile`）
+
+* **heredoc 多行模式**：检测 `args` 以 `<<` 开头 → 解析 `<<DELIM <path>` → create/open → 循环
+  `sys_readline` 逐行收集，独立 DELIM 行（去首尾空白后精确匹配）终结；每行 `SYS_FS_WRITE` 追加
+  其内容 + `\n`（空行保留行结构）；输出 `[writefile] '<path>' wrote <N> bytes (heredoc)`。
+* **`cmd_help`**：补 `writefile <<D <p>` 语法行。
+
+**Added**（Tests）
+
+* `tests/test_serial.sh`：heredoc 回归用例——`writefile <<EOF /multi.c` 写 >128B 多行源码 →
+  `ccrun` 编译运行 `exited code=0 PASS`（源码合法可编译运行，反证未被截断）。
+
+**Docs**
+
+* `bugs.md` OBS-004（=F-6）标记 **✅ 已缓解（v1.4）**：单行截断被 heredoc 绕开，仅保留"键盘单行
+  物理上限"这一合理约束。
+* `changelog.md`：本条目。
+
 ## \[v1.3] - 2026-09-02 · 虚拟 TCP 上行滑动窗口（stop-and-wait→N 在途，吞吐 W/RTT）
 
 > 上行停-等升级为**滑动窗口**：guest `tcp_send` 把载荷写入发送窗口（`TCP_TXWIN=8` 槽×独立 seq），
