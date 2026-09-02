@@ -54,6 +54,8 @@ run_test test_icmp    "src/net/icmp.c src/net/ip.c src/net/udp.c tests/test_icmp
 run_test test_dhcp    "src/net/ip.c src/net/udp.c src/net/dhcp.c tests/test_dhcp.c"
 run_test test_netif   "src/net/netif.c tests/test_netif.c"
 run_test test_slip    "src/net/slip.c tests/test_slip.c"
+# v1.4 heredoc 修复回归：DELIM 终结判定（shell_heredoc.h，防"bug 直达 CI"）
+run_test test_heredoc "tests/test_heredoc.c"
 
 # ---- 阶段二加固：宿主侧 fuzz（阶段建议 v0.29）----
 # 对纯逻辑解析模块（fs_walk/elf/arp/ip/udp/icmp/dhcp）注入随机字节/随机路径，

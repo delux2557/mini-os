@@ -15,11 +15,24 @@
   `sys_readline` 逐行收集，独立 DELIM 行（去首尾空白后精确匹配）终结；每行 `SYS_FS_WRITE` 追加
   其内容 + `\n`（空行保留行结构）；输出 `[writefile] '<path>' wrote <N> bytes (heredoc)`。
 * **`cmd_help`**：补 `writefile <<D <p>` 语法行。
+* **`shell_heredoc.h`（新增）**：DELIM 终结判定抽为**纯函数** `wf_delim_hit`（无 syscall 依赖，
+  可宿主单测），heredoc 循环改为调用之。
+
+**Fixed**（PR #25 审核发现）
+
+* **DELIM 终结判定用错长度变量**：原实现 path 解析复用 `j` 且未保存 DELIM 长度——终结比较
+  `s + j == e` 用 path 长度(如 8)而非 DELIM 长度(如 3)，EOF(3 字符)永不匹配 → heredoc
+  **永不终结**，后续命令（ccrun 等）被吞进收集循环，serial 层 + 全链 CI 同点红（坑 5 稳定失败）。
+  修复：path 解析前保存 `delim_len = j`，终结判定改用 `delim_len`，并抽出纯函数消除此类"变量
+  复用"复发。
 
 **Added**（Tests）
 
 * `tests/test_serial.sh`：heredoc 回归用例——`writefile <<EOF /multi.c` 写 >128B 多行源码 →
   `ccrun` 编译运行 `exited code=0 PASS`（源码合法可编译运行，反证未被截断）。
+* `tests/test_heredoc.c`（宿主单测，并入 run_host_tests）：DELIM 精确匹配 / 去空白 / 前缀不误
+  终结 / 空行不终结 / **根因回归**（path 长度误当 DELIM 长度 → 判 0）——秒级锁定本 bug，防
+  "本地未验证直达 CI"复发。宿主 20 项全绿。
 
 **Docs**
 

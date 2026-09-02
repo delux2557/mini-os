@@ -6,6 +6,7 @@
  */
 #include "user_lib.h"
 #include "version.h"   /* v0.30（评估 L-4）：banner 版本串单一来源 */
+#include "shell_heredoc.h"   /* v1.4 修复：heredoc DELIM 终结判定（纯逻辑，可宿主单测） */
 
 #define CMD_MAX  128
 /* v0.27b: arg 缓冲提升到与命令行同宽，writefile 才能写入接近整行长的源码内容 */
@@ -431,6 +432,7 @@ static void cmd_writefile(char *args) {
         while (args[i] == ' ') i++;
         while (args[i] && args[i] != ' ' && j < 31) delim[j++] = args[i++];
         delim[j] = 0;
+        uint32_t delim_len = j;                  /* 保存 DELIM 长度：下两行 j 被 path 解析复用 */
         while (args[i] == ' ') i++;
         j = 0;
         while (args[i] && args[i] != ' ' && j < 63) path[j++] = args[i++];
@@ -456,7 +458,8 @@ static void cmd_writefile(char *args) {
                 if (syscall3(SYS_FS_WRITE, 1, (uint32_t)"\n", 1) > 0) total += 1;
                 continue;
             }
-            if (s + j == e && user_strncmp(line + s, delim, j) == 0) break;  /* 遇 DELIM 结束 */
+            if (wf_delim_hit((const uint8_t *)line, (uint32_t)n,
+                             (const uint8_t *)delim, delim_len)) break;  /* 遇 DELIM 收尾 */
             int w = (int)syscall3(SYS_FS_WRITE, 1, (uint32_t)line, (uint32_t)n);
             if (w > 0) total += (uint32_t)w;
             if (syscall3(SYS_FS_WRITE, 1, (uint32_t)"\n", 1) > 0) total += 1;
