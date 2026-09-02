@@ -101,8 +101,26 @@
   统计对账（泄漏/双重释放/写越界破坏块头都会漂移）；报告碎片；宿主单测 + QEMU selftest
   双重锁定（`[audit] heap ok`）
 
-* **record/replay 基础设施**：QEMU `-icount` + gdb reverse-debugging（勿引 rr）；
-  日志钉点基于 v0.21 tick 时间戳（已备），失败 transcript 固化回归
+* **record/replay 地基（候选，未动码；dev 侧基建，对接"AI agent 演练场/测评"）**
+  **技术前提（先对齐再动工）**：QEMU `-icount` 只保证**内核执行**确定（虚拟时间=指令计数，
+  定时器/中断/调度同输入同输出），**不约束整场测试**——三门外部输入（串口 FIFO 注入 / 网络
+  SLIRP·宿主转发器 / host 侧 kill·sleep 时序）不受 icount 约束。故完整形态 = 两层：**icount
+  确定性内核 + 输入流时间戳化录放**。公共时钟须用 **QEMU icount 虚拟时钟**（host 侧经 QMP/监控
+  读回），**非 guest 裸 `sys_getticks`**——repro_bugs.sh 只是"脚本化"未录时间关系，即缺此层。
+  分三阶段、每步独立可验收、保持 9 层 CI 绿（P1-P3 均为 tests/+Makefile+脚本的 dev 侧变更）：
+  * **P1 确定性启动（纯参数化、零逻辑改动）**：QEMU 加 `-icount shift=auto,align=on,sleep=on`，
+    环境变量 `QEMU_ICCOUNT=1` 开关（默认关、不破坏现状）。验收：**非网络层（host/qemu/serial
+    /persist/cc500）** icount 模式全绿 = 暴露该层隐藏的 host 墙钟时序依赖；网络层**不承诺** icount
+    （SLIRP 依赖 host 时间，见下"边界"降级）。
+  * **P2 transcript 固化（录放雏形）**：FIFO 驱动脚本输入侧把"发送内容+相对 tick"写 `*.in.tr`、
+    输出侧日志存 `*.out.tr`；失败自动归档（对齐"失败 transcript 固化回归"）；icount 模式失败 =
+    带确定性锚点。验收：人为触发一次失败 → 可得可复现的 `.in.tr`/`.out.tr` 归档。
+  * **P3 replay 验证（地基闭环）**：回放器按 `*.in.tr` 时间关系重放、比对 `*.out.tr` 逐字节一致
+    （确定性差分）；repro_bugs.sh 升级为消费 transcript。验收：从 bugs.md 抽 1 个已修 bug——录旧版
+    失败 transcript → 修复版回放 → 输出**不一致**（证明抓住 bug 本质）+ 新测试全绿。
+  **边界（诚实）**：`-icount` × SLIRP/外部进程时序是 QEMU 文档明示的交互点 → 网络层若红则降级为
+  "icount 只用于无网络交互层 + 网络层走 P2 transcript 录放"，地基仍成立。**gdb reverse-debugging**
+  仅作失败后人工单步逆向定位（开销大），不进回归主路径（P1-P3 不依赖它）。
 
 * ✅ **回归盲区补格**（v0.29）：
 
@@ -411,9 +429,9 @@ guest 无感；v1.2 起下行由转发器重传兜底、guest 仅幂等收敛）
 
   * **record/replay 提前**（简报论点成立：v0.20 "e1000 MMIO 高地址 × 页目录只克隆低 1GB"
     类跨子系统 bug 证明组合爆炸已开始，每加子系统它越便宜）。
-    **修正**：不引 rr 工具（rr 面向 x86-64 原生，不直接适配 QEMU guest），改
-    **QEMU** **`-icount`** **+ gdb reverse-debugging**（TCG i386 原生支持），日志钉点基于
-    v0.21 tick 时间戳（已备），失败 transcript 固化回归。
+    ✅ **方案已细化**（见阶段二「加固」·record/replay 地基候选条目，2026-09-02）：修正此前
+    "icount + gdb reverse-debugging"的粗略表述——icount 只定内核、必须叠输入流时间戳化录放，
+    gdb reverse-debug 降级为失败后人工定位旁路；公共时钟=QEMU icount 虚拟时钟。
 
   * **~~DHCP 租期续约（T1/T2 renew）~~**：✅ **v0.28 已完成**（RFC 2131 §4.4.5：
     T1 单播 RENEW / T2 广播 REBIND / ACK 重置 / NAK·超时重新获取；netsock 端口 68
