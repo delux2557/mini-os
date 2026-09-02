@@ -7,6 +7,9 @@
 > 预留、暂为空）、recv 超时上限由编译期常量 `TCP_RECV_TICKS` 承担（非字段）。`tcp_close` 的
 > 注销在 wire 上发的是 **guest→host 控制类 `MSG_CLOSE`**（非 host→guest 的 `MSG_CLOSED` 事件），
 > 方向语义见 `tcp-session-proto.md` §2.1。
+> v1.2 注记（2026-09-02）：连接对象实现新增字段 `rx_next`（下行可靠停-等期待序号，见
+> `tcp-session-proto.md` §6.1），仅作接收侧内部记账，**不改本契约任何 API 签名与返回语义**；
+> 后续「上行可靠 / 滑动窗口」候选同样只在对象内加状态、不破接口（见 roadmap"薄→厚演进候选"）。
 
 ## 1. 返回语义总表
 

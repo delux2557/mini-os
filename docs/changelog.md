@@ -3,6 +3,48 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.2] - 2026-09-02 · 虚拟 TCP 下行可靠（stop-and-wait）+ 大文件下载 demo + 路线图文档化
+
+> 语义边界与演进方向写入 roadmap：下行可靠停-等是"薄→厚"第一级台阶（guest 开始参与 seq/ACK，
+> 仍非完整状态机）；下一步候选「上行可靠」「滑动窗口」显式列入 roadmap（本次只动文档，代码见
+> 提交 `3ec88ee`）。
+
+**Changed**（wire，`src/net/tcp_proto.h`）
+
+* **`MSG_DATA` flags 复用为下行序列号**：会话头 flags 低 16 位由 v1.1 恒定 `0x0000` 改为
+  host→guest 状态下携带递增数据序列号 seq（`tcp_hdr_set/get_seq`）——**启用**了协议 v1.1 §2.1/§5
+  预留的"为厚包装加序列号/ACK 占位"
+* **新增 `MSG_ACK`（0x08）控制类**：guest→host 方向，payload = 下一期望 seq（2BE 大端）；
+  移除 `tcp_parse_hdr` 的"flags 必须为 0"校验（v1.2 起 flags 被 MSG_DATA 占用）
+
+**Changed**（guest 薄包装，`src/app/tcp.c/h`）
+
+* **可靠下行接收**：`drain()` 只接受 `seq == rx_next` 的顺序包，推入 rxb 并回累计 ACK
+  （`send_ack`）；重复/乱序包幂等丢弃并重发 ACK——端到端自愈；连接对象增 `rx_next` 期待序号
+* **demo**（`src/app/dldemo.c`）：真·大文件下载，不复用固定 `TCP_RXB`，每轮 tcp_recv 取 2KB
+  边收边累加，总长推至 **128KB 无总字节上限**，剥 HTTP 头后校验 body 尾 7B `EOFTAIL` 完整；
+  注册进 initramfs，`DL_DEMO` 构建开关开机 spawn（Makefile / storage.c / kernel.c）
+
+**Changed**（宿主转发器，`tests/tcp_proxy.py`）
+
+* **可靠下行 stop-and-wait**：Session 增 `pending/inflight/seq/inflight_t/eof/finished`，
+  in-flight 恒 ≤1 报，收到累计 ACK 才发下一个（`_send_next`）；ACK 丢失按 `RETX_MS=2.0s`
+  定时重发（`_retransmit`），SLIP 慢通道单报回环 ~1s，60ms 会灌爆慢 UART；e1000 快通道正常不触发
+* `_tcp_read` 改为读入 `pending` 后由 stop-and-wait 逐步下发，host EOF 标记后 data 发尽才发
+  `MSG_CLOSED`——保证不缺尾
+
+**Tests**
+
+* **test_tcp_dl.sh**：宿主 128KB 文件服务 + QEMU 跑 dldemo，校验 200 OK / 总长==131072 /
+  body 尾 `EOFTAIL` 完整；既有全量回归（test-tcp/slip-net/socket/persist/host）越跑越稳
+
+**Engineering / Docs**
+
+* docs：`roadmap.md` 新增"Step 4 收尾 2（v1.2）可靠下行"与"虚拟 TCP 薄→厚演进候选"
+  （**上行可靠** / **滑动窗口** 两项未动码候选）；`tcp-session-proto.md` 升 v1.2（MSG_ACK / seq /
+  可靠下行 / 未来项占位）；`tcp-thin-api.md` 补 `rx_next` 注记。本次提交仅文档（docs 目录），
+  代码改动均已并入提交 `3ec88ee`
+
 ## \[v1.1] - 2026-09-01 · 网络抽象层 netif + 虚拟 TCP 薄包装（Step 1-4）+ 收尾修复（PR #16）
 
 > 把网络从"协议直接驱动 e1000"解开为三层：网卡适配层（e1000 以太 / 串口 SLIP）↔ netif 接口
