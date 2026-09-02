@@ -26,6 +26,7 @@ send() { tr_send "$1"; sleep 0.3; }   # tr_send：写 fd9 并录制进 in.tr（�
 wait_for "shell 提示符" "mini-os\$ " 20
 tr_start repro                          # 录制起点（起记相对 ms）
 tr_snapshot "$LOG"
+tr_mark ready "$LOG"                    # F4：就绪锚——之后判据一律在锚后归一化（不扫 boot 期输出）
 
 echo "===== BUG-B：cc500 自编译产物丢 argv ====="
 send "ccboot"
@@ -37,10 +38,15 @@ wait_for "P1 编译（应走默认路径）" "cc500: compiled OK" 60
 sleep 1
 send "ls"
 wait_for "ls 输出" "\[ls\] /:" 8
-if grep -aq "out2.elf" "$LOG"; then
-    echo "[ok]   BUG-B 不存在：/out2.elf 已被创建（argv 生效）"
+# F6（交接单 处理项）：exec argv 生效专项断言。旧断言 grep "out2.elf" 会误匹配 shell 回显的命令本身，
+# 且为软分支（argv 回归也永不红）。改为按 `[ls]   out2.elf ...` 目录条目判定：仅当 argv 生效、文件真实
+# 落盘才 ok；argv 被静默丢弃（cc500 写默认 /out.elf）则必然红。
+# F4：判据经 tr_window_after ready 只在就绪锚后扫描，归一化，杜绝 boot 期同名输出误匹配。
+if tr_window_after ready "$LOG" | grep -aqE "\[ls\]  *out2\.elf"; then
+    echo "[ok]   argv 生效：/out2.elf 已在 ls 中列出（BUG-B 未复现）"
 else
-    echo "[!]   BUG-B 属实：/out2.elf 未创建（exec argv 被静默丢弃，P1 用默认路径写 /out.elf）"
+    echo "[!]   BUG-B 复现：ls 无 /out2.elf —— exec argv 被静默丢弃，cc500 落默认 /out.elf"
+    FAIL=$((FAIL + 1))
 fi
 
 echo "===== BUG-A：编译失败泄漏 slot2 -> 后续编译判若两机 ====="
