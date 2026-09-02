@@ -23,8 +23,8 @@ jobs:
             qemu-system-x86 \
             socat
 
-      # Makefile 的 test: 依赖链已含全 7 层（host/qemu/serial/persist/net/socket/cc500）
-      - name: 全链回归（7 层，失败即中断）
+      # Makefile 的 test: 依赖链已含全 9 层（host/qemu/serial/persist/net/socket/cc500/slip/tcp）
+      - name: 全链回归（9 层，失败即中断）
         run: make test
         working-directory: v2-c-kernel
 
