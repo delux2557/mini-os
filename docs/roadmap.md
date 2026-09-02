@@ -33,7 +33,7 @@
 | v0.22  | 网络交互化：shell `netping` 命令                 | shell 内建 `netping [ip] [port]`（默认 10.0.2.2:7777）：开 UDP socket 发 PING、轮询收 PONG，单行原子打印 `[netping] <ip>:<port> PONG +<N>B rtt=<T> ticks`（IP 大端序正确显示）；把"演示程序"升级为"交互命令"，agent 可在会话中一键验证网络连通性；test\_net 六层 + HMP sendkey 交互注入 netping 断言（pcap UDP 4→6）                                                                                                                                                                                                                      |
 | v0.23  | ICMP Echo：PING 通宿主                       | `net/icmp.c/h` 纯逻辑（Ethernet+IPv4+ICMP Echo 请求/应答，校验和只覆盖 ICMP 报文 RFC 792、无伪头）+ 宿主单测 test\_icmp（22 断言）；`e1000_icmp_selftest` 开机自检：发 Echo 请求到 SLIRP 网关 10.0.2.2，收其回显应答（`[icmp] echo reply from 10.0.2.2 OK (rtt=N ticks)`）；test\_net 串口断言 + pcap 独立核验 IPv4/ICMP 双向 ≥2；补上"ping 即网络活"的经典语义                                                                                                                                                                                 |
 | v0.24  | UDP 校验和错误路径                              | `udp_parse` 接收端校验 UDP 校验和（RFC 768：伪头+UDP 头+载荷重算须折叠为 0），坏包一律拒绝、netsock 分发据此静默丢包；校验和字段 0 = 发送端未计算 → 接受，发送端算得 0 以 0xFFFF 发送（两者不混淆）；宿主单测 test\_udp 追加 6 条（24→30，载荷/校验和字段/伪头 srcIP 篡改全拒、=0 接受）；test\_net 全绿（真实 SLIRP PONG 校验和有效不受影响）                                                                                                                                                                                                                                       |
-| v0.25  | DHCP 客户端：动态获取 IP/网关                      | `net/dhcp.c/h` 纯逻辑（BOOTP 固定头+选项，RFC 2131/2132）+ 宿主单测 test\_dhcp（38 断言）；`e1000_dhcp_run` 开机四步状态机（DISCOVER→OFFER→REQUEST→ACK，忙等超时 \~2s、NAK/超时重试），失败回退静态——静态兜底收敛为单一配置点 `NET_STATIC_IP`/`NET_STATIC_GW`；`e1000_my_ip()`/`e1000_gw_ip()` 访问器，ARP/UDP/ICMP 三自检改取动态 IP；test\_net 新增 DHCP 四项断言全绿                                                                                                                                                                              |
+| v0.25  | DHCP 客户端：动态获取 IP/网关                      | `net/dhcp.c/h` 纯逻辑（BOOTP 固定头+选项，RFC 2131/2132）+ 宿主单测 test\_dhcp（38 断言）；`e1000_dhcp_run` 开机四步状态机（DISCOVER→OFFER→REQUEST→ACK，忙等超时 ~2s、NAK/超时重试），失败回退静态——静态兜底收敛为单一配置点 `NET_STATIC_IP`/`NET_STATIC_GW`；`e1000_my_ip()`/`e1000_gw_ip()` 访问器，ARP/UDP/ICMP 三自检改取动态 IP；test\_net 新增 DHCP 四项断言全绿                                                                                                                                                                               |
 | v0.26  | 容量三连#1：用户栈按需生长                           | 每进程栈槽 8KB 固定 → 32KB（槽底硬底守卫页 4K 永不映射 + 28KB 可生长栈区，栈顶页起、守卫页随栈底下移）；`stack_guard_hit` 二态扩三态（OK/GROWTH/BOOM，纯逻辑可宿主单测）；`pf_handler` 命中守卫页补映射新栈页并更新 PCB 记账、深越界/到硬底才判溢出；PCB `stack_frame` 改 `stack_frames[]`+`stack_fcount`+`stack_bottom`，`stack_init`/`stack_free` 统一管理；地址空间重布局（栈区 0x80010000-0x80090000，shell/app 槽/SHMEM 后移）；`deep` 演示 12KB 递归触发 3 次生长；宿主 34 断言 + QEMU/串口回归全绿                                                                                             |
 | v0.27  | 工具链与自举：guest 内「写-编-跑」闭环                  | 移植自托管 C 子集编译器 **cc500**（`tools/cc500/cc500.c`）进 guest：链接基址 0x800A0000 + mini-os ABI；唯一机器码 stub 收敛为通用 `syscall3`（eax/ebx/ecx/edx=int 0x80），exit/malloc/getchar/putchar/sys\_print 全用 C 子集实现（malloc=brk bump）；I/O 走 mini-fs（整读 /cc500.c、编译完写回 /out.elf）；initramfs 嵌入编译器 ELF + 自举源码；shell `ccboot` 命令验证**自举不动点**——gcc 版编译出 P1、P1 再编译出 P2，P1==P2（FNV+字节数逐字节一致，18079B）⇒ 写-编-跑闭环在 guest 内跑通；修复 BUG-025（brk 页中部映射空洞）；回归五层全绿                                                  |
 | v0.27b | 写-编-跑演示闭环：cc500 命令行路径 + shell 写/编/跑      | cc500 支持 `argv[1]=输入 argv[2]=输出`（`load_ptr` 逐字节拼 4 字节指针；缺省回退 /cc500.c→/out.elf）；入口/CRT 声明顺序对齐 CC500 反向压参与内核 cdecl 入口的差异；shell 新增 `writefile <path> <content>`（agent 写源码，ARG\_MAX 32→128）+ `ccrun <src> <out>`（fork+exec 编译→运行→校验退出码）；guest 内完整剧本跑通：`writefile /hello.c … → ccrun /hello.c /hello.elf` → 编译产物被加载运行；修复 BUG-026（cc500 对畸形输入死循环，加 EOF 守卫）；页错误日志附 EIP/eax/ebx 便于定位用户态故障；回归五层全绿                                                                             |
@@ -85,7 +85,7 @@
   页数再按需 kmalloc 动态数组（同 `own_frames`），退出 kfree——大进程（bigdemo 28 页）
   fork 不再受 24 帧硬编码上限限制
 
-* \[可选] **pipe（管道）**：经典 IPC 补全（字节流 vs 消息队列的离散消息，互为补充）。
+* [可选] **pipe（管道）**：经典 IPC 补全（字节流 vs 消息队列的离散消息，互为补充）。
   ⚠️ 定性为**新功能**而非欠账，与"收尾"原则有张力——若做，归入"如果还想做深"选项
 
 ### 阶段二「加固」（不增功能，增信心）
@@ -106,18 +106,20 @@
   定时器/中断/调度同输入同输出），**不约束整场测试**——三门外部输入（串口 FIFO 注入 / 网络
   SLIRP·宿主转发器 / host 侧 kill·sleep 时序）不受 icount 约束。故完整形态 = 两层：**icount
   确定性内核 + 输入流时间戳化录放**。公共时钟须用 **QEMU icount 虚拟时钟**（host 侧经 QMP/监控
-  读回），**非 guest 裸 `sys_getticks`**——repro_bugs.sh 只是"脚本化"未录时间关系，即缺此层。
+  读回），**非 guest 裸** **`sys_getticks`**——repro\_bugs.sh 只是"脚本化"未录时间关系，即缺此层。
   分三阶段、每步独立可验收、保持 9 层 CI 绿（P1-P3 均为 tests/+Makefile+脚本的 dev 侧变更）：
-  * **✅ P1 确定性启动（v1.4 落地，`tests/test_determinism.sh` + `make test-det`）**：两次 QEMU
+
+  * **✅ P1 确定性启动（v1.4 落地，`tests/test_determinism.sh`** **+** **`make test-det`）**：两次 QEMU
     `-icount shift=auto,align=on,sleep=on` 冷启动，串口日志**逐字节 diff** 判定确定性。实测：
     icount 下启动段（含 **DHCP OFFER/ACK 网络握手**）两次运行**逐字节一致** = 内核同输入同输出的
-    铁证（P1 验收本质）。**诚实发现**：交互回归脚本（qemu_regression 的 HMP sendkey / serial /
+    铁证（P1 验收本质）。**诚实发现**：交互回归脚本（qemu\_regression 的 HMP sendkey / serial /
     persist / cc500）走 host 墙钟轮询（`wait_for`/`sleep`），与 icount 虚拟时钟流速**不匹配**，
     icount 下 run 窗内超时误报——这是**交互脚本的 host 墙钟依赖被暴露**（恰为 P1 意义），故
     **不回编**这些脚本；icount 确定性验证独立收编为 `test-det`。网络层**不承诺** icount（SLIRP
     依赖 host 时间，见下"边界"降级），`test-det` 用纯冷启动含 DHCP 握手证明在**无注入输入流**
     下确定性已成立；未来交互确定性交给 P2 transcript 录放。
-  * **✅ P2 transcript 固化（v1.4.1 落地，`tests/transcript.sh` + `tests/test_transcript.sh` +
+
+  * **✅ P2 transcript 固化（v1.4.1 落地，`tests/transcript.sh`** **+** **`tests/test_transcript.sh`** **+
     `make test-tr`）**：录制内核 `tr_start/tr_send/tr_snapshot/tr_abort/tr_finish` 把输入命令流
     （`*.in.tr`，列=序号/相对ms/命令，可重放审计）与输出字节流（`*.out.tr`）固化到
     `build/transcripts/<runid>/`。验收三连：① 成功固化（in/out/RESULT=PASS 产物完整）；
@@ -127,8 +129,9 @@
     非语义差异（**印证"公共时钟须用 icount 虚拟时钟、非 guest tick"**）；故复现性比对按 `ticks=N`
     pin 掉噪音，真逐字节确定性交给 P1 test-det。**相对 ms 用 host 墙钟（起记时刻打点）；icount
     虚拟时钟锚点与 P3 严格回放差分（含时间关系）留待 P3**。
-  * **✅ P3 replay 验证（v1.4.2 落地，`tests/replay.sh` + `tests/test_replay.sh` + `make test-rp`）**：
-    回放器 `replay_into` 消费 `*.in.tr`（按 seq/rel_ms/payload 打拍注入串口 + 等完成信号）驱动
+
+  * **✅ P3 replay 验证（v1.4.2 落地，`tests/replay.sh`** **+** **`tests/test_replay.sh`** **+** **`make test-rp`）**：
+    回放器 `replay_into` 消费 `*.in.tr`（按 seq/rel\_ms/payload 打拍注入串口 + 等完成信号）驱动
     真实内核路径。验收闭环：从 bugs.md 抽 **BUG-026**（cc500 形参列表 EOF 未闭合→死循环），录含
     其触发输入（`writefile` 写 `int main(int x` + `ccrun`）的 transcript → 回放 → 修复版见
     `cc500: error at`（exit(1) 不死循环）——证明回放抓住 bug 表现。
@@ -138,9 +141,19 @@
     P1/test-det 承担）；② 后台 demo 日志永不静止 → 回放 end 判据用**完成信号**而非"日志静止"；
     ③ 跨**独立**冷启动的里程碑一致不机械稳定（trace-heavy 交织点抖动）→ 两遍一致性作可选
     `REPLAY_VERIFY=1` soft 检查，硬门禁是单遍 bug 闭环。完整照 roadmap 原文边界依旧成立。
-  **边界（诚实）**：`-icount` × SLIRP/外部进程时序是 QEMU 文档明示的交互点 → 网络层若红则降级为
-  "icount 只用于无网络交互层 + 网络层走 P2 transcript 录放"，地基仍成立。**gdb reverse-debugging**
-  仅作失败后人工单步逆向定位（开销大），不进回归主路径（P1-P3 不依赖它）。
+    **边界（诚实）**：`-icount` × SLIRP/外部进程时序是 QEMU 文档明示的交互点 → 网络层若红则降级为
+    "icount 只用于无网络交互层 + 网络层走 P2 transcript 录放"，地基仍成立。**gdb reverse-debugging**
+    仅作失败后人工单步逆向定位（开销大），不进回归主路径（P1-P3 不依赖它）。
+
+  * **✅ record/replay 工程收尾（v1.4.4，`tests/tr2sqlite.py` + 无网络路径 `-nic none`）**：P3 闭环后
+    两件零侵入加固。**① 网卡与 icount 慢的边界澄清 + 处置**：实测 `[B]` tick / net recvfrom 是用户态
+    demo（procB / sockdemo）抢指令预算，**非网卡导致**；但启动期默认 e1000 + DHCP 握手确实给 icount
+    增加墙钟开销。故对不需要网络的回放/编译/录制三条路径统一 `-nic none`——内核无网卡时优雅跳过
+    （`e1000 not found on PCI` + `selftest skipped (no e1000)`，不挂起），去掉启动期等待又少一个
+    非确定源；网络回归保持挂 e1000 不动。**② sqlite 分析索引**：新增 `tr2sqlite.py` 把 `.tr` 增量
+    导入 sqlite（`transcripts` / `in_events` / `out_rows` 三表，幂等、只读旁路）。**设计前提**：
+    录放主路径仍 `.tr` 文本"证据原件"（确定性/可 diff/可归档），sqlite 只作"放大镜"，坏了绝不影响
+    录放正确性；归档量大起来才有跨 runid 聚合/`LIKE` 检索的爽感，是"想试随时能试"的纯增量工具。
 
 * ✅ **回归盲区补格**（v0.29）：
 
@@ -226,12 +239,12 @@
   字段即可）。✅ 已完成（PR #15）：三份语义规定定稿进 `docs/`（tcp-session-proto / tcp-thin-api /
   tcp-mtu-fail）；薄包装为用户态库（`src/app/tcp.c`）+ `httpdemo` 演示；转发器
   `tests/tcp_proxy.py` 支持 UDP(e1000)+SLIP(COM2) 双通道；fuzz 加会话头 case 7。wire 增补：
-  定稿头表原只有宿主事件方向，补 guest→host 控制类 `MSG_OPEN`/`MSG_CLOSE`（tcp_open 的目标
-  寻址与 tcp_close 的注销必须承载，见 tcp-session-proto §2.1 v1.1）。验收：HTTP 请求-响应
+  定稿头表原只有宿主事件方向，补 guest→host 控制类 `MSG_OPEN`/`MSG_CLOSE`（tcp\_open 的目标
+  寻址与 tcp\_close 的注销必须承载，见 tcp-session-proto §2.1 v1.1）。验收：HTTP 请求-响应
   demo 跑通（200 OK）+ 断连返回 0 / 拒绝返回 -1 与超时均可区分无挂死 + 事件回传可用 + 双通道全绿。
-  收尾（PR #16，BUG-044/045/046）：容量缺陷归并（NET_RXMAX 512→2048、环 1024→4096、转发器下行
+  收尾（PR #16，BUG-044/045/046）：容量缺陷归并（NET\_RXMAX 512→2048、环 1024→4096、转发器下行
   分块 1392、发送硬墙对齐 1400）修"大响应丢尾"；转发器主循环改非阻塞 select 修串口通道饿死；
-  test_tcp 自检改重试循环修 CI 稳定误报。httpdemo 增 >1KB/尾字节==TAIL 完整性断言。
+  test\_tcp 自检改重试循环修 CI 稳定误报。httpdemo 增 >1KB/尾字节==TAIL 完整性断言。
 
 * [x] **Step 4 收尾 2（v1.2）可靠下行（stop-and-wait）**：根治"大响应丢尾"的**根因**——
   前序（PR #16）只把 `TCP_RXB` 提到 4096，等于把"丢尾阈值"抬高，并未消掉 NIC/socket 界面
@@ -240,11 +253,11 @@
   v1.1 §2.1 表格与 §5「为厚包装加序列号/ACK 占位」首次启用）；转发器每会话恒 **≤1 报在途**、
   收到 guest 的**累计 ACK**（新增 `MSG_ACK` 0x08，payload = 下一期望 seq 2BE）才发下一个；
   ACK 丢失按 `RETX_MS=2s` 定时重发，guest 遇重复/乱序 seq **幂等丢弃**该报并重发 ACK——
-  端到端自愈（SLIP 慢通道重传间隔须 ≥ 单报回环 ~1s，60ms 会灌爆慢 UART；e1000 快通道正常
+  端到端自愈（SLIP 慢通道重传间隔须 ≥ 单报回环 \~1s，60ms 会灌爆慢 UART；e1000 快通道正常
   不触发）。✅ 已完成：guest 侧 `src/app/tcp.c`（drain 单报 + `rx_next` 期待序号 + `send_ack`）、
   转发器 `tests/tcp_proxy.py`（Session 的 pending/inflight/seq + `_send_next`/`_retransmit`）、
   wire `src/net/tcp_proto.h`（`MSG_ACK` + `tcp_hdr_set/get_seq`）；**新增真·大文件下载 demo
-  `src/app/dldemo`**（不复用固定 `TCP_RXB`，每轮 tcp_recv 取 2KB 边收边累加，总长推到 **128KB
+  `src/app/dldemo`**（不复用固定 `TCP_RXB`，每轮 tcp\_recv 取 2KB 边收边累加，总长推到 **128KB
   无总字节上限**，剥 HTTP 头后校验 body 尾 7B `EOFTAIL` 完整）+ 回归 `tests/test_tcp_dl.sh`。
   验收：128KB 大文件缺尾**从根子消除**（不再只靠抬缓冲），双通道越跑越稳。
 
@@ -259,6 +272,7 @@
   超时按 `TCP_TX_TICKS=2.5s` 重发在途副本；转发器 `up_next` 计数器按序转发并回上行确认、重复/乱序
   seq 去重不转发。`MSG_ACK`（0x08）双向复用（guest→host = 下行确认、host→guest = 上行确认），
   **不新增消息类型**。验证：`tests/test_upstream_reliable.py`（有序/去重/ACK）+ httpdemo 上行握手。
+
 * **✅ 上行滑动窗口（v1.3 已落地）**：停-等"发 1 等 ACK"改 **N 在途**——guest `tcp_send` 把载荷写入
   **发送窗口**（`TCP_TXWIN=8` 个槽，各带独立 seq），窗位有空即发、**返回 n 即入窗已发出**（不再阻塞等
   确收）；窗口满才让步，共 `drain` 收累计 ACK（host→guest `MSG_ACK` payload=下一期望上行 seq）推进
@@ -267,6 +281,7 @@
   `tcp_send` 流水线按扇出，吞吐从"1/RTT"提到"W/RTT"。`MSG_ACK` 仍双向复用，**不新增消息类型、不改
   协议头结构**。验证：`tests/test_upstream_window.py`（W=8 齐发累计 ACK 到 8 / 乱序被暂存 ACK 保持 /
   补位后累计跳到 W+2 / 重复不重投）+ `tests/test_upstream_reliable.py` 兼容回绿。
+
 * **下行滑动窗口（内网卡后端提速，候选）**：上行滑窗落地后，host→guest 下行仍是停-等（转发器
   ≤1 报在途）。下行提速需在转发器发送侧做窗口 + guest 接收侧做**接收窗口 / 累计 ACK**（guest 现只回
   单一期望 seq 的 ACK）。窗口上限由慢通道（SLIP UART）L2 与两端缓冲决定，初期取保守小值。与上行
@@ -274,14 +289,14 @@
 
 **虚拟 TCP 语义边界（诚实声明：这是包装，不是 TCP）**：应用体感取决于包装厚度——
 
-| | 薄包装（当前目标） | 厚包装（演进上限，见下） |
-|---|---|---|
-| guest API | `tcp_open/send/recv/close` | 同左，签名不变 |
-| 底层 | UDP 数据报 + 宿主转发器 | 薄包装 + 本地伪状态机（序列号/超时重传/乱序缓冲/伪 ACK） |
-| 应用体感 | "调用像 TCP"，语义仍请求-应答（一次 send 对一次 recv） | 接近真 TCP |
-| 丢包/断连 | 超时感知 | 重传兜底，应用基本无感 |
-| 适用 | HTTP 请求-响应 demo | 流式 / 长连接场景 |
-| 成本 | 低 | 高，测试面显著增大 |
+| <br />    | 薄包装（当前目标）                            | 厚包装（演进上限，见下）                      |
+| --------- | ------------------------------------ | --------------------------------- |
+| guest API | `tcp_open/send/recv/close`           | 同左，签名不变                           |
+| 底层        | UDP 数据报 + 宿主转发器                      | 薄包装 + 本地伪状态机（序列号/超时重传/乱序缓冲/伪 ACK） |
+| 应用体感      | "调用像 TCP"，语义仍请求-应答（一次 send 对一次 recv） | 接近真 TCP                           |
+| 丢包/断连     | 超时感知                                 | 重传兜底，应用基本无感                       |
+| 适用        | HTTP 请求-响应 demo                      | 流式 / 长连接场景                        |
+| 成本        | 低                                    | 高，测试面显著增大                         |
 
 TCP 给应用的三个体感来源，薄包装只给三分之一：**流式**（仍按报文）、**可靠**（重传在宿主做，
 guest 无感；v1.2 起下行由转发器重传兜底、guest 仅幂等收敛）、**状态可见**（靠转发器显式回传
@@ -291,7 +306,7 @@ guest 无感；v1.2 起下行由转发器重传兜底、guest 仅幂等收敛）
 协议帧格式不破坏、转发器新旧会话共存**。对应实现见上文"薄→厚演进候选"（已落地一项：v1.2
 下行可靠停-等）。
 
-1. **连接句柄 = 对象**：`tcp_open` 返回的 fd 映射到"连接对象"（session_id / 状态 / 收发缓冲 /
+1. **连接句柄 = 对象**：`tcp_open` 返回的 fd 映射到"连接对象"（session\_id / 状态 / 收发缓冲 /
    事件队列），厚包装只是给同一对象加状态机字段，API 签名不变。
 2. **收发走流式缓冲**：`tcp_send/recv` 内部一律经"发送队列 / 接收缓冲"，薄包装一次 send=一条
    报文，但数据结构按流式设计（可拼接/分段）；厚包装的乱序缓冲/重传队列直接复用。
@@ -412,7 +427,7 @@ guest 无感；v1.2 起下行由转发器重传兜底、guest 仅幂等收敛）
   * **移植对象修正**：简报原指"Rob Pike c5"——核实后 c5 大概率是 8086 16 位版本，与 i386
     32 位平坦模型不匹配，**不直接采用**。更稳妥候选：
 
-    * **cc500**（E. Grimley-Evans，\~750 行）：stdin 读 C → stdout 出 **x86-32 ELF**，自托管、
+    * **cc500**（E. Grimley-Evans，~750 行）：stdin 读 C → stdout 出 **x86-32 ELF**，自托管、
       无 libc 依赖（内置 exit/getchar/malloc/putchar 机器码，malloc 用 brk 实现）——
       与我们的 ELF 加载器 + v0.26 `sys_brk` 天然衔接（GPL-2.0，参考/自写）；
 

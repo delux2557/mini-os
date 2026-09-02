@@ -87,7 +87,7 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     rm -f "$LOG" "$TIN" "$TOUT"; mkfifo "$TIN" "$TOUT"
     (cat "$TOUT" > "$LOG") & CAT_PID=$!
     qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown \
-        -m 64 -serial stdio -monitor none < "$TIN" > "$TOUT" 2>/dev/null &
+        -m 64 -nic none -serial stdio -monitor none < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!; exec 9>"$TIN"
     # v1.1 收尾：默认等待窗 25s->60s；失败时自动转储 guest 串口尾部（慢 runner 自诊断，
     # 2026-09-01 CI 33504825917：2 vCPU 无 KVM 下 "guest < 运行 exit0" 20s 窗超时红）
