@@ -18,11 +18,12 @@
 #   tr_abort <desc> $LOG            # 中途失败：立即归档 .in.tr+.out.tr，输出归档路径
 #
 # 环境变量：
-#   TR_BASE  归档根目录（默认 build/transcripts）
+#   TR_BASE  归档根目录（默认 ${BUILD:-build}/transcripts）
 #   TR_RUNID 本轮 runid（默认 <脚本名>-<时间戳>）
+# BUG-053：transcript 产物根默认跟随 BUILD（隔离 harness 各录各的），显式 TR_BASE 仍可覆盖。
 set -u
 
-TR_BASE="${TR_BASE:-build/transcripts}"
+TR_BASE="${TR_BASE:-${BUILD:-build}/transcripts}"
 TR_NOW="$(date +%s%3N)"                  # 相对毫秒游标（host 墙钟；真 icount 虚拟时钟留 P3）
 TR_FIRST=""
 TR_DIR=""
@@ -67,7 +68,7 @@ TR_ACK_TIMEOUT="${TR_ACK_TIMEOUT:-15}"
 # 统计串口日志里已消费的行级 readline ack 条数
 tr_ack_count() {
     local c
-    c="$(grep -acE "$TR_ACK_RE" "${TR_LOG:-build/serial_term.log}" 2>/dev/null || true)"
+    c="$(grep -acE "$TR_ACK_RE" "${TR_LOG:-${BUILD:-build}/serial_term.log}" 2>/dev/null || true)"
     echo "${c:-0}"
 }
 
@@ -103,7 +104,7 @@ tr_send() {
 
 # 快照输出：把调用方串口日志当前内容拷入 out.tr（覆盖式，保留"到达失败点的字节")
 tr_snapshot() {
-    local log="${1:-build/serial_term.log}"
+    local log="${1:-${BUILD:-build}/serial_term.log}"
     cp "$log" "$TR_DIR/out.tr" 2>/dev/null || : > "$TR_DIR/out.tr"
 }
 
@@ -113,7 +114,7 @@ tr_snapshot() {
 #   * marks 表（$TR_DIR/marks：label\tlog_off\trel_ms）供窗口化判据读取。
 # 这样各测试脚本不再各自用 grep 全日志判据（易被 boot 期同名输出误匹配），而是统一"在就绪锚后"归一化扫描。
 tr_mark() {
-    local label="${1:?tr_mark: 需要锚点标签}" log="${2:-${TR_LOG:-build/serial_term.log}}"
+    local label="${1:?tr_mark: 需要锚点标签}" log="${2:-${TR_LOG:-${BUILD:-build}/serial_term.log}}"
     [ -n "$TR_DIR" ] || { echo "[transcript] warn: tr_mark 需先 tr_start" >&2; return 1; }
     local rel=0 off=0
     [ -n "$TR_FIRST" ] && rel=$(( $(date +%s%3N) - TR_FIRST ))
@@ -125,7 +126,7 @@ tr_mark() {
 
 # 输出某锚点之后串口日志的字节流（判据归一化扫描源）。锚点未知/无日志 -> 空流 -> 上层判断自然失败。
 tr_window_after() {
-    local label="${1:?tr_window_after: 需要锚点标签}" log="${2:-${TR_LOG:-build/serial_term.log}}"
+    local label="${1:?tr_window_after: 需要锚点标签}" log="${2:-${TR_LOG:-${BUILD:-build}/serial_term.log}}"
     local off=0 found=0 lbl o r
     if [ -f "$TR_DIR/marks" ]; then
         while IFS=$'\t' read -r lbl o r; do
@@ -150,7 +151,7 @@ tr_finish() {
 
 # 中途失败：标注 FAIL 并输出归档路径（供调用方把 .in.tr/.out.tr 落到日志）
 tr_abort() {
-    local desc="$1" log="${2:-build/serial_term.log}"
+    local desc="$1" log="${2:-${BUILD:-build}/serial_term.log}"
     tr_snapshot "$log"
     printf '# result: FAIL (@ %s)\n' "$desc" > "$TR_DIR/RESULT"
     echo "[transcript] 失败归档: $TR_DIR"
