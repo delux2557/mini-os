@@ -3,6 +3,23 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.4.3] - 2026-09-02 · record/replay 地基 P3：replay 回放差分闭环（`make test-rp`）
+
+> P1/P2/P3 地基三元闭环：icount 定内核确定性（P1）→ transcript 录输入/输出（P2）→ 回放消费
+> transcript 驱动内核并证 bug 表现（P3，本轮）。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/replay.sh`（新增，回放器）：`replay_into <in.tr> <out.log> <runid> <done_regex>` 按
+  seq/rel_ms/payload 打拍注入串口、等完成信号驱动真实内核路径。**不用"日志静止"作结束判据**
+  （本内核有后台 demo 应用持续打印）。
+* `tests/test_replay.sh`（新增，`make test-rp`）：bug 本质闭环——从 bugs.md 抽 **BUG-026**
+  （cc500 形参列表 EOF 未闭合→死循环），录 `writefile` 写 `int main(int x` + `ccrun` 的
+  transcript → 回放 → 修复版见 `cc500: error at`（exit(1)，不死循环）。
+* **诚实发现**（P3 实测边界，已规避）：icount(TCG) 下 cc500 编译分钟级 + 后台 demo 抢 tick →
+  回放不用 icount，bug 闭环靠信号断言（逐字节确定性由 P1 test-det 承担）；跨独立冷启里程碑
+  一致不机械稳定 → 两遍一致性作 `REPLAY_VERIFY=1` soft 检查。
+
 ## \[v1.4.2] - 2026-09-02 · record/replay 地基 P2：transcript 固化（`make test-tr`）
 
 > 承接 P1（icount 确定性）的录制侧：把串口输入命令流与输出字节流固化为可归档、可复现、

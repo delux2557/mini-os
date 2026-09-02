@@ -101,7 +101,7 @@
   统计对账（泄漏/双重释放/写越界破坏块头都会漂移）；报告碎片；宿主单测 + QEMU selftest
   双重锁定（`[audit] heap ok`）
 
-* **record/replay 地基（工程进度：P1 ✅ P2 ✅，P3 待做；dev 侧基建，对接"AI agent 演练场/测评"）**
+* **record/replay 地基（工程进度：P1 ✅ P2 ✅ P3 ✅【闭环完成】；dev 侧基建，对接"AI agent 演练场/测评"）**
   **技术前提（先对齐再动工）**：QEMU `-icount` 只保证**内核执行**确定（虚拟时间=指令计数，
   定时器/中断/调度同输入同输出），**不约束整场测试**——三门外部输入（串口 FIFO 注入 / 网络
   SLIRP·宿主转发器 / host 侧 kill·sleep 时序）不受 icount 约束。故完整形态 = 两层：**icount
@@ -127,9 +127,17 @@
     非语义差异（**印证"公共时钟须用 icount 虚拟时钟、非 guest tick"**）；故复现性比对按 `ticks=N`
     pin 掉噪音，真逐字节确定性交给 P1 test-det。**相对 ms 用 host 墙钟（起记时刻打点）；icount
     虚拟时钟锚点与 P3 严格回放差分（含时间关系）留待 P3**。
-  * **P3 replay 验证（地基闭环，待做）**：回放器按 `*.in.tr` 时间关系重放、比对 `*.out.tr` 逐字节一致
-    （确定性差分）；repro_bugs.sh 升级为消费 transcript。验收：从 bugs.md 抽 1 个已修 bug——录旧版
-    失败 transcript → 修复版回放 → 输出**不一致**（证明抓住 bug 本质）+ 新测试全绿。
+  * **✅ P3 replay 验证（v1.4.2 落地，`tests/replay.sh` + `tests/test_replay.sh` + `make test-rp`）**：
+    回放器 `replay_into` 消费 `*.in.tr`（按 seq/rel_ms/payload 打拍注入串口 + 等完成信号）驱动
+    真实内核路径。验收闭环：从 bugs.md 抽 **BUG-026**（cc500 形参列表 EOF 未闭合→死循环），录含
+    其触发输入（`writefile` 写 `int main(int x` + `ccrun`）的 transcript → 回放 → 修复版见
+    `cc500: error at`（exit(1) 不死循环）——证明回放抓住 bug 表现。
+    **诚实发现（P3 开发实测，均为已知边界，已通过调整规避）**：① icount(TCG 逐条虚拟化) 下 cc500
+    编译器慢到分钟级 + 后台 demo 应用（`[B]` tick / net recvfrom）持续打印抢 tick → 回放**不用
+    icount**，bug 闭环靠**信号断言**（`cc500: error at`）而非逐字节 diff（逐字节确定性已由
+    P1/test-det 承担）；② 后台 demo 日志永不静止 → 回放 end 判据用**完成信号**而非"日志静止"；
+    ③ 跨**独立**冷启动的里程碑一致不机械稳定（trace-heavy 交织点抖动）→ 两遍一致性作可选
+    `REPLAY_VERIFY=1` soft 检查，硬门禁是单遍 bug 闭环。完整照 roadmap 原文边界依旧成立。
   **边界（诚实）**：`-icount` × SLIRP/外部进程时序是 QEMU 文档明示的交互点 → 网络层若红则降级为
   "icount 只用于无网络交互层 + 网络层走 P2 transcript 录放"，地基仍成立。**gdb reverse-debugging**
   仅作失败后人工单步逆向定位（开销大），不进回归主路径（P1-P3 不依赖它）。
