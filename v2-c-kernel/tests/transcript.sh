@@ -56,6 +56,31 @@ tr_start() {
 # 使差分/回放静默异常。故在唯一写入钳制点做 fail-fast：违规即拒绝（不发、不记）并报明细——
 # 让"坏 TSV 证据"结构上不可能产生。当前统一单行 writefile，无此输入；为防未来 heredoc 误入，
 # 禁令写死在文件头规约里。若某天真需多行：显式编码 \t\n\\ + replay 同型解码后再放开此守卫。
+# F2 输入背压：注入一行后必须等内核 readline 消费确认（ack 计数自增），慢宿主下 golden 才不被
+# 跨行合并/吞行污染。实际消费信号有两条路径：
+#   * 行到达时读方已阻塞（串口驱动常态）——`[sched] wake keyboard waiter pid=.. (N bytes)`
+#   * 行到达前缓冲已就绪——`[kb] readline pid=.. -> N bytes`
+# 二者合并计数 = 已消费的行数（每条注入行恰命中其一）。日志路径由调用方经 TR_LOG 提供。
+TR_ACK_RE='\[sched\] wake keyboard waiter pid=[0-9]+ \([0-9]+ bytes\)|\[kb\] readline pid=[0-9]+ -> [0-9]+ bytes'
+TR_ACK_TIMEOUT="${TR_ACK_TIMEOUT:-15}"
+
+# 统计串口日志里已消费的行级 readline ack 条数
+tr_ack_count() {
+    local c
+    c="$(grep -acE "$TR_ACK_RE" "${TR_LOG:-build/serial_term.log}" 2>/dev/null || true)"
+    echo "${c:-0}"
+}
+
+# 等到 ack 计数达到 <need>；<sec> 秒内未达返回 1（不 fail-fast，由调用方定夺是否致命）
+tr_ack_wait() {
+    local need="$1" sec="${2:-$TR_ACK_TIMEOUT}" t=0
+    while [ "$t" -lt $((sec * 2)) ]; do
+        [ "$(tr_ack_count)" -ge "$need" ] && return 0
+        sleep 0.5; t=$((t + 1))
+    done
+    return 1
+}
+
 tr_seq=0
 tr_send() {
     if [[ "$1" == *$'\t'* || "$1" == *$'\n'* ]]; then
@@ -65,8 +90,15 @@ tr_send() {
         return 1
     fi
     tr_seq=$((tr_seq + 1))
+    local need_before
+    need_before="$(tr_ack_count)"
     printf '%s\n' "$1" >&9
-    tr_emit_in "$tr_seq" "$1"
+    # F2：注入后等本行 readline ack（计数自增）再返回；超时=内核未消费（环境病）-> exit 2（0/1/2 语义对齐）
+    if ! tr_ack_wait $((need_before + 1)); then
+        echo "[transcript] error: input ack timeout (${TR_ACK_TIMEOUT}s) for: $1" >&2
+        exit 2
+    fi
+    tr_emit_in "$tr_seq" "$1"   # ack 后记 rel_ms —— in.tr 即"消费时间轴"（F4 附带）
 }
 
 # 快照输出：把调用方串口日志当前内容拷入 out.tr（覆盖式，保留"到达失败点的字节")

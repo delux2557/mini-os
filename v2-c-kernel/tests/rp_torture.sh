@@ -39,6 +39,7 @@ boot_battery() {
     TEXEC0=$(date +%s%3N)
     tr_start "$runid"
     tr_snapshot "$log"
+    export TR_LOG="$log"
 
     # ---- 命令集：功能性 + 压力/边界（全部单行, 符合 TSV 规约；刻意不含继承的 tick demo）----
     # v1.4.7 修复打点节奏：此前 26 条命令连续 tr_send 无间隔灌入，shell 异步处理未能跟上前端,

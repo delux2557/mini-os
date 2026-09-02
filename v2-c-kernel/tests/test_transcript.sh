@@ -39,6 +39,7 @@ run_once() {   # run_once <log> <runid>；录制一轮固定命令，串口全�
     exec 9>"$TIN"
 
     TR_RUNID="$runid" tr_start "$runid"
+    export TR_LOG="$log"
     local i
     # 等 shell 提示符（起记时刻后才打点）
     for ((i=0;i<80;i++)); do grep -aq 'mini-os\$ ' "$log" 2>/dev/null && break; sleep 0.25; done
