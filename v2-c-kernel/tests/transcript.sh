@@ -45,14 +45,25 @@ tr_start() {
         printf '# mini-os record/replay transcript\n'
         printf '# runid: %s\n' "$runid"
         printf '# cols:  seq \\t rel_ms \\t payload\n'
+        printf '# 规约:  payload 禁原始 TAB/换行，须单行；多行需显式编码 \\t\\n\\\\ 并同步回放解码\n'
     } > "$TR_DIR/in.tr"
     : > "$TR_DIR/out.tr"
     echo "[transcript] 录制开始 -> $TR_DIR"
 }
 
 # 注入一条命令：echo 到 fd 9（串口）+ 记录进 in.tr（seq 自动递增）
+# 防御（v1.4.6）：in.tr 是 TSV seq \t rel_ms \t payload，payload 若混入原始 TAB/换行会破坏列分隔，
+# 使差分/回放静默异常。故在唯一写入钳制点做 fail-fast：违规即拒绝（不发、不记）并报明细——
+# 让"坏 TSV 证据"结构上不可能产生。当前统一单行 writefile，无此输入；为防未来 heredoc 误入，
+# 禁令写死在文件头规约里。若某天真需多行：显式编码 \t\n\\ + replay 同型解码后再放开此守卫。
 tr_seq=0
 tr_send() {
+    if [[ "$1" == *$'\t'* || "$1" == *$'\n'* ]]; then
+        echo "[transcript] 拒绝 payload：含 TAB/换行，会破坏 in.tr 的 TSV 列分隔。命令须单行。" >&2
+        printf '  offending: %q\n' "$1" >&2
+        echo "[transcript] 提示：当前规约=单行（如 writefile <path> <content>）。多行需显式编码后同步回放解码。" >&2
+        return 1
+    fi
     tr_seq=$((tr_seq + 1))
     printf '%s\n' "$1" >&9
     tr_emit_in "$tr_seq" "$1"
