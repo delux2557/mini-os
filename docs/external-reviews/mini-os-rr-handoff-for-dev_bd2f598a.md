@@ -234,3 +234,13 @@ grep -a 'unknown command' /tmp/rp_test.log
 | **F6** | ✅ 已加固 | tests/repro_bugs.sh | BUG-B 从软分支改硬断言：按 `[ls]  *out2\.elf` 目录条目判定 argv 生效（旧 grep 会误匹配命令回显且永不红）；argv 丢失即 `FAIL++`。判据经 tr_window_after ready 归一化。 | test-repro 串行全绿，BUG-A/BUG-B 均未复现 → `[ok] argv 生效：/out2.elf 已在 ls 中列出`。已接 CI `regression-rr`（make test-repro）。 |
 
 > 说明：审核报告原述"ack=`[kb] readline pid=`"，实测（源码 + 串口日志）确认常态注入路径（读方已阻塞）的消费信号实为 `[sched] wake keyboard waiter pid=.. (N bytes)`，`[kb] readline -> N bytes` 仅在行缓冲已就绪路径出现——修复按**两者并集计数**实现，两条路径均覆盖。
+
+---
+
+### 基建注意：重型 QEMU 测试的共享 `build/` 竞态（已知问题）
+
+**现象**：`repro_bugs.sh`（test-repro）与 `test_tcp_attack.sh`（test-tcp-attack）等重型 QEMU harness 共用 `v2-c-kernel/build/`。若**并行**跑，后启动者内部 `make clean`（`rm -rf build/`）会清空前者正在写入的串口日志路径，导致前者 `tr_ack_count`/`wait_for` 读到空文件 → 假性 `input ack timeout`（exit 2）或断言 FAIL，**与实际代码状态无关**。
+
+**规避**：这些重型测试必须**串行**执行。CI 中 `test` 与 `regression-rr` 是独立 job（各自独立 `build/`），天然无并发冲突；本地/脚本里勿用 `&` 并行跑它们。
+
+**待改进方向**（未实施）：重型 QEMU 测试改用各自独立的 BUILD_DIR 隔离（如 `build-repro/`、`build-tcp-attack/`），从根上消除 `make clean` 相互踩踏。记录于此防再踩。
