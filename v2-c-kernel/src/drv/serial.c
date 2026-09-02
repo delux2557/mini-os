@@ -48,13 +48,29 @@ void serial_init(void) {
     irq_install_handler(4, serial_irq);
 }
 
+/* K1（BUG-051）：串口整行输出 IRQ 原子化。
+ * 单 CPU 教学内核，串口并发 writer 的唯一抢占源是定时器 IRQ0——写一半被抢，另一上下文
+ * 再写就会把一行日志在字符粒度打散（撕裂）。把整行写在关中断区间内即保证行原子。
+ * 保存并恢复 EFLAGS：若调用时中断本已关闭，则恢复为关，绝不擅自打开中断。 */
+static inline uint32_t xirq_save_cli(void) {
+    uint32_t f;
+    __asm__ volatile ("pushfl; pop %0" : "=r"(f));
+    __asm__ volatile ("cli");
+    return f;
+}
+static inline void xirq_restore(uint32_t f) {
+    __asm__ volatile ("push %0; popfl" :: "r"(f));
+}
+
 void serial_putc(char c) {
     while ((inb(0x3FD) & 0x20) == 0) /* 等发送缓冲空 */ ;
     outb(0x3F8, (uint8_t)c);
 }
 
 void serial_puts(const char *s) {
+    uint32_t f = xirq_save_cli();
     while (*s) serial_putc(*s++);
+    xirq_restore(f);
 }
 
 static void sputn(uint32_t n, int base, int upper, int width, int zero) {
@@ -74,6 +90,7 @@ static void sputn(uint32_t n, int base, int upper, int width, int zero) {
 }
 
 void serial_printf(const char *fmt, ...) {
+    uint32_t f = xirq_save_cli();
     va_list ap;
     va_start(ap, fmt);
     while (*fmt) {
@@ -94,4 +111,5 @@ void serial_printf(const char *fmt, ...) {
         }
     }
     va_end(ap);
+    xirq_restore(f);
 }

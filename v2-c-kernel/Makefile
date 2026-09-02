@@ -17,7 +17,7 @@ CFLAGS  = -m32 -ffreestanding -fno-pie -fno-stack-protector \
           -fno-builtin -fno-asynchronous-unwind-tables -fcf-protection=none \
           -Wall -Wextra -O2 -std=gnu99 -nostdlib \
           -MMD -MP \
-          -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -Ibuild
+          -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -I$(BUILD)
 ASM     = nasm
 LD      = ld
 LDFLAGS = -m elf_i386 -T src/linker.ld -nostdlib -z noexecstack
@@ -26,7 +26,11 @@ OBJCOPY = objcopy
 # 源文件查找路径（按子系统；同名文件在各目录间保持唯一）
 VPATH = src:src/arch:src/kernel:src/mm:src/drv:src/fs:src/net:src/app
 
-BUILD        = build
+# 构建/录制产物根目录。
+#  （BUG-053 修复：默认仍为 build/，但允许 `make BUILD=<私有目录>` 覆盖——
+#   并发重负荷 harness 各用私有目录，避免共享 build/ 下 `make clean` 互踩金标/transcript。）
+# 注意：tests/*.sh 内对 `build/` 的引用当前仍为字面路径，全量隔离 wiring 见 bugs.md BUG-053。
+BUILD        ?= build
 KERNEL       = $(BUILD)/kernel.elf
 USERPROG_ELF = $(BUILD)/userprog.elf
 USERPROG_BIN = $(BUILD)/userprog.bin
@@ -272,7 +276,7 @@ test-tcp-attack:
 test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp
 
 clean:
-	rm -rf build tests/build
+	rm -rf $(BUILD) tests/build
 
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d

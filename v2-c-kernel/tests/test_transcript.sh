@@ -47,7 +47,16 @@ run_once() {   # run_once <log> <runid>；录制一轮固定命令，串口全�
         tr_send "$c"
         sleep 0.4          # 界墙钟：给 shell 处理留给串口输出的相对确定节奏（勿加 icount）
     done
-    sleep 0.5
+    # BUG-052 残留：固定墙钟快照窗（原 sleep 0.5）会偶发吞掉最后一条命令（selftest）
+    # 的尾部输出——`[selftest] PASS` 里程碑未落盘即快照 -> 复现性判据假红（run-a 有、
+    # run-b 无）。改以"最后一条命令的完成里程碑落盘"为快照锚点：有界等待；超时也不
+    # fail-fast，真缺失仍交由第[4/4]步 diff 如实反映（避免把"捕获窗口"误判成"不
+    # 确定"掩盖真回归）。
+    local t=0
+    while [ "$t" -lt 80 ]; do
+        grep -aq '\[selftest\] PASS' "$log" 2>/dev/null && break
+        sleep 0.25; t=$((t + 1))
+    done
     exec 9>&- 2>/dev/null || true
     kill "$qp" 2>/dev/null || true; wait "$cp" 2>/dev/null || true
     rm -f "$TIN" "$TOUT"
@@ -87,7 +96,10 @@ TR_DIR_A="build/transcripts/run-a" TR_DIR_B="build/transcripts/run-b"
 #（pin 掉 `ticks=N` 这类墙钟噪音——内核 tick 值在非 icount 下随调度浮动，非语义差异；
 #  真逐字节确定性已由 P1 test-det 用 -icount 覆盖，此处只证"里程碑语义行稳定"。）
 pick() {
-    grep -aE 'mini-os shell commands:|\[ls\] /:|Hello from .hello. app|\[selftest\] PASS' "$1" \
+    # 只抽里程碑子串（-oE 逐条输出匹配），不把行内残留字节（如回显 `l` 恰好落在 `[ls] /:` 前）
+    # 带入 diff——判据对"行序"敏感、对"行被未完结的前一行残留字节污染"鲁棒。
+    # 若里程碑真的缺失（真回归），-oE 同样不输出该子串 -> 仍能由 diff 抓到。
+    grep -aoE 'mini-os shell commands:|\[ls\] /:|Hello from \.hello app|\[selftest\] PASS' "$1" \
         | sed 's/ticks=[0-9][0-9]*/ticks=N/'
 }
 if diff <(pick "$TR_DIR_A/out.tr") <(pick "$TR_DIR_B/out.tr") >/dev/null; then
