@@ -13,3 +13,7 @@ v2-c-kernel/tests/build/
 .DS_Store
 *.swp
 *~
+
+# Python bytecode
+__pycache__/
+*.pyc
