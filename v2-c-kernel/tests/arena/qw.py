@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate import GATES, COUNT_TOL  # noqa: E402
 from run import build_run  # noqa: E402
 from task import load_task, judge  # noqa: E402
+from evaluate import evaluate  # noqa: E402
 
 ALARM_PREFIX = "ALARM"
 
@@ -188,6 +189,14 @@ def cmd_gates():
     return {"gates": sorted(GATES)}, True
 
 
+def cmd_eval(run, task_json, base, replay_log):
+    """阶段2评测器：对一轮 transcript 跑全判据 -> {verdict, steps, tr}。"""
+    task = load_task(task_json) if task_json else None
+    base_run = build_run(base) if base else None
+    ev = evaluate(run, task=task, base=base_run, replay_log=replay_log)
+    return ev, (ev["verdict"] == "PASS")
+
+
 # ---------------- 判据复用（与 baseline_check 同源） ----------------
 # 直接 import 自 gate，避免本文件重复实现；此处仅为局部别名可读
 from gate import (  # noqa: E402
@@ -209,7 +218,7 @@ def percentile(vals, p):
 
 
 # ---------------- 主入口 ----------------
-COMMANDS = {"status", "rebuild", "submit", "task", "gates"}
+COMMANDS = {"status", "rebuild", "submit", "task", "eval", "gates"}
 
 
 def main() -> int:
@@ -231,6 +240,12 @@ def main() -> int:
     sp_task = sub.add_parser("task", help="列出任务 / 查看单个任务")
     sp_task.add_argument("task", nargs="?", default="list")
 
+    sp_eval = sub.add_parser("eval", help="阶段2评测器：判定闭环 PASS/WARN/FAIL")
+    sp_eval.add_argument("run", help="当轮 transcript 目录")
+    sp_eval.add_argument("--task", help="task.json（baseline 判据集，缺省全集）")
+    sp_eval.add_argument("--base", help="基线 transcript 目录")
+    sp_eval.add_argument("--replay-log", help="replay 输出日志（给则做 replay 差分）")
+
     sub.add_parser("gates", help="列出已注册判据")
 
     args = p.parse_args()
@@ -244,6 +259,8 @@ def main() -> int:
             data, ok = cmd_submit(args.task, args.run, args.base)
         elif args.cmd == "task":
             data, ok = cmd_task(args.task)
+        elif args.cmd == "eval":
+            data, ok = cmd_eval(args.run, args.task, args.base, args.replay_log)
         elif args.cmd == "gates":
             data, ok = cmd_gates()
         else:
