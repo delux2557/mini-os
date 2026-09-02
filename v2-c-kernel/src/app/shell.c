@@ -6,6 +6,7 @@
  */
 #include "user_lib.h"
 #include "version.h"   /* v0.30（评估 L-4）：banner 版本串单一来源 */
+#include "shell_heredoc.h"   /* v1.4 修复：heredoc DELIM 终结判定（纯逻辑，可宿主单测） */
 
 #define CMD_MAX  128
 /* v0.27b: arg 缓冲提升到与命令行同宽，writefile 才能写入接近整行长的源码内容 */
@@ -60,6 +61,7 @@ static void cmd_help(void) {
     sys_print("  netping [ip][p] UDP ping to host echo (v0.22, default 10.0.2.2:7777)\n");
     sys_print("  ccboot          self-host bootstrap: cc500 compiles itself twice (v0.27)\n");
     sys_print("  writefile <p> <c> write file (content = rest of line, v0.27b)\n");
+    sys_print("  writefile <<D <p> multi-line write until lone D line (heredoc, v1.4)\n");
     sys_print("  ccrun <src> <out> cc500 compile then run (write-compile-run, v0.27b)\n");
     sys_print("  selftest        run all demos, print one-line PASS/FAIL (agent-verifiable)\n");
     sys_print("  exit            quit shell\n");
@@ -414,10 +416,63 @@ static void cmd_ccboot(void) {
 }
 
 /* v0.27b: writefile <path> <content...> —— 把命令行剩余部分（保留空格）写入文件。
- * 让 agent 能在 guest 内经 shell 写源码文件（单行内容），配合 ccrun 完成"写-编-跑"。 */
+ * 让 agent 能在 guest 内经 shell 写源码文件（单行内容），配合 ccrun 完成"写-编-跑"。
+ * v1.4: 新增 heredoc 多行写入——writefile <<DELIM <path>：DELIM 后逐行收集直至独立 DELIM 行，
+ * 逐行追加 SYS_FS_WRITE（含换行）。绕开"单行 ≤CMD_MAX=128"的天线（每行仍 ≤128，但可任意行数
+ * 拼接），适配 agent 写入较大源码。 */
 static void cmd_writefile(char *args) {
     char path[64];
+    char delim[32];
     uint32_t i = 0, j = 0;
+
+    /* ---- 尝试 heredoc 模式：writefile <<DELIM <path> ---- */
+    while (args[i] == ' ') i++;
+    if (args[i] == '<' && args[i + 1] == '<') {
+        i += 2;
+        while (args[i] == ' ') i++;
+        while (args[i] && args[i] != ' ' && j < 31) delim[j++] = args[i++];
+        delim[j] = 0;
+        uint32_t delim_len = j;                  /* 保存 DELIM 长度：下两行 j 被 path 解析复用 */
+        while (args[i] == ' ') i++;
+        j = 0;
+        while (args[i] && args[i] != ' ' && j < 63) path[j++] = args[i++];
+        path[j] = 0;
+        if (!delim[0] || !path[0]) { sys_print("usage: writefile <<DELIM <path>\n"); return; }
+        syscall3(SYS_FS_DELETE, (uint32_t)path, 0, 0);
+        if ((int)syscall3(SYS_FS_CREATE, (uint32_t)path, 0, 0) < 0) {
+            sys_print("[writefile] create fail '"); sys_print(path); sys_print("'\n"); return;
+        }
+        if ((int)syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 1) != 0) {
+            sys_print("[writefile] open fail '"); sys_print(path); sys_print("'\n"); return;
+        }
+        char line[CMD_MAX];
+        uint32_t total = 0;
+        for (;;) {
+            int n = sys_readline(line, CMD_MAX);
+            if (n < 0) break;                       /* 键入口关闭等异常：结束 */
+            /* 去头尾空白后与 DELIM 精确比较：匹配则终结本写入 */
+            uint32_t s = 0, e = (uint32_t)n;
+            while (s < e && (line[s] == ' ' || line[s] == '\t')) s++;
+            while (e > s && (line[e - 1] == ' ' || line[e - 1] == '\t')) e--;
+            if (e == s) {                           /* 空行：直接写一个换行（保留行结构） */
+                if (syscall3(SYS_FS_WRITE, 1, (uint32_t)"\n", 1) > 0) total += 1;
+                continue;
+            }
+            if (wf_delim_hit((const uint8_t *)line, (uint32_t)n,
+                             (const uint8_t *)delim, delim_len)) break;  /* 遇 DELIM 收尾 */
+            int w = (int)syscall3(SYS_FS_WRITE, 1, (uint32_t)line, (uint32_t)n);
+            if (w > 0) total += (uint32_t)w;
+            if (syscall3(SYS_FS_WRITE, 1, (uint32_t)"\n", 1) > 0) total += 1;
+        }
+        syscall3(SYS_FS_CLOSE, 1, 0, 0);
+        nl_reset();
+        nl_s("[writefile] '"); nl_s(path); nl_s("' wrote "); nl_u(total);
+        nl_s(" bytes (heredoc)\n");
+        nl_end();
+        return;
+    }
+
+    /* ---- 单行模式（v0.27b） ---- */
     char *content;
     while (args[i] == ' ') i++;
     while (args[i] && args[i] != ' ' && j < 63) path[j++] = args[i++];
