@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        layer: [host, qemu, serial, persist, net, socket, cc500]
+        layer: [host, qemu, serial, persist, net, socket, cc500, slip, tcp]
     steps:
       - uses: actions/checkout@v4
 
