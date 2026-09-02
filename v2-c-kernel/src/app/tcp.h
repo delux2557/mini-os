@@ -7,6 +7,7 @@
 #ifndef APP_TCP_H
 #define APP_TCP_H
 #include <stdint.h>
+#include "tcp_proto.h"      /* TCP_PHDR：会话协议头定长（tcp.h 用其推单报 payload 上限） */
 
 #define TCP_CONN_MAX 4        /* 连接对象表容量（fd = 下标） */
 #define TCP_EVQ      4        /* 每连接状态事件队列深度（DATA 不走此队，见 tcp.c） */
@@ -16,7 +17,9 @@
                                 含 8B 会话头；接收侧最大可交付=该值） */
 #define TCP_MTU      1400     /* 发送硬墙：单数据报（含 8B 会话头）上限，与 netsock sendto
                                 钳制一致（见 tcp-mtu-fail v1.1 收尾）；应用数据≤TCP_MAX_PAYLOAD */
+#define TCP_MAX_PAYLOAD (TCP_MTU - TCP_PHDR)   /* 单报应用数据上限（单条上行载荷副本大小） */
 #define TCP_RECV_TICKS 500    /* recv 阻塞超时上限（100Hz * 5s = 500 tick） */
+#define TCP_TX_TICKS   250    /* 上行重传间隔（tick，100Hz*2.5s=250）：须 ≥ 慢通道单报回环 */
 
 /* 连接对象（docs/tcp-thin-api.md §2；本实现为用户态 per-process，故不含内核 pid/内核栈缓冲） */
 typedef enum {
@@ -31,6 +34,12 @@ typedef struct {
     uint16_t     dst_port;
     uint8_t      rxb[TCP_RXB];  uint16_t rx_head, rx_tail;
     uint16_t     rx_next;       /* v1.2 可靠下行：下一个期望的数据序列号 seq（stop-and-wait） */
+    /* v1.2 可靠上行（stop-and-wait）：guest 是发送方，保留在途载荷副本 + seq + 上一发送时刻，
+       tcp_send 阻塞等 host→guest 的 MSG_ACK（下一期望上行 seq）以推进；超时重发在途载荷。 */
+    uint16_t     tx_seq;        /* 下一个要分配的上行 DATA 序列号 */
+    uint8_t      tx_inflight[TCP_MAX_PAYLOAD]; /* tcp.h 需提供该宏；在途上行载荷副本（等 ACK） */
+    uint16_t     tx_inflight_len;   /* 在途载荷字节数；0 = 空闲 */
+    uint32_t     tx_inflight_t;     /* 在途载荷的发送 tick（重传判定基准） */
     /* 状态事件队列（DATA 直接进 rxb，不占此队；状态事件绝不丢弃，见 spec §3） */
     struct { uint8_t type; } ev[TCP_EVQ];
     uint16_t     ev_head, ev_tail;

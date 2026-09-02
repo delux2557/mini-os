@@ -13,16 +13,18 @@
 
 #define TCP_PHDR     8          /* 会话协议头定长 */
 
-/* msg_type 取值（docs v1.1 §2.1：0x02-0x05 事件 host→guest，0x06-0x07 控制 guest→host） */
-#define MSG_DATA     0x01       /* 应用数据（双向；host→guest 的 flags 低 16 位携带数据序列号 seq） */
+/* msg_type 取值（docs v1.2 §2.1：0x02-0x05 事件 host→guest，0x06-0x08 控制双向） */
+#define MSG_DATA     0x01       /* 应用数据（双向；flags 低 16 位 = 该方向的可靠 seq：
+                                   host→guest 时是下行 seq，guest→host 时是上行 seq） */
 #define MSG_OPENED   0x02       /* 事件：TCP 连接建立成功 */
 #define MSG_CLOSED   0x03       /* 事件：对端正常关闭 */
 #define MSG_ERROR    0x04       /* 事件：连接失败 / 对端拒绝 */
 #define MSG_TIMEOUT  0x05       /* 事件：打开/发送超时、半开清理 */
 #define MSG_OPEN     0x06       /* 控制：连接请求（payload= dst_ip(4BE)+dst_port(2BE)） */
 #define MSG_CLOSE    0x07       /* 控制：注销请求（payload 空） */
-#define MSG_ACK      0x08       /* 控制（guest→host，v1.2 可靠下行）：累计 ACK，
-                                   payload= guest 下一个期望 seq（2BE，high then low） */
+#define MSG_ACK      0x08       /* 控制（双向可靠确认，v1.2）：payload= 该方向"下一个期望 seq"
+                                   （2BE，high then low）。guest→host = 下行确认（推进转发器发下行）；
+                                   host→guest = 上行确认（推进 guest 发上行） */
 
 #define TCP_PROTO_VERSION 0x01  /* version 字段 = 1 */
 
