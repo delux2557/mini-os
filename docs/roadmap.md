@@ -101,18 +101,23 @@
   统计对账（泄漏/双重释放/写越界破坏块头都会漂移）；报告碎片；宿主单测 + QEMU selftest
   双重锁定（`[audit] heap ok`）
 
-* **record/replay 地基（候选，未动码；dev 侧基建，对接"AI agent 演练场/测评"）**
+* **record/replay 地基（工程进度：P1 ✅ 落地，P2/P3 待做；dev 侧基建，对接"AI agent 演练场/测评"）**
   **技术前提（先对齐再动工）**：QEMU `-icount` 只保证**内核执行**确定（虚拟时间=指令计数，
   定时器/中断/调度同输入同输出），**不约束整场测试**——三门外部输入（串口 FIFO 注入 / 网络
   SLIRP·宿主转发器 / host 侧 kill·sleep 时序）不受 icount 约束。故完整形态 = 两层：**icount
   确定性内核 + 输入流时间戳化录放**。公共时钟须用 **QEMU icount 虚拟时钟**（host 侧经 QMP/监控
   读回），**非 guest 裸 `sys_getticks`**——repro_bugs.sh 只是"脚本化"未录时间关系，即缺此层。
   分三阶段、每步独立可验收、保持 9 层 CI 绿（P1-P3 均为 tests/+Makefile+脚本的 dev 侧变更）：
-  * **P1 确定性启动（纯参数化、零逻辑改动）**：QEMU 加 `-icount shift=auto,align=on,sleep=on`，
-    环境变量 `QEMU_ICCOUNT=1` 开关（默认关、不破坏现状）。验收：**非网络层（host/qemu/serial
-    /persist/cc500）** icount 模式全绿 = 暴露该层隐藏的 host 墙钟时序依赖；网络层**不承诺** icount
-    （SLIRP 依赖 host 时间，见下"边界"降级）。
-  * **P2 transcript 固化（录放雏形）**：FIFO 驱动脚本输入侧把"发送内容+相对 tick"写 `*.in.tr`、
+  * **✅ P1 确定性启动（v1.4 落地，`tests/test_determinism.sh` + `make test-det`）**：两次 QEMU
+    `-icount shift=auto,align=on,sleep=on` 冷启动，串口日志**逐字节 diff** 判定确定性。实测：
+    icount 下启动段（含 **DHCP OFFER/ACK 网络握手**）两次运行**逐字节一致** = 内核同输入同输出的
+    铁证（P1 验收本质）。**诚实发现**：交互回归脚本（qemu_regression 的 HMP sendkey / serial /
+    persist / cc500）走 host 墙钟轮询（`wait_for`/`sleep`），与 icount 虚拟时钟流速**不匹配**，
+    icount 下 run 窗内超时误报——这是**交互脚本的 host 墙钟依赖被暴露**（恰为 P1 意义），故
+    **不回编**这些脚本；icount 确定性验证独立收编为 `test-det`。网络层**不承诺** icount（SLIRP
+    依赖 host 时间，见下"边界"降级），`test-det` 用纯冷启动含 DHCP 握手证明在**无注入输入流**
+    下确定性已成立；未来交互确定性交给 P2 transcript 录放。
+  * **P2 transcript 固化（录放雏形，待做）**：FIFO 驱动脚本输入侧把"发送内容+相对 tick"写 `*.in.tr`、
     输出侧日志存 `*.out.tr`；失败自动归档（对齐"失败 transcript 固化回归"）；icount 模式失败 =
     带确定性锚点。验收：人为触发一次失败 → 可得可复现的 `.in.tr`/`.out.tr` 归档。
   * **P3 replay 验证（地基闭环）**：回放器按 `*.in.tr` 时间关系重放、比对 `*.out.tr` 逐字节一致

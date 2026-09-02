@@ -244,8 +244,12 @@ test-slip:
 test-tcp:
 	bash tests/test_tcp.sh
 
+# record/replay 地基 P1：两次 -icount 冷启动串口日志逐字节 diff（确定性验收，非网络层）
+test-det:
+	bash tests/test_determinism.sh
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp
+test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det
 
 clean:
 	rm -rf build tests/build
@@ -253,4 +257,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det clean

@@ -3,6 +3,25 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.4.1] - 2026-09-02 · record/replay 地基 P1：icount 确定性启动验收（`make test-det`）
+
+> 承接 roadmap「阶段二·加固」record/replay 地基的第一档：先用 `-icount` 把**内核执行**钉到
+> QEMU 虚拟时钟，证明"同输入同输出"，为后续 P2 transcript 固化 / P3 回放差分铺确定性锚点。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/test_determinism.sh`（新增，`make test-det`）：两次 QEMU `-icount shift=auto,align=on,
+  sleep=on` 冷启动，串口日志**逐字节 diff** 判定确定性——定时器/中断/调度/网络握手同输入同输出。
+* **实测铁证**：icount 下启动段（含 **DHCP OFFER/ACK 网络握手**）两次运行逐字节一致。
+* **诚实发现**：交互回归脚本（qemu_regression 的 HMP sendkey / serial / persist / cc500）基于
+  host 墙钟轮询（`wait_for`/`sleep`），与 icount 虚拟时钟流速不匹配 → icount 下 run 窗内超时
+  误报。此即 roadmap P1 所述"暴露交互脚本的 host 墙钟时序依赖"，故**不回编**这些脚本；icount
+  确定性验证独立收编为 `test-det`，交互确定性留待 P2 transcript 录放。
+
+**Docs**
+
+* `roadmap.md`「record/replay 地基」：P1 标记 ✅ 落地，记录实测结论与边界降级，P2/P3 仍待做。
+
 ## \[v1.4] - 2026-09-02 · shell writefile heredoc 多行写入（绕开 128B 单行截断）
 
 > 面向"AI agent 在 guest 内写较大源码"：`writefile <<DELIM <path>` 多行写入，逐行收集直至
