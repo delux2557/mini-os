@@ -1,0 +1,20 @@
+name: Arena
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  # agent 演练场 阶段0-2 轻量门禁：只校验 arena 纯 Python 工具链自身，
+  # 与既有时序敏感的 `make test`(test job) 解耦，避免无关改动被偶发用例卡住。
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: arena 工具链冒烟（gate/run/task/qw/evaluate）
+        run: bash tests/arena/selftest.sh
+        working-directory: v2-c-kernel

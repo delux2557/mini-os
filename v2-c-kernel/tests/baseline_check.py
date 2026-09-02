@@ -25,7 +25,11 @@ import argparse
 import sqlite3
 import sys
 
-COUNT_TOL = 0.20  # 输出行数/字节数相对基线允许的漂移
+# 判定判据统一复用 arena/gate.py，避免多入口漂移
+sys.path.insert(0, __file__.rsplit("/", 1)[0] + "/arena")
+from gate import COUNT_TOL, gate_contract_drift, gate_output_lines_drift, gate_output_bytes_drift  # noqa: E402
+
+ALARM_PREFIX = "ALARM"
 
 
 def percentile(vals, p):
@@ -49,23 +53,22 @@ def check(conn, kind, show_stages, gate_alarm):
         return 0
 
     base = runs[0]
+    base_run = {"contract_hash": base[2], "out_lines": base[3], "out_bytes": base[4]}
     print("== A] 契约指纹 / 输出量基线（基线 = 最早 runid）==")
     print(f"{'runid':<26}{'out_lines':>10}{'out_bytes':>10}  {'hash':<9} {'' :<22} 判定")
     print(f"{base[0]:<26}{base[3]:>10}{base[4]:>10}  {base[2][:8]:<9}  (基线)")
     alarms = []
     for r in runs[1:]:
         runid, created, h, nlines, nbytes = r
+        cur_run = {"contract_hash": h, "out_lines": nlines, "out_bytes": nbytes}
         tags = []
-        if h != base[2]:
-            tags.append("ALARM 契约指纹漂移")
-        if nlines:
-            dl = abs(nlines - base[3]) / float(base[3] or 1)
-            if dl > COUNT_TOL:
-                tags.append("ALARM 输出行数跳变")
-        if nbytes:
-            db_ = abs(nbytes - base[4]) / float(base[4] or 1)
-            if db_ > COUNT_TOL:
-                tags.append("ALARM 输出字节跳变")
+        for ok, msg in (
+            gate_contract_drift(cur_run, base_run),
+            gate_output_lines_drift(cur_run, base_run),
+            gate_output_bytes_drift(cur_run, base_run),
+        ):
+            if not ok:
+                tags.append(msg)
         mark = " | ".join(tags) if tags else "一致"
         print(f"{runid:<26}{nlines:>10}{nbytes:>10}  {h[:8]:<9}  {mark}")
         alarms.extend(tags)
