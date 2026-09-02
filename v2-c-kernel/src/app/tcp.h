@@ -10,8 +10,8 @@
 
 #define TCP_CONN_MAX 4        /* 连接对象表容量（fd = 下标） */
 #define TCP_EVQ      4        /* 每连接状态事件队列深度（DATA 不走此队，见 tcp.c） */
-#define TCP_RXB      4096     /* 每连接数据接收环（v1.1 Step 4 收尾：1024->4096，
-                                吃得住转发器分块突发 + 一次 >1KB 响应完整重组不丢尾） */
+#define TCP_RXB      16384    /* 每连接数据接收环（v1.2 BUG-047：4096->16384，
+                                drain 改单报泵取 + 应用边收边排空，大响应尾部不丢） */
 #define TCP_DGRAM_BUF 1400    /* drain 单数据报缓冲（= netsock sendto/recvfrom 钳制上限，
                                 含 8B 会话头；接收侧最大可交付=该值） */
 #define TCP_MTU      1400     /* 发送硬墙：单数据报（含 8B 会话头）上限，与 netsock sendto

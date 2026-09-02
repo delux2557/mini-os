@@ -35,7 +35,8 @@ HOST_FAIL=0; HOST_PASS=0
 hrun() { # hrun <name> <src> <expect_rc> <must> <mustn't>
     local name="$1" src="$2" erc="$3" must="$4" mustn="$5" rc out
     printf '%s' "$src" >"$VD/$name.c"
-    out=$("${RUN[@]}" "$VD/$name.c" "$VD/$name.elf" 2>&1); rc=$?
+    # timeout 兜底：缺陷若退化为死循环（旧 BUG-048 块注释 EOF 死循环）不能挂死 CI
+    out=$(timeout 15 "${RUN[@]}" "$VD/$name.c" "$VD/$name.elf" 2>&1); rc=$?
     local ok=1
     [ "$rc" -eq "$erc" ] || ok=0
     { [ -z "$must" ] || echo "$out" | grep -q "$must"; } || ok=0
@@ -54,6 +55,14 @@ hrun t4_ok 'int sys_print(char*s);int main(){sys_print("hi");return 0;}int sys_p
 # F-3：未闭合字符串 -> 必须 FAIL + bad string，且不是 SIGSEGV(139)
 hrun t6_bad 'int sys_print(char*s);int main(){sys_print("unterminated' \
      1 'bad string' ''
+# BUG-048：未闭合块注释 -> 必须 FAIL（干净报错 rc=1），不得死循环（timeout 兜底）
+hrun t_bcomm 'int main(){/* unterminated comment' \
+     1 'cc500: error' 'compiled OK'
+# BUG-049：数字字面量混入字母 -> 必须 FAIL 且报出错 token，不得静默算错骗 compiled OK
+hrun t_mixhex 'int main(){return 0x10;}' \
+     1 '0x10' 'compiled OK'
+hrun t_mixalpha 'int main(){return 123abc;}' \
+     1 '123abc' 'compiled OK'
 # F-1：关系 < / > / >= / <= 均须能编译通过（编码与语义下方另行实证）
 hrun t_lt 'int main(){int i;i=0;while(i<3){i=i+1;}return 0;}' 0 'compiled OK' ''
 hrun t_gt 'int main(){int i;i=9;while(i>3){i=i-1;}return 0;}' 0 'compiled OK' ''
@@ -94,6 +103,14 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tlt.c /tlt.elf"
     gwait "guest < 编译" "cc500: compiled OK" 60
     gwait "guest < 运行 exit0" "'/tlt.elf' exited code=0 PASS" 90
+    # 变量/四则/== 语义（整机真值）：宿主无法运行 cc500 产物（qemu-i386 无内核给不了
+    # 真实退出码），须靠整机 ccboot 内核 ccrun。注意 ccrun 仅认 code==0 为 PASS（shell.c
+    # `code==0 ? PASS : FAIL`），故验证"a=1+2 后 a==3"要用内部 if 分支决定 return 0/1：
+    # 加法/变量/== 任一错 -> return 1 -> code=1 FAIL。这也顺带覆盖 ==（已有 t_lt 覆盖 < ）。
+    gsend 'writefile /sv.c int main(){int a;a=1+2;if(a==3)return 0;return 1;}'
+    gsend "ccrun /sv.c /sv.elf"
+    gwait "guest 变量四则编译" "cc500: compiled OK" 60
+    gwait "guest a=1+2==3 return 0" "'/sv.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else

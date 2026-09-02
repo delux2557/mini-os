@@ -43,12 +43,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 宿主 HTTP 服务：对 "/" 返回 2000 字节 >1KB 响应体，末尾固定 "TAIL"（供完整性断言）
+# 宿主 HTTP 服务：对 "/" 返回 8192 字节 >旧 TCP_RXB(4096) 响应体，末尾固定 "TAIL"
+# （响应体 >4096 才能复现 BUG-047 丢尾：旧 drain 全量 pump 把整段响应挤进 rxb 环撑爆）
 run_http_server() {
     python3 - "$HTTP_PORT" <<'PY' &
 import socket, sys
 port = int(sys.argv[1])
-body = b'X' * 1992 + b'TAIL'                     # 2000B 响应体，尾标记 TAIL
+body = b'X' * 8188 + b'TAIL'                     # 8192B 响应体，尾标记 TAIL
 resp = (b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode() +
         b'\r\nConnection: close\r\n\r\n' + body)
 s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

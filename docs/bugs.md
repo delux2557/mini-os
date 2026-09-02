@@ -795,6 +795,103 @@
 
 ---
 
+## BUG-047 [已修复] v1.2 虚拟 TCP 大响应丢尾：drain 全量 pump 挤爆 rxb 环
+
+- **版本**：v1.1 Step 4（薄包装 + 转发器）；v1.2 覆盖率扩展测试发现
+- **现象**：HTTP 响应体 ≥~4096B（含头部）时，guest 收到的响应尾字节 `TAIL` 缺失，
+  `[http] HTTP 200 OK closed=1 len=4096 tail=MISS -> RESULT FAIL`。8KB/32KB 响应同丢尾；
+  官方 2000B 测试从未触发。e1000 与 SLIP 两通道皆然（与通道无关）。
+- **根因（分层定位）**：
+  1. `tcp_recv` 每次循环**先 `drain()` 全量 pump**：`drain` 用 `for(;;)` 把 netsock 队列里
+     转发器下行**所有**分块一次性 `rx_push` 进 `rxb[TCP_RXB=4096]` 环；
+  2. `rx_push` 环满（`next==rx_head`）时 `return` **丢弃剩余字节**；
+  3. `httpdemo` 自身两个 `TCP_RXB` 上限（`resp[TCP_RXB+1]` + `rlen < TCP_RXB`）再加一层截断。
+  于是"一次性到达的全部下行（头部+正文）> 4096 环"时，第 ~3 个数据报之后的字节在 drain
+  阶段即被永久丢弃，`tcp_recv` 只读到前 4096，尾部缺失。此为 BUG-044 容量收口之后的**更高下界**：
+  转发器分块 ≤1392、NET_RXMAX=2048、TCP_RXB=4096 三者仍未覆盖"响应含头部超 4096"的场景。
+- **核实要点**：`drain` 的 `for(;;)` 全量 pump 是关键——它把"UDP 队列里已到的 N 个分块"一口气
+  塞进一个固定 4096 环，溢出即丢；而非"读一个、消费一个"的背压节奏。若把 drain 改为
+  **每次只 pump 一个数据报**，环内同时驻留 ≤ 一个数据报 + 未读走残留，即可根治（配合调用方循环读）。
+- **修复（已落地）**：
+  - `tcp.c` `drain()` 全量 pump → **每次只从 netsock 取一个会话数据报**（节流/背压）；
+  - `tcp.c` `tcp_recv()` 改为**先读环、环空才 pump 一个、再读**，避免环被单次全量填满；
+  - `tcp.h` `TCP_RXB` 4096→16384（环体放量，供更大响应 + 单数据报 1400 与读缓冲余量）；
+  - `httpdemo.c` 响应缓冲改 `static`（BSS，避免大栈帧）且跟随 `TCP_RXB`，读缓冲配套。
+- **回归（已补）**：test-tcp 增"8KB 响应尾字节完整"断言；e1000/SLIP 双通道 `tail=TAIL` 均通过。
+- **教训**：固定环 + 无背压的"全量 pump"是丢数据的结构根因；"把环调大"只是抬上限，
+  根治须让生产（drain）与消费（recv 读）同步，即在环空时才 pump。
+
+---
+
+## BUG-048 [已修复] v1.2 cc500 块注释未闭合 → 编译器死循环（=F-7）
+
+- **版本**：v0.27（cc500 编译器）；v1.2 编译器审计 fuzz 发现
+- **现象**：源码含未闭合的块注释（如 `int main(){/*` 到 EOF 无 `*/`）时，cc500 编译**死循环**
+  （宿主 hostcc 挂起、`timeout` 返回 124；guest ccrun 无响应）。畸形输入 fuzz 500 例命中
+  **12 个 TIMEOUT，全部含未闭合 `/*`**，且无 segfault/越界崩溃（崩溃健壮性尚可，唯死循环）。
+- **根因**：[cc500.c L128-139](v2-c-kernel/tools/cc500/cc500.c) `get_token` 块注释循环
+  `while (nextc != '/') { while (nextc != '*') nextc = getchar(); nextc = getchar(); }`
+  **无 EOF 守卫**。`getchar()` 到 EOF 恒返回 `-1`，而 `-1 != '*'`(42) 恒真 → 内层死循环。
+  这是 F-3（未闭合字符串，L106-114 已加 `nextc==0-1` 守卫）的**同款 bug**，但块注释路径漏修。
+- **修复（已落地）**：块注释读取加 EOF 守卫（与字符串/字符字面量同款标志变量，C 子集无 `break`）：
+  读 `*` 循环命中 EOF（`nextc==0-1`）即置标志、跳出并走 `error()` 干净报错。
+- **回归（已补）**：hostcc 未闭合注释 `rc==1`（修复前死循环超时）；`int main(){/* ok */}` 闭合注释
+  仍 `rc==0`；fuzz 复核无 TIMEOUT（`test_cc500.sh` `t_bcomm` 用例 + timeout 兜底）。
+- **教训**：自托管编译器对"输入在未预期位置耗尽"要**处处**有 EOF 守卫——字符串已守、块注释漏守；
+  解析器健壮性边界须用畸形输入 fuzz 覆盖，而非只"能编译自己"。
+
+---
+
+## BUG-049 [已修复] v1.2 cc500 数字+字母混合字面量被静默算错（=F-8）
+
+- **版本**：v0.27（cc500 编译器）；v1.2 编译器审计边界用例发现
+- **现象**：`return 0x10;` **编译成功且不报错**，但产物把 `0x10` 当十进制串 `0x10` 里的字符
+  `'x'`(120)-`'0'`(48)=72 参与进位，得到 **7210** 而非 16 或报错（`123abc`、`9_z` 同类均静默错值）。
+- **根因（两层叠加）**：
+  1. [cc500.c L97-99](v2-c-kernel/tools/cc500/cc500.c) `get_token` 把**字母/数字/下划线吃成同一
+     个 token**（循环条件含 `('0'<=nextc&nextc<='9')` 与 `('a'<=nextc&nextc<='z')`），故 `0x10` 是
+     "一个 token"；
+  2. [cc500.c L407-413](v2-c-kernel/tools/cc500/cc500.c) `primary_expr` 数字解析只校验 `token[0]`
+     是数字就进 `while(token[i]) n=n*10+token[i]-'0'`，**不校验后续字符全为数字** → `'x'` 被当数码。
+  "垃圾进、静默错出"，比"干净报错拒绝"危害更大（学员难归因）。
+- **修复（已落地）**：数字字面量解析时校验每个字符 `'0'<=c&c<='9'`，命中非数字即 `error()` 干净
+  报错退出（十六进制 `0x` 与混杂标识符 `123abc` 均明确拒绝）。
+- **回归（已补）**：hostcc `0x10`/`123abc` 应 `rc==1`（干净拒绝）而非 `rc==0` 产错值；纯十进制
+  `123` 仍 `rc==0`；cc500 自举不受影响（源码无此类字面量）。`test_cc500.sh` `t_mixhex`/`t_mixalpha`
+  用例锁死。
+- **教训**：词法的"标识符/数字"分界一旦模糊（字母数字混吃），必须在下游**数值解析处设防御校验**；
+  "不接受"要"显式拒绝并报错"，绝不"接受后按错误语义往下算"。
+
+---
+
+## BUG-050 [已修复] v1.2 虚拟 TCP e1000 通道丢 CLOSED：netsock 全量排空挤爆 socket 环
+
+- **版本**：v1.2（BUG-047 修复后、双通道复测发现）
+- **现象**：BUG-047 修复后，SLIP 通道全绿，但 **e1000（UDP）通道**仍 `[http] HTTP 200 OK closed=0
+  len=8252 tail=TAIL -> RESULT FAIL`，并伴随 `[http] recv ERR (unexpected)`。`len=8252` 说明正文
+  （含 `TAIL`）已完整收到，唯独 `closed` 事件缺失，`tcp_recv` 最终超时返回 -1。
+- **根因（两层）**：
+  1. 宿主转发器（`tcp_proxy.py` UDP 模式）不回串口通道那样 `SLIP_CAP=500 + 20ms` 节拍，而是
+     `CHUNK=1392` 全速下行；8192B 响应经 `recv(4096)` 边界切成 **7×MSG_DATA + 1×MSG_CLOSED
+     = 8 个数据报**一次性涌入 guest；
+  2. [netsock.c](v2-c-kernel/src/net/netsock.c) `netsock_drain` 用 `for(;;)` **全量排空 e1000 环**，
+     把 8 个数据报一口气 `dispatch_frame` 进本地 socket 环（`NET_RXQ=8` 有效容量 7），第 8 个
+     （恰为末位 `MSG_CLOSED`）在 `next==rx_head` 处被**队列满丢帧**；
+  3. `MSG_DATA` 可牺牲（有 `ev_overflow` 观测），但 `MSG_CLOSED` 是控制事件绝不可丢——丢了即
+     "数据到手、断连信号永远收不到"。
+- **核实要点**：这是 BUG-047 的同款结构缺陷，只下移了一层——BUG-047 是 `tcp.c drain` 全量 pump
+  挤爆 `TCP_RXB`（16KB 环）；本条是 `netsock_drain` 全量排空挤爆 `NET_RXQ`（7 槽小环）。SLIP 通道
+  因其天然节拍（20ms 分块间隔 + 100Hz UART 轮询）逐帧消费而无突发，故未暴露；e1000 通道全速突发即现。
+- **修复（已落地）**：`netsock_drain` 由"全量排空"改为**单帧泵取**（每次 `netif_rx` 只收一个 IP
+  数据报即返回，跳过非 IP 帧）：突发缓冲交还给 **e1000 环（256 槽）**，socket 小环深度恒 ≤1，
+  永不因全量排空丢尾。与 BUG-047 的"生产与消费同步/背压"思路一致。
+- **回归（已补）**：test-tcp e1000 通道 `closed=1`、`tail=TAIL`、`refuse -1` 全绿；SLIP 通道不受影响。
+- **教训**：任何"全量排空/全量 pump 进有限环"的地方都可能被更大突发击穿——修 BUG-047 时若同步
+  审计 `netsock_drain` 这条同款路径，可少一轮复测；"控制事件"（CLOSED/OPENED/ERROR）与"数据"
+  在 UDP 层同质，须保证承载它们的队列**绝不因数据突发而丢弃控制帧**。
+
+---
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号 | 场景 | 现象 | 处置/教训 |
@@ -812,3 +909,7 @@
 | OBS-002 | ~~`pcb_t::fork_frames[24]` 硬编码 24 帧（96KB）限制大进程 fork~~ | ✅ 已修复（v0.30 BUG-035）：改为 kmalloc 动态数组，`sched_fork` 按需分配、退出 kfree |
 | OBS-003<br>（=评审残留） | netsock send/recv 无进程归属（`netsock_sendto`/`recvfrom` 不校验调用者是否为该 socket 的打开者） | 现设计语义：单用户教学 OS 将网络 socket 视为进程共享资源。close 已做归属隔离（BUG-038），send/recv 保持共享；威胁模型声明之，需强化时再列缺陷 |
 | OBS-004<br>（=F-6） | `writefile` 整行 128B 截断（shell/kb 行缓冲容量）——超长源码被截断 | F-3 修复前是未闭合字符串崩溃引信；F-3 修复后仅剩教学限制（单行源码 ≤128B，大程序用 ccrun 多次或逐段写）。限速不修，记录之 |
+| OBS-005<br>（压测 2026-09-01） | `qemu-i386` 直跑 cc500 编译产物 ELF 退不出真实退出码（产物假设 mini-os 整机 int 0x80 契约，无内核支持）——`int main(){int a;a=1+2;return a;}` 宿主直跑一律返 1，一度误报为"变量返回算错" | **语义验证必须走整机 ccboot 内核 ccrun**，宿主仅可信"编译 rc 0/1"（畸形 fuzz 3000 例即只测编译阶段）。整机证实 `a=1+2;return a` 实返 3，算法无误，非缺陷 |
+| OBS-006<br>（压测 2026-09-01） | ccrun 判定 `code==0 ? PASS : FAIL`（[shell.c](v2-c-kernel/src/app/shell.c) L473 非 0 一律 FAIL，`main{return 0}` 视为成功） | 验证"某个正确的非零值"不能靠 `return 该值`（必被标 FAIL）；应程序内部 `if(x==期望)return 0;return 1;`。已据此把 test-cc500 guest 层扩为 `a=1+2;a==3` 整机真值断言，顺带覆盖 `==`（此前 guest 层只测 `<`） |
+| OBS-007<br>（虚拟 TCP 压测 2026-09-01） | 恶意下行事件（未知 sid 的 CLOSED/ERROR/TIMEOUT/OPENED + 非法 mtype + 错版本号 + 保留位非 0 + 超大 MSG_DATA 1392B + 过短头 0..7B + 随机字节）**并行 10s × ~900pkt/s 注入**，合法 HTTP 8KB+TAIL 仍 `RESULT PASS closed=1 tail=TAIL refuse=-1`，内核无 OOP/PANIC/TRIPLE | 验证 BUG-050（netsock 单帧泵取背压 e1000 环）和会话解析器 `conn_by_session(sid)==NULL` 的"无副作用 drop"——4209 脏数据报没混进合法连接，也没撑爆 NET_RXQ。固化为 `tests/test_tcp_attack.sh + tests/tcp_attack.py`，注入面=转发器 UDP 监听口（与 test-tcp 同入口，可 CI 直接跑） |
+| OBS-008<br>（协议 压测 2026-09-01） | 宿主层解析器（IP / UDP / ICMP / DHCP / SLIP / 虚拟 TCP 会话头）**ASan+UBSan 150w 轮 fuzz = 1200w 次 parse 调用**，无崩溃/越界/UB（19 项宿主单测 0 fail） | 解析器加固到位，1200w 调用未暴露新协议漏洞。ASan+UBSan 清洁是业界回归基线；保留 `tests/fuzz_parse.c` + `run_host_tests.sh`，`FUZZ_ITERS=1500000` CI 可直接跑。 |
