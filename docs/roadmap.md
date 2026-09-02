@@ -224,8 +224,19 @@
   不重开 sqlite 写回、不动录放主路径。验收：各命令对既有 torture 数据输出正确 JSON，
   同契约 PASS(exit0)、漂移 FAIL(exit1) 且给出契约行证据。
 
-* **阶段2：评测器（判分闭环）**。串起 replay 差分 + 基线巡检 + `kern_audit`：
-  agent 改完内核 → `submit` → 自动得 `PASS/WARN/FAIL + 在哪一步 + .tr 证据`。
+* **✅ 阶段2：评测器（判分闭环，`tests/arena/evaluate.py` + `qw.py eval`）**。串起
+  replay 差分 + 基线巡检 + 内核标记审计，对一轮 transcript 一次得出 `PASS/WARN/FAIL`，
+  并落到"**在哪一步 + .tr 证据**"。四步判据：
+  - **result**：读转录 RESULT 的 `# result:`——挂了/崩了 = 前提 FAIL（缺文件 → WARN）
+  - **baseline**：复用 `gate.run_gates`（contract_hash/out_lines/out_bytes/契约内容）对照基线 run，
+    判据集取自 task.gates（单一来源）
+  - **audit**：扫 out.tr 的内核致命/越权/溢出标记（FATAL/double free/PAGE FAULT/STACK OVERFLOW/
+    panic/BUG）+ 内核自审计失败行；已知预期隔离演示(procCrash)`crash demo:…` 上下文排除，命中给行号证据
+  - **replay**：（可选 `--replay-log`）重放契约行集合 vs 当轮契约行集合——现场能否复原；
+    缺证据 → WARN
+  汇总：任一 FAIL → FAIL；否则有 WARN → WARN；全 PASS → PASS（`qw.py eval` exit：0/1/2 对应
+  PASS/WARN/FAIL）。验收：对既有 torture transcript 出正确 JSON：全 PASS(exit0)、契约/审计漂移
+  FAIL(exit1) 且 `steps[].evidence` 给出丢失契约行或 FATAL 行号、缺 replay 证据 WARN。
 
 * **阶段3：运行编排（可选外壳，最后做，MVP 可不上）**：独立 QEMU 实例、超时 kill、
   失败快照捡出、并发排队；做到这里才谈得上"开放平台"。
