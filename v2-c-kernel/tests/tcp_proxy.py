@@ -30,9 +30,10 @@ def hdr(sid, mtype):
 
 def parse_hdr(pkt):
     if len(pkt) < HDR: return None
-    if pkt[5] != PROTO_VERSION or pkt[6] != 0 or pkt[7] != 0: return None
+    if pkt[5] != PROTO_VERSION: return None
     sid = int.from_bytes(pkt[0:4], 'big')
-    return (sid, pkt[4])
+    seq = (pkt[6] << 8) | pkt[7]          # flags 低16位 = 该方向的可靠 seq（DATA 用）
+    return (sid, pkt[4], seq)
 
 # ---------------- SLIP (RFC 1055) ----------------
 def slip_tx(frame):
@@ -115,12 +116,14 @@ class Session:
         self.closed = False
         # ---- 可靠下行（stop-and-wait）状态 ----
         self.pending = bytearray()          # host TCP 读到的、尚未分派到数据报的待发字节
-        self.seq = 0                        # 下一个要分配的序列号
+        self.seq = 0                        # 下一个要分配的下行序列号
         self.inflight = None                # 在途数据报载荷（等 ACK）；None=空闲
         self.inflight_seq = None
         self.inflight_t = 0.0
         self.eof = False                    # host TCP 已 EOF（pending 发完后可关）
         self.finished = False               # 已发 MSG_CLOSED
+        # ---- 可靠上行（stop-and-wait，v1.2 上行可靠）状态 ----
+        self.up_next = 0                    # 下一个期望的上行 DATA 序列号（guest→host）
     def touch(self): self.last = time.monotonic()
 
 class Proxy:
@@ -175,7 +178,7 @@ class Proxy:
             sess.inflight_t = time.monotonic()
             self.send_data(sess, sess.inflight_seq, sess.inflight)
 
-    def handle_msg(self, addr, mtype, sid, payload):
+    def handle_msg(self, addr, mtype, sid, seq, payload):
         s = self.sess.get(sid)
         if s: s.touch()
         if mtype == MSG_OPEN:
@@ -189,11 +192,16 @@ class Proxy:
             self.sess[sid] = sess
             t = threading.Thread(target=self._connect, args=(sess,), daemon=True)
             t.start()
-        elif mtype == MSG_DATA:        # guest→host 上传：尽力而为（大文件方向是下行）
+        elif mtype == MSG_DATA:        # guest→host 上传：可靠上行（stop-and-wait，v1.2）
             if s and s.state == 'OPEN' and s.tcp:
-                try: s.tcp.sendall(payload)
-                except OSError: self._teardown(s)
-        elif mtype == MSG_ACK:         # guest→host 累计 ACK：payload= 下一期望 seq(2BE)
+                if seq == s.up_next:            # 顺序包：转发到真 TCP，回 ACK
+                    try: s.tcp.sendall(payload)
+                    except OSError: self._teardown(s)
+                    s.up_next = (s.up_next + 1) & 0xFFFF
+                    self._up_ack(s)
+                else:                           # 重发/乱序：丢弃载荷，重发 ACK 让 guest 前进
+                    self._up_ack(s)
+        elif mtype == MSG_ACK:         # guest→host 累计 ACK：payload= 下一期望下行 seq(2BE)
             if s and len(payload) >= 2 and s.inflight is not None:
                 ack = int.from_bytes(payload[0:2], 'big')
                 # 期望下一个 == 在途 seq+1 → 该报已被接收，清空在途，发下一个
@@ -204,6 +212,13 @@ class Proxy:
             log(f'MSG_CLOSE sid={sid}')
             if s: self._teardown(s)
             self.sess.pop(sid, None)
+
+    # 可靠上行：向 guest 回累计 ACK（payload = 下一期望上行 seq，2BE）。
+    # MSG_ACK 按方向双向复用：host→guest 的 MSG_ACK 语义即"上行确认"。
+    def _up_ack(self, s):
+        p = (s.up_next >> 8) & 0xFF, s.up_next & 0xFF
+        self.peer_send(s.addr, hdr(s.sid, MSG_ACK) + bytes(p))
+        log(f'send sid={s.sid} up-ACK next={s.up_next} -> {s.addr}')
 
     def _connect(self, sess):
         try:
@@ -280,7 +295,7 @@ class Proxy:
                     while True:
                         pkt, addr = udp.recvfrom(8192)
                         h = parse_hdr(pkt)
-                        if h: self.handle_msg(addr, h[1], h[0], pkt[HDR:])
+                        if h: self.handle_msg(addr, h[1], h[0], h[2], pkt[HDR:])
                 except BlockingIOError: pass
             self._tcp_read(r)
             self._sweep()
@@ -322,7 +337,7 @@ class Proxy:
                     sip, sport, dip, dport, payload = u
                     h = parse_hdr(payload)
                     if h:
-                        self.handle_msg((sip, sport, dip, dport), h[1], h[0], payload[HDR:])
+                        self.handle_msg((sip, sport, dip, dport), h[1], h[0], h[2], payload[HDR:])
             self._tcp_read(r)
             self._sweep()
         log('slip channel closed'); sys.exit(0)

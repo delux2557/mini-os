@@ -19,22 +19,27 @@
 
 #define TCP_PROXY_IP   0x0A000202u   /* 10.0.2.2：宿主转发器所在（SLIRP 网关 / 串口对端） */
 #define TCP_PROXY_PORT 7778
-#define TCP_MAX_PAYLOAD (TCP_MTU - TCP_PHDR)   /* 应用数据单次上限（=数据报 1400-8） */
 
 static tcp_conn_t conns[TCP_CONN_MAX];
 static int  tt_sock = -1;        /* 复用：唯一 UDP socket（懒创建） */
 static uint32_t tt_sid = 0;      /* session_id 单调递增计数器（guest 分配） */
 
-/* 向转发器发一条会话消息；成功 0 / -1 */
-static int sendpkt(uint32_t session_id, uint8_t type, const uint8_t *pay, uint32_t plen) {
+/* 向转发器发一条会话消息（可携带 flags/seq）；成功 0 / -1 */
+static int sendpkt_f(uint32_t session_id, uint8_t type, uint16_t seq,
+                     const uint8_t *pay, uint32_t plen) {
     uint8_t pkt[TCP_MTU];
     if (TCP_PHDR + plen > TCP_MTU) return -1;
     tcp_hdr_put_session(pkt, session_id);
-    tcp_hdr_set_type(pkt, type, 0);
+    tcp_hdr_set_type(pkt, type, seq);
     for (uint32_t i = 0; i < plen; i++) pkt[TCP_PHDR + i] = pay[i];
     return sys_net_sendto(tt_sock, &(struct net_send_iov){
         .dst_ip = TCP_PROXY_IP, .dst_port = TCP_PROXY_PORT,
         .buf = pkt, .len = TCP_PHDR + plen });
+}
+
+/* 无 seq 消息（控制/事件，flags=0） */
+static int sendpkt(uint32_t session_id, uint8_t type, const uint8_t *pay, uint32_t plen) {
+    return sendpkt_f(session_id, type, 0, pay, plen);
 }
 
 /* v1.2 可靠下行：向转发器回送累计 ACK（payload = 下一个期望 seq，2BE）。 */
@@ -103,7 +108,14 @@ static void drain(void) {
     else if (mt == MSG_CLOSED)  { c->state = TCP_CLOSED; ev_push(c, mt); }
     else if (mt == MSG_ERROR)   { c->state = TCP_ERROR;  ev_push(c, mt); }
     else if (mt == MSG_TIMEOUT) { c->state = TCP_ERROR;  ev_push(c, mt); }
-    /* MSG_OPEN/CLOSE/ACK 是 guest→host 方向，guest 收到即方向非法：忽略 */
+    else if (mt == MSG_ACK)     { /* host→guest 的 MSG_ACK = 上行确认（payload 2B 下一期望上行 seq） */
+        if (n >= TCP_PHDR + 2 && c->tx_inflight_len != 0) {
+            uint16_t next = (uint16_t)(((uint16_t)tmp[TCP_PHDR] << 8) | tmp[TCP_PHDR + 1]);
+            if (next == (uint16_t)(c->tx_seq + 1))  /* 本在途报已确收：清空在途，允许发下一报 */
+                c->tx_inflight_len = 0;
+        }
+    }
+    /* MSG_OPEN/CLOSE 是 guest→host 方向，guest 收到即方向非法：忽略 */
 }
 
 int tcp_open(uint32_t ip, uint16_t port) {
@@ -123,6 +135,7 @@ int tcp_open(uint32_t ip, uint16_t port) {
     c->dst_ip = ip; c->dst_port = port;
     c->rx_head = c->rx_tail = c->ev_head = c->ev_tail = 0;
     c->rx_next = 0;                  /* v1.2 可靠下行：从 seq 0 开始期待 */
+    c->tx_seq = 0; c->tx_inflight_len = 0; c->tx_inflight_t = 0;  /* 上行可靠从 seq 0 起 */
     c->ev_overflow = 0;
     /* MSG_OPEN：把目标地址一次性带给转发器（dst_ip + dst_port，大端） */
     uint8_t pay[6];
@@ -138,8 +151,29 @@ int tcp_send(int fd, const uint8_t *d, uint32_t n) {
     if (TCP_PHDR + n > TCP_MTU) return -1;            /* MTU 硬墙：本地早返（docs §2） */
     tcp_conn_t *c = &conns[fd];
     if (c->state != TCP_OPEN) return -1;              /* 未建立/已关/失败：本地立即拒绝 */
-    if (sendpkt(c->session_id, MSG_DATA, d, n) < 0) return -1;
-    return (int)n;
+    /* === v1.2 可靠上行（stop-and-wait）：保存在途副本、带上行 seq 发送，阻塞等 host→guest
+     * ACK 以推进；ACK 超时按 TCP_TX_TICKS 重发在途载荷（幂等，转发器遇重复 seq 去重视降）。 === */
+    for (uint32_t i = 0; i < n; i++) c->tx_inflight[i] = d[i];   /* 副本（重传依据） */
+    c->tx_inflight_len = (uint16_t)n;
+    uint16_t s = c->tx_seq;                        /* 本数据块的 seq（in-flight 期间不变，重传复用） */
+    uint32_t start = sys_getticks();
+    for (;;) {
+        if (c->tx_inflight_len != 0) {             /* 在途未清 → 发（首次/重传），并记发送时刻 */
+            if (sendpkt_f(c->session_id, MSG_DATA, s, c->tx_inflight, c->tx_inflight_len) < 0)
+                return -1;
+            c->tx_inflight_t = sys_getticks();
+        }
+        /* drain 收单报：收到 host ACK 且 next==s+1 → tx_inflight_len 被清 0 */
+        for (;;) {
+            drain();
+            if (c->tx_inflight_len == 0) { c->tx_seq = (uint16_t)(s + 1); return (int)n; }
+            if (c->state == TCP_CLOSED || c->state == TCP_ERROR) return -1;
+            if (sys_getticks() - start >= TCP_RECV_TICKS) return -1;  /* 超时上限：失败 */
+            uint32_t now = sys_getticks();
+            if (now - c->tx_inflight_t >= TCP_TX_TICKS) break;  /* 到重传间隔：跳出重发 */
+            sys_sleep(1);
+        }
+    }
 }
 
 int tcp_recv(int fd, uint8_t *buf, uint32_t max) {
