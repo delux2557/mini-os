@@ -41,12 +41,20 @@ echo "      构建完成"
 
 echo "== [2/5] 宿主 HTTP（8192B+TAIL） + 转发器（UDP:7778，target=8080，匹配 httpdemo 源码硬编码） =="
 # 注意：guest 侧 src/app/tcp.c / httpdemo.c 硬编码 TCP_PROXY_PORT=7778 HTTP_PORT=8080 REFUSE_PORT=59998，
-# 所以攻击回归也必须用这 3 个端口；启动前清理可能残留的旧监听/连接，避免 Address in use。
-fuser -k 8080/tcp 7778/udp 7777/udp 59998/tcp >/dev/null 2>&1 || true
-# 再给 TIME_WAIT 松绑小延迟
-sleep 0.4
-HTTP_PORT=8080; PROXY_UDP=7778
-echo "      运行端口 HTTP=$HTTP_PORT PROXY_UDP=$PROXY_UDP REFUSE=59998（与源码硬编码一致）"
+# 所以攻击回归也必须用这 3 个端口。
+# F3（交接单 处理项）：端口覆盖不贯穿——宿主变量 HTTP_PORT 会被下面吃死为 8080，本回归无法换端口重跑。
+# 所需端口若已被占用 = 环境病。不得 fuser -k 误杀他人进程（共享 runner 上会连坐无辜服务），
+# 也不得让业务断言静默 5 连 FAIL 伪装成"攻击击穿 TCP 栈"。命中即 exit 2（0/1/2=ok/断言fail/环境病，
+# 与仓库统一规范对齐）。
+HTTP_PORT=8080; PROXY_UDP=7778; REFUSE_PORT=59998
+for pp in "8080/tcp" "7778/udp" "59998/tcp"; do
+  pn="${pp%%/*}"
+  if ss -ltnu 2>/dev/null | awk '{print $4}' | grep -qE ":${pn}$"; then
+    echo "[ERR] 环境病：所需端口 ${pp} 已被占用（guest 编译期硬编码，无法换端口），请释放后重试。"
+    exit 2
+  fi
+done
+echo "      运行端口 HTTP=$HTTP_PORT PROXY_UDP=$PROXY_UDP REFUSE=$REFUSE_PORT（与源码硬编码一致）"
 python3 - "$HTTP_PORT" <<'PY' &
 import socket, sys
 port = int(sys.argv[1])
