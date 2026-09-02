@@ -51,7 +51,7 @@
 
 **Docs**
 
-* `roadmap.md`「record/replay 地基」：补 repro_bugs 接入录放的说明。
+* `roadmap.md`「record/replay 地基」：补 repro\_bugs 接入录放的说明。
 
 ## \[v1.4.6] - 2026-09-02 · in.tr TSV 防御：`tr_send` 拒绝含 TAB/换行的 payload
 
@@ -63,13 +63,55 @@
   并 `%q` 报出违规命令 + 单行规约提示；拒绝写入 → 归档 TSV 永不脱列，差分/回放不会拿到坏列。
   实测：单行照常记录（`1 <tab> 6 <tab> ls /`），含 TAB 与含换行的 payload 各被拒（rc=1）、
   `seq` 不递增、`in.tr` 无污染。
+
 * `tr_start` 文件头新增规约行：`payload 禁原始 TAB/换行，须单行；多行需显式编码 \t\n\\ 并同步回放解码`
-   ——"为什么被拒"在证据文件里就地可见，自解释。
+  ——"为什么被拒"在证据文件里就地可见，自解释。
+
 * **未来多行扩展点**（仅预言，未实现）：真需 heredoc 时再引入显式转义（`\\`/`\t`/`\n`）+ replay.sh
-   同型解码后放开守卫；保证录放主路径仍 `.in.tr` 文本"证据原件"，且不回归现有单行差分。
+  同型解码后放开守卫；保证录放主路径仍 `.in.tr` 文本"证据原件"，且不回归现有单行差分。
+
 * 自测：`make test-tr`（P2）/ `test-rp`（P3）全绿，守卫对合法单行零影响。
 
 Docs：本条目。
+
+## \[v1.4.7] - 2026-09-02 · 压测壳修复：确定性判定空判据 + 打点节奏，落地"结果集复原"语义
+
+> 用 record/replay 地基做**业内最佳实践测试**（`tests/rp_torture.sh` 新增：确定性差分 + 压力/边界
+> 扫描 + 结果集复原）。初测抓出**两处测试壳"假绿"缺陷**（非内核），修复后两轮 `-icount` 冷启
+> 确定性成立、内核无意外缺陷标记、现场可复原。这正是"用录放基因为测试本身照镜子"的成果。
+
+**Fixed**（Tests，dev 侧基建）
+
+* **空判据假绿**（`tests/rp_torture.sh` 的 `func()`）：旧实现 `grep -aE "…"` **未把文件参数 `$1`
+  传给 grep** → grep 读空 stdin → `runA.func`/`runB.func` 恒空文件 → 确定性判定是对"两个空文件"
+  比对，**无条件 PASS**。修复：`func(){ … "$1"; }`，判定真实落到输出文件上。审计后 `norm()`/`kmark()`
+  均已正确使用 `$1`。
+
+* **打点节奏缺陷**（`boot_battery`）：旧命令集 26 条连续 `tr_send` 无间隔灌入，shell 异步跟不上；
+  末尾固定 `sleep 3` 快照把末条 `run hello` 掐在半路（runA 末 echo `o`/runB `run de`），且并发
+  继承 demo 的 PID 顺序随之抖动（`[fork] pid=8` vs `pid=9`）。修复：改为**提示符同步打点**
+  `tsend`（每条等下一个 `mini-os$ ` 再发下一条，计数自增），命令完成确定、尾部不再依赖盲 sleep。
+
+* **复原判定语义**（新增 section D）：跨打点路径（record 用提示符同步 / replay 用 in.tr 相对毫秒）
+  叠加并发继承 demo 的 icount×host 调度，`isol` 子进程 `ISOLATED OK` 与 shell `exited code=0`
+  尾部两行偶发对调 → GO/NO-GO 改用**结果集相等（排序后）**，顺序差单列已知边界提示；避免把
+  顺序噪声误报为重构/回归。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/rp_torture.sh`（新增，`record/replay 工作流实战`，用法 `bash tests/rp_torture.sh`）：
+  A 两轮 `-icount` 冷启功能契约差分 · B 内核致命/越权/溢出标记扫描（区分预期 procCrash 隔离演示）·
+  C tr2sqlite 检索 · D 重放黄金 transcript 做结果集复原。
+
+**自测实录**
+
+* 修复后 A 段：两轮 `-icount` 冷启**功能契约逐字节一致**，out\_lines 均精确 =1165 行。
+* B 段：唯一命中 = `[user] PAGE FAULT pid=5 … -> killed`（procCrash 故意越权，前置 `crash demo`
+  行标注为预期隔离演示）；无意外缺陷标记；churn 后 `free=62668KB` 稳定，无泄漏迹象。
+* D 段：重放黄金 transcript 复现全部 **24 条** ISOLATED OK / exited code（结果集一一对应），仅
+  `isol` 尾部两行顺序偶发对调（已知边界）。
+
+Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 ## \[v1.4.3] - 2026-09-02 · record/replay 地基 P3：replay 回放差分闭环（`make test-rp`）
 
