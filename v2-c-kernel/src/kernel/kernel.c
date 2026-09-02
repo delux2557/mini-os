@@ -144,6 +144,14 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
         serial_printf("[boot] httpdemo pid=%d\n", tcp_pid);
     }
 #endif
+#ifdef DL_DEMO
+    /* v1.2：DL_DEMO 构建时自动 spawn 大文件下载 demo（宿主 128KB 文件服务由
+     * tests/test_tcp_dl.sh 提供）。只验证大文件下载路径，与 httpdemo 互不占用连接表。 */
+    if (netif_ready() == 0) {
+        int dl_pid = usermode_spawn_elf("dldemo", APP_LINK, 0);
+        serial_printf("[boot] dldemo pid=%d\n", dl_pid);
+    }
+#endif
 
     /* 切入第一个就绪进程（不返回）；中断由 iret 的 eflags 开启 */
     sched_start();
