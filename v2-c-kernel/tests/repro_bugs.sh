@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 实锤复现 BUG-A（文件槽泄漏污染工具链）与 BUG-B（cc500 产物丢失 exec argv）
 set -u
-cd "$(dirname "$0")/.." || exit 1   # 相对路径定位到 v2-c-kernel/，任意机器可跑
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/transcript.sh"   # record/replay · P2 录制：把下面复现命令流固化为 .in.tr/.out.tr
+cd "$SCRIPT_DIR/.." || exit 1        # 相对路径定位到 v2-c-kernel/，任意机器可跑
 make >/dev/null 2>&1
 LOG=build/repro.log
 TIN=build/repro_in.fifo
@@ -13,14 +15,16 @@ trap cleanup EXIT
 rm -f "$LOG" "$TIN" "$TOUT"
 mkfifo "$TIN" "$TOUT"
 (cat "$TOUT" > "$LOG") & CAT_PID=$!
-qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown -m 64 -serial stdio -monitor none < "$TIN" > "$TOUT" 2>/dev/null &
+qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown -m 64 -nic none -serial stdio -monitor none < "$TIN" > "$TOUT" 2>/dev/null &
 QPID=$!
 exec 9>"$TIN"
 
 wait_for() { local desc="$1" re="$2" tmo="${3:-8}" i; for ((i=0;i<tmo*4;i++)); do grep -aq "$re" "$LOG" 2>/dev/null && { echo "[ok]   $desc"; return 0; }; sleep 0.25; done; echo "[FAIL] $desc (缺: $re)"; FAIL=$((FAIL+1)); return 1; }
-send() { printf '%s\n' "$1" >&9; sleep 0.3; }
+send() { tr_send "$1"; sleep 0.3; }   # tr_send：写 fd9 并录制进 in.tr（含相对 ms），保留 0.3s 打拍
 
 wait_for "shell 提示符" "mini-os\$ " 20
+tr_start repro                          # 录制起点（起记相对 ms）
+tr_snapshot "$LOG"
 
 echo "===== BUG-B：cc500 自编译产物丢 argv ====="
 send "ccboot"
@@ -65,6 +69,9 @@ fi
 
 sleep 1
 exec 9>&- 2>/dev/null || true
+# 录制收尾：快照输出进 out.tr，并按 FAIL 状态标 RESULT（0=无回归 / 1=复现出现）
+tr_snapshot "$LOG"
+tr_finish $(( FAIL==0 ? 0 : 1 ))
 kill "$QPID" 2>/dev/null || true; wait "$CAT_PID" 2>/dev/null || true
 echo
 echo "==== 复现日志关键行 ===="

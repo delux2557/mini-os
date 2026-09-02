@@ -256,6 +256,12 @@ test-tr:
 test-rp:
 	bash tests/test_replay.sh
 
+# record/replay 接 repro_bugs.sh：BUG-A(文件槽泄漏)/BUG-B(cc500 argv) 复现命令流经 transcript
+# 录制固化为可回放证据（.in.tr/.out.tr），并断言两 bug 在修复版"未复现"（含 -nic none）。
+# 录制的 transcript 可被 replay.sh 消费重放（P3 方向，闭环见 docs）。
+test-repro:
+	bash tests/repro_bugs.sh
+
 # 完整测试
 test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp
 
@@ -265,4 +271,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp test-repro clean
