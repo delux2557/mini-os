@@ -8,7 +8,11 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 command -v qemu-system-i386 >/dev/null 2>&1 || { echo "[ERR] 缺 qemu-system-i386"; exit 2; }
+# L1: 记录编译阶段耗时(host 墙钟)，进 stages.tsv 供跨轮"哪段变慢"分析
+TBASE0=$(date +%s%3N)
 make >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
+COMPILE_MS=$(( $(date +%s%3N) - TBASE0 ))
+echo "      编译耗时 ${COMPILE_MS}ms"
 . tests/transcript.sh
 TR_BASE="build/transcripts"
 mkdir -p "$TR_BASE"
@@ -23,6 +27,7 @@ boot_battery() {
     local TIN="/tmp/tor_in.$$.fifo" TOUT="/tmp/tor_out.$$.fifo" QPID="" CAT_PID=""
     rm -f "$log" "$TIN" "$TOUT"; mkfifo "$TIN" "$TOUT"
     (cat "$TOUT" > "$log") & CAT_PID=$!
+    TBOOT0=$(date +%s%3N)          # L1: boot 耗时起算（qemu 拉起）
     qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown \
         -m 64 -nic none -serial stdio -monitor none $ICOUNT < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!
@@ -30,6 +35,8 @@ boot_battery() {
 
     local i2=0
     while [ $i2 -lt 900 ]; do grep -aq 'mini-os\$ ' "$log" 2>/dev/null && break; sleep 0.5; i2=$((i2+1)); done
+    TBOOT=$(( $(date +%s%3N) - TBOOT0 ))
+    TEXEC0=$(date +%s%3N)
     tr_start "$runid"
     tr_snapshot "$log"
 
@@ -75,6 +82,9 @@ boot_battery() {
     # 信号化收尾：所有命令已在 tsend 内同步到各自完成提示符, 快照即完整确定性现场
     sleep 1
     tr_snapshot "$log"
+    TEXEC=$(( $(date +%s%3N) - TEXEC0 ))
+    # L1: 阶段耗时写回 transcript 目录(compile/boot/exec)，供 tr2sqlite -> baseline_check 跨轮分析
+    printf 'compile\t%d\nboot\t%d\nexec\t%d\n' "${COMPILE_MS:-0}" "$TBOOT" "$TEXEC" > "$TR_DIR/stages.tsv"
     tr_finish 0
     exec 9>&- 2>/dev/null || true
     kill "$QPID" 2>/dev/null || true; wait "$CAT_PID" 2>/dev/null || true
@@ -136,13 +146,14 @@ fi
 echo
 echo "============ C] tr2sqlite 索引 + 检索 ============"
 DB="$OUTBASE/torture.sqlite"
-rm -f "$DB"
-python3 tests/tr2sqlite.py --dirs build/transcripts "$DB" >/dev/null 2>&1 && {
-echo "-- 本两轮 runid 归档 --"
-python3 tests/tr2sqlite.py "$DB" -q "SELECT runid,result,in_count,out_lines FROM transcripts WHERE runid LIKE 'torture%'"
+mkdir -p "$OUTBASE"
+# L1: 增量导入(不复位 rm，跨轮基线才成立；按 runid 幂等，坏行不影响录放主路径)
+python3 tests/tr2sqlite.py --dirs build/transcripts "$DB" >/dev/null 2>&1
+python3 tests/tr2sqlite.py "$DB" -q "SELECT runid,result,in_count,out_lines,substr(contract_hash,1,8) FROM transcripts WHERE runid LIKE 'torture%' ORDER BY runid"
 echo "-- 命令直方图(跨两轮) --"
 python3 tests/tr2sqlite.py "$DB" -q "SELECT cmd,count(*) FROM in_events WHERE runid LIKE 'torture%' GROUP BY cmd ORDER BY 2 DESC"
-}
+echo "-- L1 跨轮基线巡检: 契约指纹 / 输出量 / 阶段耗时 (contract fingerprint & output baseline) --"
+python3 tests/baseline_check.py "$DB" --kind "torture-a%" --stages
 echo
 echo
 echo "============ D] replay 现场复原 (黄金 transcript 重放 + 差分) ============"
