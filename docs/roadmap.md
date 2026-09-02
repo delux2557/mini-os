@@ -172,6 +172,20 @@
 
   * 编译产物 × 持久化：test\_persist.sh S10（writefile→ccrun→save→重启→run）已覆盖
 
+### 能力边界：宿主代理——把 https/ssh「接进」demo（讨论定论）
+
+> 背景：guest 只有极简虚拟 TCP、落 http 明文，**原生实现 https（TLS 证书链、握手/suite、E2E 加密）成本过高**。
+> 但宿主转发器（UDP proxy → host 侧 HTTP）已是"guest 发请求 → 宿主转发"的出站网关基座——引申方向即：让宿主替 guest 做外网协议。
+
+* **结论（可行 = 标准「TLS 终止型正向代理 / egress 网关」）**：guest 发 http 明文 → 宿主 Python（`requests` 发起真实 https + `verify=True` 证书校验）→ 明文响应回传 guest。guest 全程 http，不碰一字节 TLS。**SSH 同理**（宿主起 ssh 客户端/网关替 guest 建连）——本质是"宿主把任意 TCP 隧道化"。
+* **必须清醒的定性（别把代理当 guest 支持 https）**：
+  1. 这不是 mini-os 支持 https/ssh，而是**宿主替它做密码学**——信任锚在宿主，guest 无密钥、不验证书、看全明文，端到端保密/防篡改为零；对 demo/CI/教学足够，对"安全HTTPS"则不成立；
+  2. https 需由 guest 携带 host/SNI 让 forwarder 定目标，并维护「guest 请求 ↔ 真实 TLS 连接」的薄映射层；
+  3. SSH 走此路只剩"连接能力"——其核心卖点（端到端加密+认证）在宿主终止后**尽失**，勿标榜安全。
+* **对录放/工程的意义（≈ F5 原料）**：真正值得做的是 guest/forwarder 间一层**"出站连接+字节流的可描述抽象"**（guest 声明：连谁、发什么、等什么），forwarder 翻译成真实 https/ssh——这正是交接单 **F5（`net.in.tr` 姊妹流 + 回放到 peer/proxy socket）**：能录制网络流，就能把代理退化为可复现回归。
+* **建议顺序**：先落一个最小 demo（guest 发 http → forwarder 拉真实 https 站点 → 明文回传验证链路），再回头做 F5 的网络流录制。
+* **分类**：宿主侧/dev 侧能力，非内核功能；不归阶段一/二欠账，作"想继续谈网络深度"时的可选自制线。
+
 ### 阶段三「沉淀」（不再是版本号）
 
 > 从"持续开发的仓库"变为"可交付的教学产品"——项目的最终价值不在代码行数，
