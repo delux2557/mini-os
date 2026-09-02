@@ -212,9 +212,17 @@
   验收：同一契约类漂移（如 torture-a）返回一致 PASS；跨契约/构造漂移边界返回 FAIL(exit 1)
   并列出丢失的契约行；`baseline_check.py` 复用后行为与原实现一致。
 
-* **阶段1：agent 网关（把内部 CLI 包成 agent 可解析 API）**。加统一命令
-  （`rebuild / trace / replay / submit / status`）**输出 JSON**（`{verdict, step, evidence}`），
-  而非给人读的字符串；LLM 无需解析 `[selftest] PASS (6 checks)` 这类文本。
+* **✅ 阶段1：agent 网关（`tests/arena/qw.py`）**。统一命令**输出 JSON** envelope
+  `{"ok":bool,"cmd":…,"data":{…}}`，任何诊断走 stderr、stdout 只有 JSON，LLM 无需解析人读字符串。
+  - **`status <db>`**：DB 概览（run 分组/最近 run/契约哈希/stage 行数）
+  - **`rebuild <db> [--kind]`**：契约指纹+输出量基线判定，含 `alarm_count` + 每 run 的 gate
+    结果与阶段耗时趋势（stages P50/P95/latest）
+  - **`submit <task.json> --run <dir> [--base <dir>]`**：对一轮 transcript 跑 task 判定 →
+    `{verdict:PASS/FAIL, gates:[{name,ok,msg}]}`；漂移时 exit 1 并在 msg 里列丢失契约行
+  - **`task [list|<json>]`**：列出/读取任务契约；**`gates`**：列出已注册判据
+  判据全部复用 `gate.py`/`run.py`/`task.py`（单一来源），本文件只做"命令→JSON"胶水；
+  不重开 sqlite 写回、不动录放主路径。验收：各命令对既有 torture 数据输出正确 JSON，
+  同契约 PASS(exit0)、漂移 FAIL(exit1) 且给出契约行证据。
 
 * **阶段2：评测器（判分闭环）**。串起 replay 差分 + 基线巡检 + `kern_audit`：
   agent 改完内核 → `submit` → 自动得 `PASS/WARN/FAIL + 在哪一步 + .tr 证据`。
