@@ -145,7 +145,7 @@
     "icount 只用于无网络交互层 + 网络层走 P2 transcript 录放"，地基仍成立。**gdb reverse-debugging**
     仅作失败后人工单步逆向定位（开销大），不进回归主路径（P1-P3 不依赖它）。
 
-  * **✅ record/replay 工程收尾（v1.4.4，`tests/tr2sqlite.py` + 无网络路径 `-nic none`）**：P3 闭环后
+  * **✅ record/replay 工程收尾（v1.4.4，`tests/tr2sqlite.py`** **+ 无网络路径** **`-nic none`）**：P3 闭环后
     两件零侵入加固。**① 网卡与 icount 慢的边界澄清 + 处置**：实测 `[B]` tick / net recvfrom 是用户态
     demo（procB / sockdemo）抢指令预算，**非网卡导致**；但启动期默认 e1000 + DHCP 握手确实给 icount
     增加墙钟开销。故对不需要网络的回放/编译/录制三条路径统一 `-nic none`——内核无网卡时优雅跳过
@@ -155,9 +155,9 @@
     录放主路径仍 `.tr` 文本"证据原件"（确定性/可 diff/可归档），sqlite 只作"放大镜"，坏了绝不影响
     录放正确性；归档量大起来才有跨 runid 聚合/`LIKE` 检索的爽感，是"想试随时能试"的纯增量工具。
 
-  * **✅ record/replay 接 repro_bugs.sh（v1.4.5，`make test-repro`）**：首方复现脚本接入录放——
+  * **✅ record/replay 接 repro\_bugs.sh（v1.4.5，`make test-repro`）**：首方复现脚本接入录放——
     BUG-A/BUG-B 复现命令流改经 `tr_send` 录制为 `.in.tr/.out.tr`（含 wait 驱动的**真实相对 ms**，
-    补上"repro_bugs.sh 只脚本化、未录时间关系"缺口）；修复版"未复现"即 RESULT=PASS 证据，若回归
+    补上"repro\_bugs.sh 只脚本化、未录时间关系"缺口）；修复版"未复现"即 RESULT=PASS 证据，若回归
     （`compile FAIL`/`output setup fail`）当场标 FAIL。录制 transcript 实测可被 `replay.sh` 消费
     重放复现固定行为（`[ccboot] byte-identical PASS` / `out2.elf` 构建 / `bad.c`→`cc500: error at`），
     无网络路径同加 `-nic none`。
@@ -184,6 +184,46 @@
 3. **开源发布**：定位 **"AI 辅助系统编程的完整案例研究"**——BUG 库的根因/修复/回归
    记录本身就是极有价值的工程方法论素材；演示录屏（`make run` → `selftest PASS`、
    `ccboot` 自举仪式）
+
+### agent 演练场（新主线：把项目浇铸成"agent 友好的平台"）
+
+> 状态：**阶段0已落地**（task 契约 + 可复用 gate 判据）。方向：把"agent 改内核"从
+> 无结构的自由操作，升级为"任务契约 + 客观判分 + 可复用判定"的受控闭环。
+> 战略依据：record/replay + 契约指纹 + 基线巡检 + 内核自审计，本就是为"AI 能否可靠地
+> 改动一个大系统"设计的能力；演练场只是把这些资产对 agent **开放化、契约化**。
+> 与红线兼容：纯增量、不动 guest 内录放主路径、不碰真 TCP/SMP/HAL，是组合回报最高的方向。
+
+**已有垫脚石（agent 已能在里边干活）**：
+
+| 能力      | 落点                                           | 意义                             |
+| ------- | -------------------------------------------- | ------------------------------ |
+| 写-编-跑闭环 | `cc500` + `writefile`/`ccrun`/`ccboot`       | agent 能在 guest 内写·编·跑任意用户程序并自举 |
+| 可复现测试   | record/replay + transcript + `repro_bugs.sh` | agent 改动后行为可被客观判定是否漂移          |
+| 客观判据    | `SYS_KERN_AUDIT`、`selftest`、基线巡检/契约指纹        | 内核"自己报健康"，改动好坏可量化              |
+| 安全前提    | copyin/copyout + 地址空间隔离 + 进程级 fd 表           | 敢于让 agent 运行任意编译产物的隔离基础        |
+
+**落地路径（从轻到重，每步可独立验收、CI 全绿才进下一步）**
+
+* **✅ 阶段0：task 契约 + 可复用 gate 判据（v-tbd；`tests/arena/`）**。定义机器可读的
+  `task.json`（`id`/`title`/`prompt`/`gates`/`tolerance`）把"任务→判分"落成规范；
+  把 baseline\_check.py 的判定逻辑（契约指纹漂移、输出行数/字节漂移、契约内容丢失）
+  抽成**无副作用纯函数 gate**（`tests/arena/gate.py`），供基线巡检与任务判分**单一来源复用**；
+  `run.py` 从 transcript 目录构造判定数据，`task.py` 裁判器据此出 `PASS/FAIL` + 具体证据。
+  验收：同一契约类漂移（如 torture-a）返回一致 PASS；跨契约/构造漂移边界返回 FAIL(exit 1)
+  并列出丢失的契约行；`baseline_check.py` 复用后行为与原实现一致。
+
+* **阶段1：agent 网关（把内部 CLI 包成 agent 可解析 API）**。加统一命令
+  （`rebuild / trace / replay / submit / status`）**输出 JSON**（`{verdict, step, evidence}`），
+  而非给人读的字符串；LLM 无需解析 `[selftest] PASS (6 checks)` 这类文本。
+
+* **阶段2：评测器（判分闭环）**。串起 replay 差分 + 基线巡检 + `kern_audit`：
+  agent 改完内核 → `submit` → 自动得 `PASS/WARN/FAIL + 在哪一步 + .tr 证据`。
+
+* **阶段3：运行编排（可选外壳，最后做，MVP 可不上）**：独立 QEMU 实例、超时 kill、
+  失败快照捡出、并发排队；做到这里才谈得上"开放平台"。
+
+**诚实边界**：guest 能跑任意代码，是**教学沙箱，不做公网多租户开放**；真要公开先加资源
+配额与隔离。MVP 只做阶段0-2（契约 + JSON 网关 + 评测器），不先铺 QEMU 沙箱/并发即外壳。
 
 ### 网络抽象层与虚拟 TCP（netif + 间接 TCP）——新主线
 
