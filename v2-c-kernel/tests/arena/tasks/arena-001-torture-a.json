@@ -1,0 +1,14 @@
+{
+  "id": "arena-001-torture-a",
+  "title": "torture-a 契约稳定性（对照基线）",
+  "layer": "record-replay",
+  "difficulty": 1,
+  "prompt": "运行 torture-a 轮次。要求：功能契约指纹与基线一致、输出行数/字节数相对基线不跳变(<20%)、基线契约行全部保留。",
+  "gates": [
+    "contract_drift",
+    "output_lines_drift",
+    "output_bytes_drift",
+    "contract_content"
+  ],
+  "tolerance": 0.20
+}
