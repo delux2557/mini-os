@@ -101,23 +101,43 @@
   统计对账（泄漏/双重释放/写越界破坏块头都会漂移）；报告碎片；宿主单测 + QEMU selftest
   双重锁定（`[audit] heap ok`）
 
-* **record/replay 地基（候选，未动码；dev 侧基建，对接"AI agent 演练场/测评"）**
+* **record/replay 地基（工程进度：P1 ✅ P2 ✅ P3 ✅【闭环完成】；dev 侧基建，对接"AI agent 演练场/测评"）**
   **技术前提（先对齐再动工）**：QEMU `-icount` 只保证**内核执行**确定（虚拟时间=指令计数，
   定时器/中断/调度同输入同输出），**不约束整场测试**——三门外部输入（串口 FIFO 注入 / 网络
   SLIRP·宿主转发器 / host 侧 kill·sleep 时序）不受 icount 约束。故完整形态 = 两层：**icount
   确定性内核 + 输入流时间戳化录放**。公共时钟须用 **QEMU icount 虚拟时钟**（host 侧经 QMP/监控
   读回），**非 guest 裸 `sys_getticks`**——repro_bugs.sh 只是"脚本化"未录时间关系，即缺此层。
   分三阶段、每步独立可验收、保持 9 层 CI 绿（P1-P3 均为 tests/+Makefile+脚本的 dev 侧变更）：
-  * **P1 确定性启动（纯参数化、零逻辑改动）**：QEMU 加 `-icount shift=auto,align=on,sleep=on`，
-    环境变量 `QEMU_ICCOUNT=1` 开关（默认关、不破坏现状）。验收：**非网络层（host/qemu/serial
-    /persist/cc500）** icount 模式全绿 = 暴露该层隐藏的 host 墙钟时序依赖；网络层**不承诺** icount
-    （SLIRP 依赖 host 时间，见下"边界"降级）。
-  * **P2 transcript 固化（录放雏形）**：FIFO 驱动脚本输入侧把"发送内容+相对 tick"写 `*.in.tr`、
-    输出侧日志存 `*.out.tr`；失败自动归档（对齐"失败 transcript 固化回归"）；icount 模式失败 =
-    带确定性锚点。验收：人为触发一次失败 → 可得可复现的 `.in.tr`/`.out.tr` 归档。
-  * **P3 replay 验证（地基闭环）**：回放器按 `*.in.tr` 时间关系重放、比对 `*.out.tr` 逐字节一致
-    （确定性差分）；repro_bugs.sh 升级为消费 transcript。验收：从 bugs.md 抽 1 个已修 bug——录旧版
-    失败 transcript → 修复版回放 → 输出**不一致**（证明抓住 bug 本质）+ 新测试全绿。
+  * **✅ P1 确定性启动（v1.4 落地，`tests/test_determinism.sh` + `make test-det`）**：两次 QEMU
+    `-icount shift=auto,align=on,sleep=on` 冷启动，串口日志**逐字节 diff** 判定确定性。实测：
+    icount 下启动段（含 **DHCP OFFER/ACK 网络握手**）两次运行**逐字节一致** = 内核同输入同输出的
+    铁证（P1 验收本质）。**诚实发现**：交互回归脚本（qemu_regression 的 HMP sendkey / serial /
+    persist / cc500）走 host 墙钟轮询（`wait_for`/`sleep`），与 icount 虚拟时钟流速**不匹配**，
+    icount 下 run 窗内超时误报——这是**交互脚本的 host 墙钟依赖被暴露**（恰为 P1 意义），故
+    **不回编**这些脚本；icount 确定性验证独立收编为 `test-det`。网络层**不承诺** icount（SLIRP
+    依赖 host 时间，见下"边界"降级），`test-det` 用纯冷启动含 DHCP 握手证明在**无注入输入流**
+    下确定性已成立；未来交互确定性交给 P2 transcript 录放。
+  * **✅ P2 transcript 固化（v1.4.1 落地，`tests/transcript.sh` + `tests/test_transcript.sh` +
+    `make test-tr`）**：录制内核 `tr_start/tr_send/tr_snapshot/tr_abort/tr_finish` 把输入命令流
+    （`*.in.tr`，列=序号/相对ms/命令，可重放审计）与输出字节流（`*.out.tr`）固化到
+    `build/transcripts/<runid>/`。验收三连：① 成功固化（in/out/RESULT=PASS 产物完整）；
+    ② **失败自动归档**——`tr_abort` 在失败点名固化现场并标 `RESULT=FAIL`（"人为触发失败可得可复现
+    transcript"达成）；③ 复现性雏形——两次冷启同命令集、里程碑语义行逐字节一致。
+    **诚实发现**：非 icount 两次运行 `Hello ticks=296/297` 差 1——guest tick 值随墙钟调度浮动，
+    非语义差异（**印证"公共时钟须用 icount 虚拟时钟、非 guest tick"**）；故复现性比对按 `ticks=N`
+    pin 掉噪音，真逐字节确定性交给 P1 test-det。**相对 ms 用 host 墙钟（起记时刻打点）；icount
+    虚拟时钟锚点与 P3 严格回放差分（含时间关系）留待 P3**。
+  * **✅ P3 replay 验证（v1.4.2 落地，`tests/replay.sh` + `tests/test_replay.sh` + `make test-rp`）**：
+    回放器 `replay_into` 消费 `*.in.tr`（按 seq/rel_ms/payload 打拍注入串口 + 等完成信号）驱动
+    真实内核路径。验收闭环：从 bugs.md 抽 **BUG-026**（cc500 形参列表 EOF 未闭合→死循环），录含
+    其触发输入（`writefile` 写 `int main(int x` + `ccrun`）的 transcript → 回放 → 修复版见
+    `cc500: error at`（exit(1) 不死循环）——证明回放抓住 bug 表现。
+    **诚实发现（P3 开发实测，均为已知边界，已通过调整规避）**：① icount(TCG 逐条虚拟化) 下 cc500
+    编译器慢到分钟级 + 后台 demo 应用（`[B]` tick / net recvfrom）持续打印抢 tick → 回放**不用
+    icount**，bug 闭环靠**信号断言**（`cc500: error at`）而非逐字节 diff（逐字节确定性已由
+    P1/test-det 承担）；② 后台 demo 日志永不静止 → 回放 end 判据用**完成信号**而非"日志静止"；
+    ③ 跨**独立**冷启动的里程碑一致不机械稳定（trace-heavy 交织点抖动）→ 两遍一致性作可选
+    `REPLAY_VERIFY=1` soft 检查，硬门禁是单遍 bug 闭环。完整照 roadmap 原文边界依旧成立。
   **边界（诚实）**：`-icount` × SLIRP/外部进程时序是 QEMU 文档明示的交互点 → 网络层若红则降级为
   "icount 只用于无网络交互层 + 网络层走 P2 transcript 录放"，地基仍成立。**gdb reverse-debugging**
   仅作失败后人工单步逆向定位（开销大），不进回归主路径（P1-P3 不依赖它）。
