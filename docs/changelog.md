@@ -3,6 +3,43 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## \[v1.4] - 2026-09-02 · shell writefile heredoc 多行写入（绕开 128B 单行截断）
+
+> 面向"AI agent 在 guest 内写较大源码"：`writefile <<DELIM <path>` 多行写入，逐行收集直至
+> 独立 DELIM 行、逐行追加（每行≤128B 但任意行数拼接），大程序一次写入。128B 单行物理上限保留
+> （键盘行缓冲），但不再是"只能写小 demo"的天线。这是把单行写盘升级为可用的源码写入通道。
+
+**Added**（`src/app/shell.c`，`cmd_writefile`）
+
+* **heredoc 多行模式**：检测 `args` 以 `<<` 开头 → 解析 `<<DELIM <path>` → create/open → 循环
+  `sys_readline` 逐行收集，独立 DELIM 行（去首尾空白后精确匹配）终结；每行 `SYS_FS_WRITE` 追加
+  其内容 + `\n`（空行保留行结构）；输出 `[writefile] '<path>' wrote <N> bytes (heredoc)`。
+* **`cmd_help`**：补 `writefile <<D <p>` 语法行。
+* **`shell_heredoc.h`（新增）**：DELIM 终结判定抽为**纯函数** `wf_delim_hit`（无 syscall 依赖，
+  可宿主单测），heredoc 循环改为调用之。
+
+**Fixed**（PR #25 审核发现）
+
+* **DELIM 终结判定用错长度变量**：原实现 path 解析复用 `j` 且未保存 DELIM 长度——终结比较
+  `s + j == e` 用 path 长度(如 8)而非 DELIM 长度(如 3)，EOF(3 字符)永不匹配 → heredoc
+  **永不终结**，后续命令（ccrun 等）被吞进收集循环，serial 层 + 全链 CI 同点红（坑 5 稳定失败）。
+  修复：path 解析前保存 `delim_len = j`，终结判定改用 `delim_len`，并抽出纯函数消除此类"变量
+  复用"复发。
+
+**Added**（Tests）
+
+* `tests/test_serial.sh`：heredoc 回归用例——`writefile <<EOF /multi.c` 写 >128B 多行源码 →
+  `ccrun` 编译运行 `exited code=0 PASS`（源码合法可编译运行，反证未被截断）。
+* `tests/test_heredoc.c`（宿主单测，并入 run_host_tests）：DELIM 精确匹配 / 去空白 / 前缀不误
+  终结 / 空行不终结 / **根因回归**（path 长度误当 DELIM 长度 → 判 0）——秒级锁定本 bug，防
+  "本地未验证直达 CI"复发。宿主 20 项全绿。
+
+**Docs**
+
+* `bugs.md` OBS-004（=F-6）标记 **✅ 已缓解（v1.4）**：单行截断被 heredoc 绕开，仅保留"键盘单行
+  物理上限"这一合理约束。
+* `changelog.md`：本条目。
+
 ## \[v1.3] - 2026-09-02 · 虚拟 TCP 上行滑动窗口（stop-and-wait→N 在途，吞吐 W/RTT）
 
 > 上行停-等升级为**滑动窗口**：guest `tcp_send` 把载荷写入发送窗口（`TCP_TXWIN=8` 槽×独立 seq），

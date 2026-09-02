@@ -141,6 +141,20 @@ send "ccrun /hello.c /hello.elf"
 wait_for "cc500 编译成功"       "cc500: compiled OK"
 wait_for "编译产物被加载"        "\[elf\] '/hello.elf' loaded"
 wait_for "ccrun 编译运行 PASS"  "\[ccrun\] '/hello.elf' exited code=0 PASS"
+# ---- v1.4 heredoc 多行写入：writefile <<EOF /multi.c（逐行拼接，绕开单行 128B 截断） ----
+send 'writefile <<EOF /multi.c'
+send 'int syscall3(int n,int a,int b,int c);'
+send 'int main(){'
+send 'syscall3(1,"1234567890123456789012345678901234567890",0,0);'
+send 'syscall3(1,"abcdefghijklmnopqrstuvwxyz-0123456789",0,0);'
+send 'syscall3(1,"ok\x0a",3,0);'
+send 'return 0;'
+send '}'
+send 'EOF'
+wait_for "writefile heredoc 写多行" "\[writefile\] '/multi.c' wrote [1-9][0-9][0-9]* bytes (heredoc)"
+send "ccrun /multi.c /multi.elf"
+wait_for "heredoc 源码可编译"      "cc500: compiled OK"
+wait_for "heredoc 源码可运行 PASS" "\[ccrun\] '/multi.elf' exited code=0 PASS"
 # ---- v0.14 文件系统增强 ----
 send "mkdir /sd1"
 wait_for "mkdir 返回"          "\[shell\] mkdir '/sd1' -> "
