@@ -61,6 +61,7 @@ char *my_realloc(char *old, int oldlen, int newlen)
 int nextc;
 char *token;
 int token_size;
+int cc_depth;   /* OBS-CC-1：递归下降深度计数（编译期，不 emit，不影响 codegen） */
 
 void error()
 {
@@ -701,7 +702,11 @@ int bitwise_or_expr()
  */
 int expression()
 {
-  int type = bitwise_or_expr();
+  int type;
+  cc_depth = cc_depth + 1;
+  if (cc_depth > 512)
+    error();               /* OBS-CC-1：深嵌套注入（((((... 或 a=b=c=...) 在耗尽栈前被拒绝 */
+  type = bitwise_or_expr();
   if (accept("=")) {
     be_push();
     stack_pos = stack_pos + 1;
@@ -713,6 +718,7 @@ int expression()
     stack_pos = stack_pos - 1;
     type = 3;
   }
+  cc_depth = cc_depth - 1;
   return type;
 }
 
@@ -743,6 +749,9 @@ void statement()
 {
   int p1;
   int p2;
+  cc_depth = cc_depth + 1;
+  if (cc_depth > 512)
+    error();               /* OBS-CC-1：块 / if / while 深重入在耗尽栈前被拒绝 */
   if (accept("{")) {
     int n = table_pos;
     int s = stack_pos;
@@ -799,6 +808,7 @@ void statement()
     expression();
     expect(";");
   }
+  cc_depth = cc_depth - 1;
 }
 
 /*
