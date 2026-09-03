@@ -70,5 +70,11 @@
 外部报告原始 findings（`socket-findings.md` / `cc500-findings.md` / 本批任务包）由评审方提供时，
 原样归档于本目录（各自独立 `.md`，保留来源标注与时间戳）。此 README 为对照索引，不替代原文。
 
+> **命名规则（治理 P2 明文化，2026-09-03）**：审计对象为**单点 commit** 的报告，文件名带对象
+> sha 后缀（如 `mini-os-arch-and-quality-review_6ac70e4.md`，对象 `6ac70e4`）；审计对象为**代码
+> 目录 / 多文件**（无单点 sha 可指）的深审报告省略后缀，其对象在报告头"审计对象"行标注路径与行数。
+> 本目录 2026-09-03 由 `docs/external-reviews/` 迁入 `docs/history/external-reviews/`（时点产物
+> 归只读归档区，不占活文档区），报告正文原样未动。
+
 > 顶层**架构与代码质量综合评审**（评分 8.3/10）：`mini-os-arch-and-quality-review_6ac70e4.md`
 > （对象 `6ac70e4`，含总体定位/架构分层/验证体系/约束声明）。各子系统专项深审见上方 OBS-* 行，本报告为总览。
