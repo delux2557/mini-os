@@ -50,6 +50,17 @@ void app_main(int argc, char **argv) {
         sys_print("[abuse] open /abuse.tmp failed\n");
     } else {
         report("write buf@0xB8000", syscall3(SYS_FS_WRITE, 1, 0xB8000u, 8));
+        /* [gate] 区间内空洞页：write/read 走纯 user_ptr_valid(区间) -> 直接解引用。
+         * 修复前内核替用户写/读到空洞页 -> 自身缺页 [FATAL] cli;hlt 整机停 */
+        report("write buf@hole 0x80500000", syscall3(SYS_FS_WRITE, 1, 0x80500000u, 8));
+        report("read buf@hole 0x80500000",  syscall3(SYS_FS_READ,  1, 0x80500000u, 8));
+        /* [gate] 合法指针 + 谎报大长度（32768）：普通写法越界，无需恶意。
+         * 修复前内核读越界越过未映射页 -> 自身缺页 [FATAL] */
+        {
+            char small[8] = "x";
+            report("write buf@valid huge len=32768",
+                   syscall3(SYS_FS_WRITE, 1, (uint32_t)small, 32768u));
+        }
         syscall3(SYS_FS_CLOSE, 1, 0, 0);
         syscall3(SYS_FS_DELETE, (uint32_t)"/abuse.tmp", 0, 0);
     }
