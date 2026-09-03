@@ -22,6 +22,10 @@ void app_main(int argc, char **argv) {
     sys_print("[abuse] syscall boundary check: kernel pointers must be rejected\n");
 
     /* 内核低地址 0x100000（kernel 区）应全部被拒 */
+    /* [gate] 区间内空洞页(0x80500000, 未映射)：修复前会触发内核态缺页 -> [FATAL]
+     * 整机宕机，使 [abuse] verify OK 永不出现；修复后应被预检拒绝(-1)。
+     * 三门禁(qemu_regression/test_serial/rp_torture 均断言 verify OK)自动把回归判红。 */
+    report("print@hole 0x80500000",  syscall3(SYS_PRINT, 0x80500000u, 0, 0));
     report("print@0x100000",       syscall3(SYS_PRINT, 0x100000u, 0, 0));
     report("create@0x100000",      syscall3(SYS_FS_CREATE, 0x100000u, 0, 0));
     report("open@0x100000",        syscall3(SYS_FS_OPEN, 1, 0x100000u, 0));
