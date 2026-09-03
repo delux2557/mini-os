@@ -8,10 +8,11 @@
 #   guest 层 QEMU：ccboot 自举不动点（P1==P2）+ 关系运算 < 运行语义（需内核把新 cc500.c 嵌入）。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 
 CC500=tools/cc500/cc500.c
 CRT=tools/cc500/host_crt.c
-VD=build/cc500
+VD="$BUILD/cc500"
 mkdir -p "$VD"
 
 echo "== [1/4] 宿主 hostcc 基座 =="
@@ -78,15 +79,15 @@ fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
-    if ! make >/dev/null 2>&1; then echo "[FAIL] 内核构建失败"; exit 1; fi
+    if ! make BUILD="$BUILD" >/dev/null 2>&1; then echo "[FAIL] 内核构建失败"; exit 1; fi
     export DH_CC500_GUEST=1
-    LOG="build/cc500_guest.log"; TIN="build/cc500_in.fifo"; TOUT="build/cc500_out.fifo"
+    LOG="$BUILD/cc500_guest.log"; TIN="$BUILD/cc500_in.fifo"; TOUT="$BUILD/cc500_out.fifo"
     QPID=""; CAT_PID=""; GFAIL=0
     cleanup() { exec 9>&- 2>/dev/null || true; [ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true; [ -n "$CAT_PID" ] && kill "$CAT_PID" 2>/dev/null || true; rm -f "$TIN" "$TOUT"; }
     trap cleanup EXIT
     rm -f "$LOG" "$TIN" "$TOUT"; mkfifo "$TIN" "$TOUT"
     (cat "$TOUT" > "$LOG") & CAT_PID=$!
-    qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown \
+    qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -vga std -no-reboot -no-shutdown \
         -m 64 -nic none -serial stdio -monitor none < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!; exec 9>"$TIN"
     # v1.1 收尾：默认等待窗 25s->60s；失败时自动转储 guest 串口尾部（慢 runner 自诊断，
