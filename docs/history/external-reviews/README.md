@@ -25,6 +25,7 @@
 | OBS-MM-3 | v1.5 | （hygiene，非 bug） | mem_init 位图清零到 nframes/8 字节边界 | 同上 | P3 |
 | OBS-MM-4 | v1.5 | （观察，非 bug） | ZOMBIE 延迟持有的页目录/页表帧直到 reap | 同上 | P2 |
 | OBS-MM-5 | v1.5 | （重构建议，非 bug） | 每进程资源配额散落定义，应收敛为 resource_t | 同上 | P2，呼应架构总览 |
+| OBS-MM-6 | v1.x（2026-09-03） | （返回状态审计，静态推演） | `frame_alloc`/`map_page_in` 返回个别调用点静默丢弃：`usermode.c app_mapfn` ELF 加载时页表帧 OOM 静默丢映射（后续缺页崩）；懒分配 `map_page` 丢弃 `-1`；sched/idle 初始化、e1000 MMIO 未校验返回 | bugs.md `未解决问题` **OBS-009** | P2/P3；app_mapfn 加 `map_page_in(...)!=0→load_failed` 收口（~3 行） |
 | OBS-NET-1 | v1.5 | （潜在契约缺口，非已证缺陷） | TCP 上行滑动窗口槽复用未断言 busy==0（部分 ACK 下可能覆盖在途槽） | `mini-os-netstack-deep-audit.md` | P2，验证性加固 |
 | OBS-NET-2 | v1.5 | （观察，非 bug） | 可靠下行 rx_next/seq 16 位回绕未文档化 | 同上 | P3 |
 | OBS-NET-3 | v1.5 | （假设声明，非 bug） | 突发下行依赖 NIC 环 + 快速 recv | 同上 | P3 |
