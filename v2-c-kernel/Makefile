@@ -17,7 +17,7 @@ CFLAGS  = -m32 -ffreestanding -fno-pie -fno-stack-protector \
           -fno-builtin -fno-asynchronous-unwind-tables -fcf-protection=none \
           -Wall -Wextra -O2 -std=gnu99 -nostdlib \
           -MMD -MP \
-          -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -Ibuild
+          -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -I$(BUILD)
 ASM     = nasm
 LD      = ld
 LDFLAGS = -m elf_i386 -T src/linker.ld -nostdlib -z noexecstack
@@ -26,7 +26,11 @@ OBJCOPY = objcopy
 # 源文件查找路径（按子系统；同名文件在各目录间保持唯一）
 VPATH = src:src/arch:src/kernel:src/mm:src/drv:src/fs:src/net:src/app
 
-BUILD        = build
+# 构建/录制产物根目录。
+#  （BUG-053 修复：默认仍为 build/，但允许 `make BUILD=<私有目录>` 覆盖——
+#   并发重负荷 harness 各用私有目录，避免共享 build/ 下 `make clean` 互踩金标/transcript。）
+# 注意：tests/*.sh 内对 `build/` 的引用当前仍为字面路径，全量隔离 wiring 见 bugs.md BUG-053。
+BUILD        ?= build
 KERNEL       = $(BUILD)/kernel.elf
 USERPROG_ELF = $(BUILD)/userprog.elf
 USERPROG_BIN = $(BUILD)/userprog.bin
@@ -252,6 +256,14 @@ test-det:
 test-tr:
 	bash tests/test_transcript.sh
 
+# BUG-052 稳定性回归：test-tr 连跑 N 次（默认 3），任一次失败即 exit 1。
+# 意图：加固"0 假红"判据——单跑偶发放过因串口撕裂/捕获窗引发的 flake，
+# 连跑把这层"judging 信噪比"的老毛病显性化（修复前 ~40-67% flake）。
+# 慢（多次 QEMU 冷启），故仅挂在非 required 的 regression-rr job；`make test` 仍单跑。
+TR_STA_RUNS ?= 3
+test-tr-stable:
+	@for i in $$(seq 1 $(TR_STA_RUNS)); do echo "test-tr run#$$i/$(TR_STA_RUNS)..."; bash tests/test_transcript.sh || { echo "[FAIL] test-tr run#$$i flake/回归"; exit 1; }; done; echo "[ok] test-tr $(TR_STA_RUNS)/$(TR_STA_RUNS) pass (0 假红)"
+
 # record/replay 地基 P3：回放差分——消费 transcript 两次重放差分一致 + 已修 bug 触发链路
 test-rp:
 	bash tests/test_replay.sh
@@ -272,9 +284,9 @@ test-tcp-attack:
 test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp
 
 clean:
-	rm -rf build tests/build
+	rm -rf $(BUILD) tests/build
 
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp test-repro test-tcp-attack clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack clean
