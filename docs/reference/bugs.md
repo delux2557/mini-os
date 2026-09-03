@@ -1248,6 +1248,45 @@
 
 ***
 
+## BUG-054 \[已修复] 用户态传"区间内空洞页"给 syscall → 内核态缺页整机宕机（=外部评审）
+
+* **版本**：当前 main · 修复于 PR #53（2026-09-03 合入）
+
+* **现象**：用户程序把"用户半区 [0x80000000,0x81000000) 内**未映射空洞页**"指针传给任意
+  涉用户指针 syscall（如 `sys_print(0x80500000)`），内核对态 `copyin_str` 读取该页触发页
+  错误；缺页处理 [pf_handler](../../v2-c-kernel/src/mm/mem.c) 首分支判 `(r->cs & 3) == 3`
+  （用户态）不成立（当前在内核态），又不落懒分配区 [0x40000000,0x41000000)，最终走
+  `[FATAL] page fault … cli; hlt` **整机停机**。单个用户进程即可对整个内核 DoS——直接违背
+  "agent 演练场"主线中"copyin/copyout 是敢跑任意编译产物时的安全前提"这一核心假设。
+
+* **根因**：syscall 边界校验 `user_ptr_valid`（[userptr.c](../../v2-c-kernel/src/kernel/userptr.c)）
+  只做**区间/回绕**校验 `[USER_SPACE_BASE, USER_SPACE_END)`，**不校验页是否已映射**；而用户
+  半区绝大多数页从未映射（仅 app 槽 0x800A0000、共享 0x801A0000、堆 0x801A4000 及栈槽少量页
+  被按需映射）。`copyin`/`copyout`/`copyin_str` 在内核态直接解引用用户指针，未映射页访问触发
+  内核对态缺页，而缺页处理没有任何"内核态访问用户半区 → 隔离"的自愈分支 → 整机 [FATAL]。
+
+* **排查过程**（既有防线为何没抓到）：[abuse.c](../../v2-c-kernel/src/app/abuse.c) 只测了内核
+  低地址（0x100000）与 4GB 回绕（0xFFFFFFF0），恰好绕开"区间内空洞"；宿主 test_userptr 只验
+  纯区间逻辑、不涉页表。QEMU 复现：`sys_print(0x80500000)` → `[FATAL] page fault @80500000
+  err=0`（err P 位=0 确为未映射页；eip 为内核态地址）。
+
+* **修复**：
+
+  * `copyin`/`copyout`：新增 `region_mapped_pages()` 逐页 `is_mapped()` 预检，未映射即返 -1；
+  * `copyin_str`：逐字节且长度未知（到 NUL 为止），改为**跨页处**检查映射，覆盖"空洞页无
+    NUL 越过"路径；
+  * fs/net 的 iov 走 `copyin`/`copyout`，一并封堵；
+  * 宿主单测 [test_userptr.c](../../v2-c-kernel/tests/test_userptr.c) 补 `is_mapped` stub
+    （真实页表预检由 QEMU 回归覆盖）。
+
+* **回归**：QEMU 实测修复后 `sys_print(0x80500000)` 返 -1、abuse 全部边界用例 `(rejected)`
+  + `[abuse] verify OK`、进程正常退出、整机存活；`make test-host` pass=20 fail=0；
+  [abuse.c](../../v2-c-kernel/src/app/abuse.c) 新增"空洞页 0x80500000"门禁用例，被
+  qemu\_regression / test\_serial / rp\_torture 三门禁自动覆盖（一旦回归即整机宕、verify OK
+  不到 → CI 判红）。
+
+***
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号      | 场景               | 现象                                                                                                                   | 处置/教训                                                                                                                                             |
