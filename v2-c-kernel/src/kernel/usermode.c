@@ -92,7 +92,14 @@ static void app_mapfn(uint32_t vaddr, uint32_t len) {
         if (load_fcount >= load_maxframes) { load_failed = 1; return; }
         uint32_t phys = frame_alloc();
         if (!phys) { load_failed = 1; return; }
-        map_page_in(load_pd, pg, phys, 0x7);   /* 目标进程地址空间（P|RW|U） */
+        /* OBS-009：页表帧 OOM（map_page_in 返 -1）→ 释放刚分配的数据帧并中止加载，
+         * 否则该页静默未映射、运行到才缺页崩（与 BUG-033 栈生长处理一致）。不把 phys
+         * 记入 load_frames，避免 load_elf_file 失败清理时 double free。 */
+        if (map_page_in(load_pd, pg, phys, 0x7) != 0) {
+            frame_free(phys);
+            load_failed = 1;
+            return;
+        }
         load_frames[load_fcount] = phys;
         load_fcount++;
     }
