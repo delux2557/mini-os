@@ -47,12 +47,12 @@ replay_into() {
     local in_tr="$1" out_log="$2"
     local runid="${3:-replay}" done_re="${4:-mini-os\$ }"
     local icount_flag=""
-    local TIN="build/${runid}_in.fifo" TOUT="build/${runid}_out.fifo" QPID="" CAT_PID=""
+    local TIN="$BUILD/${runid}_in.fifo" TOUT="$BUILD/${runid}_out.fifo" QPID="" CAT_PID=""
     [ "${REPLAY_ICOUNT:-0}" = "1" ] && icount_flag="-icount shift=auto,align=on,sleep=on"
 
     rm -f "$out_log" "$TIN" "$TOUT"; mkfifo "$TIN" "$TOUT"
     (cat "$TOUT" > "$out_log") & CAT_PID=$!
-    qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown \
+    qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -vga std -no-reboot -no-shutdown \
         -m 64 -nic none -serial stdio -monitor none $icount_flag < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!
     exec 9>"$TIN"

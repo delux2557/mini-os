@@ -7,17 +7,18 @@
 # 失败项会列出缺失的关键字，便于定位内核某一步没有走到。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 # v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失（构建失败仍为 [FAIL]/exit 1，属代码真红）
 for c in qemu-system-i386 socat nasm gcc; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
 
-LOG="build/serial.log"
+LOG="$BUILD/serial.log"
 MON="/tmp/minios-mon.sock"
 DURATION="${DURATION:-35}"
 
 echo "== [1/4] 构建内核 =="
-if ! make >/dev/null 2>&1; then
+if ! make BUILD="$BUILD" >/dev/null 2>&1; then
     echo "[FAIL] 内核构建失败"
     exit 1
 fi
@@ -25,7 +26,7 @@ echo "      构建完成"
 
 echo "== [2/4] QEMU 无图形界面运行 ${DURATION}s（HMP monitor 供 sendkey） =="
 rm -f "$LOG" "$MON"
-qemu-system-i386 -kernel build/kernel.elf -display none -serial file:"$LOG" \
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -serial file:"$LOG" \
     -no-reboot -no-shutdown -m 64 \
     -monitor unix:"$MON",server,nowait >/dev/null 2>&1 &
 QPID=$!

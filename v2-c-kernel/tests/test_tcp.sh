@@ -10,6 +10,7 @@
 #   - 独立探针交叉验证：转发器日志出现 MSG_OPEN / OPENED（复用 Step 2 三方互通信念）
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 # v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失
 for c in qemu-system-i386 python3 curl; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
@@ -26,19 +27,21 @@ QPID=""; PROXY_PID=""; HTTP_PID=""
 restore_kernel() {
     [ "$RESTORED" = 1 ] && return
     RESTORED=1
-    make clean >/dev/null 2>&1 && make >/dev/null 2>&1 || true
+    make clean BUILD="$BUILD" >/dev/null 2>&1 && make BUILD="$BUILD" >/dev/null 2>&1 || true
 }
 cleanup() {
     [ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
     [ -n "$HTTP_PID" ] && kill "$HTTP_PID" 2>/dev/null || true
-    # v1.1 收尾2（CI 现场取证）：restore_kernel 的 make clean 会清空 build/，
-    # 先把两通道日志转存到 build-logs/（在 v2-c-kernel/ 下、不被 make clean 清除）
-    mkdir -p build-logs 2>/dev/null
-    [ -s build/tcp_a.log ]       && cp build/tcp_a.log       build-logs/ 2>/dev/null || true
-    [ -s build/tcp_b.log ]       && cp build/tcp_b.log       build-logs/ 2>/dev/null || true
-    [ -s build/tcp_proxy_a.log ] && cp build/tcp_proxy_a.log build-logs/ 2>/dev/null || true
-    [ -s build/tcp_proxy_b.log ] && cp build/tcp_proxy_b.log build-logs/ 2>/dev/null || true
+    # v1.1 收尾2（CI 现场取证）：restore_kernel 的 make clean 会清空 $BUILD/，
+    # 先把两通道日志转存到取证目录 ${BUILD}-logs/（S-3：随 BUILD 名字隔离，并发 harness
+    # 各落各自取证目录，互不覆盖；且不被 `make BUILD=$BUILD clean` 清除，保留现场）
+    local logdir="${BUILD}-logs"
+    mkdir -p "$logdir" 2>/dev/null
+    [ -s "$BUILD/tcp_a.log" ]       && cp "$BUILD/tcp_a.log"       "$logdir/" 2>/dev/null || true
+    [ -s "$BUILD/tcp_b.log" ]       && cp "$BUILD/tcp_b.log"       "$logdir/" 2>/dev/null || true
+    [ -s "$BUILD/tcp_proxy_a.log" ] && cp "$BUILD/tcp_proxy_a.log" "$logdir/" 2>/dev/null || true
+    [ -s "$BUILD/tcp_proxy_b.log" ] && cp "$BUILD/tcp_proxy_b.log" "$logdir/" 2>/dev/null || true
     restore_kernel
 }
 trap cleanup EXIT
@@ -94,28 +97,28 @@ await_log() {
 
 # ================= Part A：e1000 / UDP 通道 =================
 echo "== [A1] 构建内核（TCP_DEMO=1：开机自动 spawn httpdemo） =="
-make clean >/dev/null 2>&1
-if ! make TCP_DEMO=1 >/dev/null 2>&1; then
+make clean BUILD="$BUILD" >/dev/null 2>&1
+if ! make TCP_DEMO=1 BUILD="$BUILD" >/dev/null 2>&1; then
     echo "[FAIL] Part A 内核构建失败"; exit 1
 fi
-rm -f build/tcp_a.log build/tcp_proxy_a.log
+rm -f "$BUILD/tcp_a.log" "$BUILD/tcp_proxy_a.log"
 run_http_server || { echo "[FAIL] Part A 起宿主 HTTP 服务失败"; exit 1; }
-python3 tests/tcp_proxy.py --mode udp --port $PROXY_UDP --log build/tcp_proxy_a.log >/dev/null 2>&1 &
+python3 tests/tcp_proxy.py --mode udp --port $PROXY_UDP --log "$BUILD/tcp_proxy_a.log" >/dev/null 2>&1 &
 PROXY_PID=$!
 sleep 0.5
 echo "== [A2] QEMU（e1000 + SLIRP）+ 转发器 UDP 通道 =="
-qemu-system-i386 -kernel build/kernel.elf -display none -m 64 -serial file:build/tcp_a.log \
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -m 64 -serial file:"$BUILD/tcp_a.log" \
     -netdev user,id=net0 -device e1000,netdev=net0 \
     -no-reboot -no-shutdown >/dev/null 2>&1 &
 QPID=$!
-await_log build/tcp_a.log "虚拟 TCP HTTP demo 完成" "\[http\] RESULT " 30 || FAIL=$((FAIL + 1))
+await_log "$BUILD/tcp_a.log" "虚拟 TCP HTTP demo 完成" "\[http\] RESULT " 30 || FAIL=$((FAIL + 1))
 kill "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""
 kill "$PROXY_PID" 2>/dev/null || true; wait "$PROXY_PID" 2>/dev/null || true; PROXY_PID=""
 stop_http
 
 echo "== [A3] Part A 断言 =="
 check() {   # check "<说明>" "<正则>"
-    if grep -aq "$2" build/tcp_a.log 2>/dev/null; then
+    if grep -aq "$2" "$BUILD/tcp_a.log" 2>/dev/null; then
         echo "[ok]   $1"
     else
         echo "[FAIL] 缺少 $1 (匹配: $2)"; FAIL=$((FAIL + 1))
@@ -130,8 +133,8 @@ check "大响应尾部完整（>1KB + TAIL）" "\[http\] HTTP 200 OK .* len=[1-9
 check "连接被拒 -> recv -1（与 0 可区分）" "\[http\] refuse recv -> -1"
 check "虚拟 TCP demo 通过"        "\[http\] RESULT PASS"
 # 独立探针：转发器日志交叉验证 wire 语义 + B1 分块（无单条下行 >1400）
-if grep -aq "MSG_OPEN sid=" build/tcp_proxy_a.log 2>/dev/null && \
-   grep -aq "OPENED sid=" build/tcp_proxy_a.log 2>/dev/null; then
+if grep -aq "MSG_OPEN sid=" "$BUILD/tcp_proxy_a.log" 2>/dev/null && \
+   grep -aq "OPENED sid=" "$BUILD/tcp_proxy_a.log" 2>/dev/null; then
     echo "[ok]   转发器日志独立探针: 收到 MSG_OPEN 并回 OPENED（wire 双向成立）"
 else
     echo "[FAIL] 转发器日志未见 MSG_OPEN/OPENED（wire 未打通）"; FAIL=$((FAIL + 1))
@@ -139,30 +142,30 @@ fi
 
 # ================= Part B：串口（SLIP）通道 =================
 echo "== [B1] 构建内核（TCP_DEMO=1 + UART_NETIF_DEFAULT=1：串口网卡） =="
-make clean >/dev/null 2>&1
-if ! make TCP_DEMO=1 UART_NETIF_DEFAULT=1 >/dev/null 2>&1; then
+make clean BUILD="$BUILD" >/dev/null 2>&1
+if ! make TCP_DEMO=1 UART_NETIF_DEFAULT=1 BUILD="$BUILD" >/dev/null 2>&1; then
     echo "[FAIL] Part B 内核构建失败"; exit 1
 fi
-rm -f build/tcp_b.log build/tcp_proxy_b.log
+rm -f "$BUILD/tcp_b.log" "$BUILD/tcp_proxy_b.log"
 run_http_server || { echo "[FAIL] Part B 起宿主 HTTP 服务失败"; exit 1; }
-python3 tests/tcp_proxy.py --mode slip --host 127.0.0.1 --port $SLIP_PORT --log build/tcp_proxy_b.log >/dev/null 2>&1 &
+python3 tests/tcp_proxy.py --mode slip --host 127.0.0.1 --port $SLIP_PORT --log "$BUILD/tcp_proxy_b.log" >/dev/null 2>&1 &
 PROXY_PID=$!
 sleep 0.5
 echo "== [B2] QEMU（COM2 SLIP 通道）+ 转发器 SLIP 通道 =="
-qemu-system-i386 -kernel build/kernel.elf -display none -m 64 \
-    -serial file:build/tcp_b.log \
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -m 64 \
+    -serial file:"$BUILD/tcp_b.log" \
     -chardev socket,id=chr2,host=127.0.0.1,port=$SLIP_PORT,server=on,wait=on \
     -serial chardev:chr2 \
     -no-reboot -no-shutdown >/dev/null 2>&1 &
 QPID=$!
-await_log build/tcp_b.log "串口通道虚拟 TCP demo 完成" "\[http\] RESULT " 40 || FAIL=$((FAIL + 1))
+await_log "$BUILD/tcp_b.log" "串口通道虚拟 TCP demo 完成" "\[http\] RESULT " 40 || FAIL=$((FAIL + 1))
 kill "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""
 kill "$PROXY_PID" 2>/dev/null || true; wait "$PROXY_PID" 2>/dev/null || true; PROXY_PID=""
 stop_http
 
 echo "== [B3] Part B 断言 =="
 check_b() {
-    if grep -aq "$2" build/tcp_b.log 2>/dev/null; then
+    if grep -aq "$2" "$BUILD/tcp_b.log" 2>/dev/null; then
         echo "[ok]   $1"
     else
         echo "[FAIL] $1 (匹配: $2)"; FAIL=$((FAIL + 1))
@@ -172,7 +175,7 @@ check_b "串口通道收到 HTTP 200 OK" "\[http\] HTTP 200 OK"
 check_b "串口通道对端正常关闭 -> 0" "\[http\] HTTP 200 OK closed=1"
 check_b "串口通道大响应尾部完整"  "\[http\] HTTP 200 OK .* len=[1-9][0-9][0-9][0-9]* tail=TAIL"
 check_b "串口通道虚拟 TCP demo 通过" "\[http\] RESULT PASS"
-if grep -aq "proxy connected to COM2 chardev" build/tcp_proxy_b.log 2>/dev/null; then
+if grep -aq "proxy connected to COM2 chardev" "$BUILD/tcp_proxy_b.log" 2>/dev/null; then
     echo "[ok]   转发器已连 COM2（SLIP 通道）"
 else
     echo "[FAIL] 转发器未连 COM2"; FAIL=$((FAIL + 1))

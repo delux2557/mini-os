@@ -162,6 +162,15 @@
     重放复现固定行为（`[ccboot] byte-identical PASS` / `out2.elf` 构建 / `bad.c`→`cc500: error at`），
     无网络路径同加 `-nic none`。
 
+  * ✅ **独立测评补格（fix 分支，2026-09-03，旁证）**：独立推演确认"日志撕裂"即为 RR 判据失真的
+    **总根因 K1**，并根治为三处修复（详情见 [docs/bugs.md](docs/bugs.md) BUG-051~053）：
+    **BUG-051** `serial_printf/puts` 整行 IRQ 原子化（`pushfl/cli…popfl` 状态保持，零污染 icount 路径）
+    → 串口行不再在字符粒度被抢占撕裂；**BUG-052** 收掉 test-tr 复现性步 ~67% 假红（`pick()` 里程碑
+    子串化 + 快照锚点有界等末条完成里程碑，连跑 5 次 0 假红）——印证 P2 验收③"里程碑行稳定"依赖的
+    正是串口行原子性；**BUG-053** `BUILD ?=` 可覆盖，为并发重负荷 harness 隔离提供使能原语。
+    伴生收益：K1 造成的 **ack 计数握手失步**（`edge_atk.log` 回显被切开）随之消失，RR/AI-agent
+    输入同步协议恢复确定。真逐字节确定性仍归 P1 test-det，未越权（详见 docs/external-reviews/mini-os-eval-log_9711cbc.md）。
+
 * ✅ **回归盲区补格**（v0.29）：
 
   * `deep`/已生长栈 × fork/exec 组合：新增 `deepfork` / `deepexec` 演示并挂入

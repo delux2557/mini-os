@@ -7,22 +7,23 @@
 # 说明：攻击走 guest 内 cc500 写-编-跑（writefile + ccrun），证"任意 ring3 程序无需提权"。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 # v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失（避免环境病伪装成代码病）
 for c in qemu-system-i386 socat python3; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
 
-LOG="build/socket.log"
-TIN="build/socket_in.fifo"
-TOUT="build/socket_out.fifo"
-ECHO_LOG="build/socket_echo.log"
+LOG="$BUILD/socket.log"
+TIN="$BUILD/socket_in.fifo"
+TOUT="$BUILD/socket_out.fifo"
+ECHO_LOG="$BUILD/socket_echo.log"
 QPID=""; CAT_PID=""; ECHO_PID=""; RESTORED=0
 FAIL=0
 
 restore_kernel() {
     [ "$RESTORED" = 1 ] && return
     RESTORED=1
-    make clean >/dev/null 2>&1 && make >/dev/null 2>&1 || true
+    make clean BUILD="$BUILD" >/dev/null 2>&1 && make BUILD="$BUILD" >/dev/null 2>&1 || true
 }
 
 cleanup() {
@@ -36,8 +37,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== [1/4] 构建内核（DHCP_RENEW_SECS=2 短租期：供续约闭环观察） =="
-make clean >/dev/null 2>&1
-if ! make DHCP_RENEW_SECS=2 >/dev/null 2>&1; then
+make clean BUILD="$BUILD" >/dev/null 2>&1
+if ! make DHCP_RENEW_SECS=2 BUILD="$BUILD" >/dev/null 2>&1; then
     echo "[FAIL] 内核构建失败"
     exit 1
 fi
@@ -65,7 +66,7 @@ echo "== [3/4] QEMU 运行（e1000 + SLIRP + 串口终端） =="
 rm -f "$LOG" "$TIN" "$TOUT"
 mkfifo "$TIN" "$TOUT"
 cat "$TOUT" > "$LOG" & CAT_PID=$!
-qemu-system-i386 -kernel build/kernel.elf -display none -vga std \
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -vga std \
     -no-reboot -no-shutdown -m 64 -serial stdio -monitor none \
     -netdev user,id=net0 -device e1000,netdev=net0 \
     < "$TIN" > "$TOUT" 2>/dev/null &

@@ -12,6 +12,7 @@
 #   - 独立探针：转发器日志出现 MSG_OPEN / OPENED（wire 双向）
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 for c in qemu-system-i386 python3 curl; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
@@ -22,15 +23,15 @@ QPID=""; PROXY_PID=""; HTTP_PID=""
 RESTORED=0
 restore_kernel() {
     [ "$RESTORED" = 1 ] && return; RESTORED=1
-    make clean >/dev/null 2>&1 && make >/dev/null 2>&1 || true
+    make clean BUILD="$BUILD" >/dev/null 2>&1 && make BUILD="$BUILD" >/dev/null 2>&1 || true
 }
 cleanup() {
     [ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
     [ -n "$HTTP_PID" ] && kill "$HTTP_PID" 2>/dev/null || true
     mkdir -p build-logs 2>/dev/null
-    [ -s build/tcp_dl.log ]       && cp build/tcp_dl.log       build-logs/ 2>/dev/null || true
-    [ -s build/tcp_dl_proxy.log ] && cp build/tcp_dl_proxy.log build-logs/ 2>/dev/null || true
+    [ -s "$BUILD/tcp_dl.log" ]       && cp "$BUILD/tcp_dl.log"       build-logs/ 2>/dev/null || true
+    [ -s "$BUILD/tcp_dl_proxy.log" ] && cp "$BUILD/tcp_dl_proxy.log" build-logs/ 2>/dev/null || true
     restore_kernel
 }
 trap cleanup EXIT
@@ -65,23 +66,23 @@ PY
 }
 
 echo "== [1/4] 构建内核（DL_DEMO=1：开机 dldemo 拉 128KB） =="
-make clean >/dev/null 2>&1
-if ! make DL_DEMO=1 >/dev/null 2>&1; then echo "[FAIL] Part A 内核构建失败"; exit 1; fi
-rm -f build/tcp_dl.log build/tcp_dl_proxy.log
+make clean BUILD="$BUILD" >/dev/null 2>&1
+if ! make DL_DEMO=1 BUILD="$BUILD" >/dev/null 2>&1; then echo "[FAIL] Part A 内核构建失败"; exit 1; fi
+rm -f "$BUILD/tcp_dl.log" "$BUILD/tcp_dl_proxy.log"
 run_dl_server || { echo "[FAIL] 起 DL HTTP 失败"; exit 1; }
-python3 tests/tcp_proxy.py --mode udp --port $DL_UDP --log build/tcp_dl_proxy.log >/dev/null 2>&1 &
+python3 tests/tcp_proxy.py --mode udp --port $DL_UDP --log "$BUILD/tcp_dl_proxy.log" >/dev/null 2>&1 &
 PROXY_PID=$!
 sleep 0.5
 
 echo "== [2/4] QEMU（e1000 + SLIRP）+ 转发器 UDP：dldemo 下载 128KB =="
-qemu-system-i386 -kernel build/kernel.elf -display none -m 64 -serial file:build/tcp_dl.log \
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -m 64 -serial file:"$BUILD/tcp_dl.log" \
     -netdev user,id=net0 -device e1000,netdev=net0 \
     -no-reboot -no-shutdown >/dev/null 2>&1 &
 QPID=$!
 await() {
     local re="$1" tmo="${2:-40}" i
     for ((i = 0; i < tmo * 4; i++)); do
-        grep -aq "$re" build/tcp_dl.log 2>/dev/null && return 0
+        grep -aq "$re" "$BUILD/tcp_dl.log" 2>/dev/null && return 0
         kill -0 "$QPID" 2>/dev/null || return 1
         sleep 0.25
     done
@@ -96,7 +97,7 @@ kill "$HTTP_PID" 2>/dev/null || true; wait "$HTTP_PID" 2>/dev/null || true; HTTP
 
 echo "== [3/4] dldemo 断言 =="
 check() {
-    if grep -aq "$2" build/tcp_dl.log 2>/dev/null; then echo "[ok]   $1"; else
+    if grep -aq "$2" "$BUILD/tcp_dl.log" 2>/dev/null; then echo "[ok]   $1"; else
         echo "[FAIL] $1 (匹配: $2)"; FAIL=$((FAIL + 1)); fi
 }
 check "dldemo 开机生成"      "\[boot\] dldemo pid=[0-9][0-9]*"
@@ -106,8 +107,8 @@ check "收到 200 OK"          "\[http\] DL HTTP 200 OK"
 check "128KB 完整 + closed=1" "\[http\] DL HTTP 200 OK closed=1 len=131072/131072"
 check "尾部 EOFTAIL 完整"    "\[http\] DL HTTP 200 OK closed=1 len=131072/131072 tail=EOFTAIL"
 check "DL RESULT PASS"       "\[http\] DL RESULT PASS"
-if grep -aq "MSG_OPEN sid=" build/tcp_dl_proxy.log 2>/dev/null && \
-   grep -aq "OPENED sid=" build/tcp_dl_proxy.log 2>/dev/null; then
+if grep -aq "MSG_OPEN sid=" "$BUILD/tcp_dl_proxy.log" 2>/dev/null && \
+   grep -aq "OPENED sid=" "$BUILD/tcp_dl_proxy.log" 2>/dev/null; then
     echo "[ok]   转发器独立探针: MSG_OPEN + OPENED"
 else
     echo "[FAIL] 转发器未见 MSG_OPEN/OPENED"; FAIL=$((FAIL + 1))

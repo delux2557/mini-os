@@ -48,13 +48,32 @@ void serial_init(void) {
     irq_install_handler(4, serial_irq);
 }
 
+/* K1（BUG-051）：串口整行输出 IRQ 原子化。
+ * 单 CPU 教学内核，串口并发 writer 的唯一抢占源是定时器 IRQ0——写一半被抢，另一上下文
+ * 再写就会把一行日志在字符粒度打散（撕裂）。把整行写在关中断区间内即保证行原子。
+ * 保存并恢复 EFLAGS：若调用时中断本已关闭，则恢复为关，绝不擅自打开中断。
+ * S-2（评审权衡）：整行输出在 cli 区间内忙等 THR——COM1 已开 FIFO(0x3FA=0xC7) + QEMU 后端
+ * 消费快，CI 环境影响很小；但真机/慢后端下 80 字符行 @38400 ≈ 21ms 关中断，期间屏蔽 IRQ0
+ * (100Hz tick) → 时间基准漂移风险。后续可评估行缓冲/中断驱动方案（当前教学场景可接受）。 */
+static inline uint32_t xirq_save_cli(void) {
+    uint32_t f;
+    __asm__ volatile ("pushfl; pop %0" : "=r"(f));
+    __asm__ volatile ("cli");
+    return f;
+}
+static inline void xirq_restore(uint32_t f) {
+    __asm__ volatile ("push %0; popfl" :: "r"(f));
+}
+
 void serial_putc(char c) {
     while ((inb(0x3FD) & 0x20) == 0) /* 等发送缓冲空 */ ;
     outb(0x3F8, (uint8_t)c);
 }
 
 void serial_puts(const char *s) {
+    uint32_t f = xirq_save_cli();
     while (*s) serial_putc(*s++);
+    xirq_restore(f);
 }
 
 static void sputn(uint32_t n, int base, int upper, int width, int zero) {
@@ -74,6 +93,7 @@ static void sputn(uint32_t n, int base, int upper, int width, int zero) {
 }
 
 void serial_printf(const char *fmt, ...) {
+    uint32_t f = xirq_save_cli();
     va_list ap;
     va_start(ap, fmt);
     while (*fmt) {
@@ -94,4 +114,5 @@ void serial_printf(const char *fmt, ...) {
         }
     }
     va_end(ap);
+    xirq_restore(f);
 }

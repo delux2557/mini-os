@@ -7,6 +7,7 @@
 # 依赖：qemu-system-i386 / python3 / curl。端口用环境变量覆盖，避免 CI 冲突。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 for c in qemu-system-i386 python3 curl; do
   command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
@@ -33,8 +34,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== [1/5] 构建 TCP_DEMO=1 内核 =="
-make clean >/dev/null 2>&1
-if ! make TCP_DEMO=1 >/dev/null 2>&1; then
+make clean BUILD="$BUILD" >/dev/null 2>&1
+if ! make TCP_DEMO=1 BUILD="$BUILD" >/dev/null 2>&1; then
   echo "[FAIL] 内核构建失败"; exit 1
 fi
 echo "      构建完成"
@@ -103,7 +104,7 @@ done
 echo "== [3/5] 起 QEMU e1000 + 延迟 5s 后并行注入攻击（10s 满攻 1000pkt/s×3 线程） =="
 rm -f "$LOG" "$PROXY_LOG" "$ATK_LOG"
 : > "$LOG"; : > "$PROXY_LOG"; : > "$ATK_LOG"
-qemu-system-i386 -kernel build/kernel.elf -display none -m 64 -serial file:"$LOG" \
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -m 64 -serial file:"$LOG" \
   -netdev user,id=net0 -device e1000,netdev=net0 \
   -no-reboot -no-shutdown >/dev/null 2>&1 &
 QPID=$!

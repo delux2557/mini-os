@@ -10,14 +10,15 @@
 #   3) filter-dump pcap 独立核验：线上确有 ARP 双向交换 与 IPv4/UDP、IPv4/ICMP 包
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 # v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失（避免环境病伪装成代码病）
 for c in qemu-system-i386 socat python3; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
 
-LOG="build/net.log"
-PCAP="build/net.pcap"
-ECHO_LOG="build/udp_echo.log"
+LOG="$BUILD/net.log"
+PCAP="$BUILD/net.pcap"
+ECHO_LOG="$BUILD/udp_echo.log"
 MON="/tmp/minios-net-mon.sock"
 FAIL=0
 DURATION="${DURATION:-25}"
@@ -30,7 +31,7 @@ RESTORED=0
 restore_kernel() {
     [ "$RESTORED" = 1 ] && return
     RESTORED=1
-    make clean >/dev/null 2>&1 && make >/dev/null 2>&1 || true
+    make clean BUILD="$BUILD" >/dev/null 2>&1 && make BUILD="$BUILD" >/dev/null 2>&1 || true
 }
 
 cleanup() {
@@ -41,8 +42,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== [1/4] 构建内核（DHCP_RENEW_SECS=${DHCP_RENEW_SECS:-2} 短租期：供租期续约回归） =="
-make clean >/dev/null 2>&1
-if ! make DHCP_RENEW_SECS="${DHCP_RENEW_SECS:-2}" >/dev/null 2>&1; then
+make clean BUILD="$BUILD" >/dev/null 2>&1
+if ! make DHCP_RENEW_SECS="${DHCP_RENEW_SECS:-2}" BUILD="$BUILD" >/dev/null 2>&1; then
     echo "[FAIL] 内核构建失败"
     exit 1
 fi
@@ -68,7 +69,7 @@ fi
 
 echo "== [3/4] QEMU 运行 ${DURATION}s（e1000 + SLIRP + pcap 抓包） =="
 rm -f "$LOG" "$PCAP" "$MON"
-qemu-system-i386 -kernel build/kernel.elf -display none -serial file:"$LOG" \
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -serial file:"$LOG" \
     -no-reboot -no-shutdown -m 64 \
     -netdev user,id=net0 -device e1000,netdev=net0 \
     -object filter-dump,id=fd0,netdev=net0,file="$PCAP" \
