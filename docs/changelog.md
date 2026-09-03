@@ -3,78 +3,7 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
-## [v1.4.4] - 2026-09-02 · record/replay 地基工程收尾：无网络路径 `-nic none` + sqlite 分析索引
-
-> P3 闭环后的两件零侵入加固：① 为回放/编译/录制这三条**不需要网络**的路径统一去掉默认网卡，
-> 消除启动期 e1000/DHCP 等待（icount 下更省墙钟）并少一个非确定源；② 给 `.tr` 文本加一个
-> **旁路 sqlite 分析索引**——录放主路径仍是文本"证据原件"，sqlite 只作只读"放大镜"，坏了绝不影响
-> 录放正确性。
-
-**Engineering**（Tests，dev 侧基建）
-
-* `-nic none`：`tests/replay.sh` / `tests/test_transcript.sh` / `tests/test_cc500.sh` 的 QEMU 启动
-  统一加 `-nic none`。实测内核无网卡时优雅跳过（`[net] e1000 not found on PCI` + `selftest skipped
-  (no e1000)`，探针窗口内出 shell 提示符、不挂起）；网络回归（test\_net/tcp/socket/slip）保持
-  `-netdev user -device e1000` 不动。
-
-* **理由澄清**：`icount` 下 cc500 编译慢 + 后台 `[B]`/recvfrom 抢 tick，是用户态 demo（procB /
-  sockdemo）抢指令预算所致，**非网卡导致**；网卡只对启动期（默认 e1000 + DHCP 握手）有墙钟贡献。
-
-* `tests/tr2sqlite.py`（新增，分析索引"放大镜"）：把 `*.in.tr` / `*.out.tr` 增量导入 sqlite。
-  三表 `transcripts`（元数据/血统）/ `in_events`（seq/rel\_ms/cmd/payload）/ `out_rows`（输出逐行）。
-  **幂等 DELETE+INSERT**（按 runid，可重跑/增量补）；**只读旁路**——不读不写 `.tr`。用例：
-  `python3 tests/tr2sqlite.py --dirs build/transcripts build/transcripts.sqlite --demo`
-  （跨 runid 命令直方图 / 时间跨度 / 提示符计数 / FAIL 血统 / `LIKE` 检索编译结果行如 `cc500: error at`）。
-
-**Docs**
-
-* `roadmap.md`「record/replay 地基」：补充"无网络路径 `-nic none` + sqlite 分析索引"工程收尾说明。
-
-## \[v1.4.5] - 2026-09-02 · record/replay 接 repro\_bugs.sh：BUG 复现命令流固化为可回放证据
-
-> 把 BUG-A（文件槽泄漏）/ BUG-B（cc500 argv）的复现脚本接进 P2/P3 录放机制——修复版复现
-> 命令流经 transcript 录制固化为 `.in.tr/.out.tr`（补上 roadmap 指出的"repro\_bugs.sh 只脚本化、
-> 未录时间关系"缺口），并实测可被 `replay.sh` 消费重放，形成首方复现回归。
-
-**Engineering**（Tests，dev 侧基建）
-
-* `tests/repro_bugs.sh`：`source transcript.sh`，`send()` 改调 `tr_send`（写 fd9 + 录制 in.tr 含
-  **真实相对 ms**——wait 驱动的实际打拍也一并固化）；boot 后 `tr_start repro`，收尾 `tr_snapshot +
-  tr_finish`（按 FAIL 状态标 RESULT PASS/FAIL）。QEMU 加 `-nic none`（非网络路径，去启动期 DHCP 开销）。
-
-* `Makefile`：新增独立目标 `test-repro`（不在 `test:` 聚合内，语义同"首方复现/回归"）。
-
-* **实测闭环**：录制生成 `build/transcripts/repro-<ts>/in.tr`（ccboot / exec / ls / writefile ×2 /
-  ccrun ×3 共 9 条命令 + 真实相对 ms）→ `replay_into` 重新驱动内核 → 固定行为复现（`[ccboot]
-  byte-identical PASS`、`out2.elf` 已建、`bad.c`→`cc500: error at`/`compile FAIL code=1`、
-  good2.elf `exited code=0 PASS`）——BUG-A/BUG-B 在修复版均未复现。
-
-**Docs**
-
-* `roadmap.md`「record/replay 地基」：补 repro\_bugs 接入录放的说明。
-
-## \[v1.4.6] - 2026-09-02 · in.tr TSV 防御：`tr_send` 拒绝含 TAB/换行的 payload
-
-> **预防**已指出的隐患：若未来 `.in.tr` 走 heredoc 多行 payload，混入原始 TAB/换行会破坏
-> TSV 列分隔（`seq \t rel_ms \t payload`）。当前单行 writefile 确无此输入（暂无实际触发），
-> 但为杜绝"坏 TSV 证据"静默深入，在**唯一写入钳制点**（`tr_send`）加 fail-fast 守卫。
-
-* `tests/transcript.sh`：`tr_send` 检测到 payload 含原始 TAB/换行即**拒绝（不发送、不记录、rc=1）**，
-  并 `%q` 报出违规命令 + 单行规约提示；拒绝写入 → 归档 TSV 永不脱列，差分/回放不会拿到坏列。
-  实测：单行照常记录（`1 <tab> 6 <tab> ls /`），含 TAB 与含换行的 payload 各被拒（rc=1）、
-  `seq` 不递增、`in.tr` 无污染。
-
-* `tr_start` 文件头新增规约行：`payload 禁原始 TAB/换行，须单行；多行需显式编码 \t\n\\ 并同步回放解码`
-  ——"为什么被拒"在证据文件里就地可见，自解释。
-
-* **未来多行扩展点**（仅预言，未实现）：真需 heredoc 时再引入显式转义（`\\`/`\t`/`\n`）+ replay.sh
-  同型解码后放开守卫；保证录放主路径仍 `.in.tr` 文本"证据原件"，且不回归现有单行差分。
-
-* 自测：`make test-tr`（P2）/ `test-rp`（P3）全绿，守卫对合法单行零影响。
-
-Docs：本条目。
-
-## \[v1.4.7] - 2026-09-02 · 压测壳修复：确定性判定空判据 + 打点节奏，落地"结果集复原"语义
+## [v1.4.7] - 2026-09-02 · 压测壳修复：确定性判定空判据 + 打点节奏，落地"结果集复原"语义
 
 > 用 record/replay 地基做**业内最佳实践测试**（`tests/rp_torture.sh` 新增：确定性差分 + 压力/边界
 > 扫描 + 结果集复原）。初测抓出**两处测试壳"假绿"缺陷**（非内核），修复后两轮 `-icount` 冷启
@@ -113,7 +42,78 @@ Docs：本条目。
 
 Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
-## \[v1.4.3] - 2026-09-02 · record/replay 地基 P3：replay 回放差分闭环（`make test-rp`）
+## [v1.4.6] - 2026-09-02 · in.tr TSV 防御：`tr_send` 拒绝含 TAB/换行的 payload
+
+> **预防**已指出的隐患：若未来 `.in.tr` 走 heredoc 多行 payload，混入原始 TAB/换行会破坏
+> TSV 列分隔（`seq \t rel_ms \t payload`）。当前单行 writefile 确无此输入（暂无实际触发），
+> 但为杜绝"坏 TSV 证据"静默深入，在**唯一写入钳制点**（`tr_send`）加 fail-fast 守卫。
+
+* `tests/transcript.sh`：`tr_send` 检测到 payload 含原始 TAB/换行即**拒绝（不发送、不记录、rc=1）**，
+  并 `%q` 报出违规命令 + 单行规约提示；拒绝写入 → 归档 TSV 永不脱列，差分/回放不会拿到坏列。
+  实测：单行照常记录（`1 <tab> 6 <tab> ls /`），含 TAB 与含换行的 payload 各被拒（rc=1）、
+  `seq` 不递增、`in.tr` 无污染。
+
+* `tr_start` 文件头新增规约行：`payload 禁原始 TAB/换行，须单行；多行需显式编码 \t\n\\ 并同步回放解码`
+  ——"为什么被拒"在证据文件里就地可见，自解释。
+
+* **未来多行扩展点**（仅预言，未实现）：真需 heredoc 时再引入显式转义（`\\`/`\t`/`\n`）+ replay.sh
+  同型解码后放开守卫；保证录放主路径仍 `.in.tr` 文本"证据原件"，且不回归现有单行差分。
+
+* 自测：`make test-tr`（P2）/ `test-rp`（P3）全绿，守卫对合法单行零影响。
+
+Docs：本条目。
+
+## [v1.4.5] - 2026-09-02 · record/replay 接 repro\_bugs.sh：BUG 复现命令流固化为可回放证据
+
+> 把 BUG-A（文件槽泄漏）/ BUG-B（cc500 argv）的复现脚本接进 P2/P3 录放机制——修复版复现
+> 命令流经 transcript 录制固化为 `.in.tr/.out.tr`（补上 roadmap 指出的"repro\_bugs.sh 只脚本化、
+> 未录时间关系"缺口），并实测可被 `replay.sh` 消费重放，形成首方复现回归。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `tests/repro_bugs.sh`：`source transcript.sh`，`send()` 改调 `tr_send`（写 fd9 + 录制 in.tr 含
+  **真实相对 ms**——wait 驱动的实际打拍也一并固化）；boot 后 `tr_start repro`，收尾 `tr_snapshot +
+  tr_finish`（按 FAIL 状态标 RESULT PASS/FAIL）。QEMU 加 `-nic none`（非网络路径，去启动期 DHCP 开销）。
+
+* `Makefile`：新增独立目标 `test-repro`（不在 `test:` 聚合内，语义同"首方复现/回归"）。
+
+* **实测闭环**：录制生成 `build/transcripts/repro-<ts>/in.tr`（ccboot / exec / ls / writefile ×2 /
+  ccrun ×3 共 9 条命令 + 真实相对 ms）→ `replay_into` 重新驱动内核 → 固定行为复现（`[ccboot]
+  byte-identical PASS`、`out2.elf` 已建、`bad.c`→`cc500: error at`/`compile FAIL code=1`、
+  good2.elf `exited code=0 PASS`）——BUG-A/BUG-B 在修复版均未复现。
+
+**Docs**
+
+* `roadmap.md`「record/replay 地基」：补 repro\_bugs 接入录放的说明。
+
+## [v1.4.4] - 2026-09-02 · record/replay 地基工程收尾：无网络路径 `-nic none` + sqlite 分析索引
+
+> P3 闭环后的两件零侵入加固：① 为回放/编译/录制这三条**不需要网络**的路径统一去掉默认网卡，
+> 消除启动期 e1000/DHCP 等待（icount 下更省墙钟）并少一个非确定源；② 给 `.tr` 文本加一个
+> **旁路 sqlite 分析索引**——录放主路径仍是文本"证据原件"，sqlite 只作只读"放大镜"，坏了绝不影响
+> 录放正确性。
+
+**Engineering**（Tests，dev 侧基建）
+
+* `-nic none`：`tests/replay.sh` / `tests/test_transcript.sh` / `tests/test_cc500.sh` 的 QEMU 启动
+  统一加 `-nic none`。实测内核无网卡时优雅跳过（`[net] e1000 not found on PCI` + `selftest skipped
+  (no e1000)`，探针窗口内出 shell 提示符、不挂起）；网络回归（test\_net/tcp/socket/slip）保持
+  `-netdev user -device e1000` 不动。
+
+* **理由澄清**：`icount` 下 cc500 编译慢 + 后台 `[B]`/recvfrom 抢 tick，是用户态 demo（procB /
+  sockdemo）抢指令预算所致，**非网卡导致**；网卡只对启动期（默认 e1000 + DHCP 握手）有墙钟贡献。
+
+* `tests/tr2sqlite.py`（新增，分析索引"放大镜"）：把 `*.in.tr` / `*.out.tr` 增量导入 sqlite。
+  三表 `transcripts`（元数据/血统）/ `in_events`（seq/rel\_ms/cmd/payload）/ `out_rows`（输出逐行）。
+  **幂等 DELETE+INSERT**（按 runid，可重跑/增量补）；**只读旁路**——不读不写 `.tr`。用例：
+  `python3 tests/tr2sqlite.py --dirs build/transcripts build/transcripts.sqlite --demo`
+  （跨 runid 命令直方图 / 时间跨度 / 提示符计数 / FAIL 血统 / `LIKE` 检索编译结果行如 `cc500: error at`）。
+
+**Docs**
+
+* `roadmap.md`「record/replay 地基」：补充"无网络路径 `-nic none` + sqlite 分析索引"工程收尾说明。
+
+## [v1.4.3] - 2026-09-02 · record/replay 地基 P3：replay 回放差分闭环（`make test-rp`）
 
 > P1/P2/P3 地基三元闭环：icount 定内核确定性（P1）→ transcript 录输入/输出（P2）→ 回放消费
 > transcript 驱动内核并证 bug 表现（P3，本轮）。
@@ -132,7 +132,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
   回放不用 icount，bug 闭环靠信号断言（逐字节确定性由 P1 test-det 承担）；跨独立冷启里程碑
   一致不机械稳定 → 两遍一致性作 `REPLAY_VERIFY=1` soft 检查。
 
-## \[v1.4.2] - 2026-09-02 · record/replay 地基 P2：transcript 固化（`make test-tr`）
+## [v1.4.2] - 2026-09-02 · record/replay 地基 P2：transcript 固化（`make test-tr`）
 
 > 承接 P1（icount 确定性）的录制侧：把串口输入命令流与输出字节流固化为可归档、可复现、
 > 可差分的 transcript，失败自动归档现场。为 P3 回放差分铺数据源。
@@ -151,7 +151,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
   印证 roadmap"公共时钟须用 icount 虚拟时钟、非 guest tick"；复现性按 `ticks=N` pin 掉噪音，
   真逐字节确定性交给 P1 test-det。相对 ms 用 host 墙钟，icount 锚点留 P3。
 
-## \[v1.4.1] - 2026-09-02 · record/replay 地基 P1：icount 确定性启动验收（`make test-det`）
+## [v1.4.1] - 2026-09-02 · record/replay 地基 P1：icount 确定性启动验收（`make test-det`）
 
 > 承接 roadmap「阶段二·加固」record/replay 地基的第一档：先用 `-icount` 把**内核执行**钉到
 > QEMU 虚拟时钟，证明"同输入同输出"，为后续 P2 transcript 固化 / P3 回放差分铺确定性锚点。
@@ -172,7 +172,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * `roadmap.md`「record/replay 地基」：P1 标记 ✅ 落地，记录实测结论与边界降级，P2/P3 仍待做。
 
-## \[v1.4] - 2026-09-02 · shell writefile heredoc 多行写入（绕开 128B 单行截断）
+## [v1.4] - 2026-09-02 · shell writefile heredoc 多行写入（绕开 128B 单行截断）
 
 > 面向"AI agent 在 guest 内写较大源码"：`writefile <<DELIM <path>` 多行写入，逐行收集直至
 > 独立 DELIM 行、逐行追加（每行≤128B 但任意行数拼接），大程序一次写入。128B 单行物理上限保留
@@ -213,7 +213,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * `changelog.md`：本条目。
 
-## \[v1.3] - 2026-09-02 · 虚拟 TCP 上行滑动窗口（stop-and-wait→N 在途，吞吐 W/RTT）
+## [v1.3] - 2026-09-02 · 虚拟 TCP 上行滑动窗口（stop-and-wait→N 在途，吞吐 W/RTT）
 
 > 上行停-等升级为**滑动窗口**：guest `tcp_send` 把载荷写入发送窗口（`TCP_TXWIN=8` 槽×独立 seq），
 > 窗位有空即发、返回 `n` 即已入窗发往转发器；窗口满才让步等累计 ACK（host→guest `MSG_ACK` 的
@@ -281,7 +281,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * `changelog.md`：本条目。
 
-## \[v1.2] - 2026-09-02 · 虚拟 TCP 下行可靠（stop-and-wait）+ 大文件下载 demo + 路线图文档化
+## [v1.2] - 2026-09-02 · 虚拟 TCP 下行可靠（stop-and-wait）+ 大文件下载 demo + 路线图文档化
 
 > 语义边界与演进方向写入 roadmap：下行可靠 + **上行可靠**停-等（v1.2 均落地）是"薄→厚"第一级
 > 台阶（guest 收发两方向参与 seq/ACK，仍非完整状态机）；下一步候选「滑动窗口」列 roadmap。
@@ -344,7 +344,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * `roadmap.md`：薄→厚演进候选标记「上行可靠 ✅ v1.2 已落地」，滑动窗口仍为候选
 
-## \[v1.1] - 2026-09-01 · 网络抽象层 netif + 虚拟 TCP 薄包装（Step 1-4）+ 收尾修复（PR #16）
+## [v1.1] - 2026-09-01 · 网络抽象层 netif + 虚拟 TCP 薄包装（Step 1-4）+ 收尾修复（PR #16）
 
 > 把网络从"协议直接驱动 e1000"解开为三层：网卡适配层（e1000 以太 / 串口 SLIP）↔ netif 接口
 > ↔ 协议层；虚拟 TCP 走"宿主转发器做真 TCP、guest 薄包装给连接对象 + 事件通道"。四步落地、
@@ -383,7 +383,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 **Tests**：host 19/19（fuzz 8 用例/48 万解析 ASan clean、Step3 e1000 守卫）；test-tcp 双通道
 （>1KB/尾字节==TAIL 完整性断言）；test-slip 串口网卡。注：PR #16 双通道全量需 qemu 环境复跑确认。
 
-## \[v0.33] - 2026-08-31 · 回归可观测性收口（F-4 行撕裂 / F-5 pid 静默）+ harness 语义 + CI 全链
+## [v0.33] - 2026-08-31 · 回归可观测性收口（F-4 行撕裂 / F-5 pid 静默）+ harness 语义 + CI 全链
 
 > 与上一批（v0.32）同为"收尾-加固-沉淀"阶段：不给新功能，只让回归更可信、更可定位。
 
@@ -411,7 +411,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 * **账本收口**（T5）：bugs.md 追加 BUG-042/043 与 OBS-003/004；版本串 v0.32→v0.33 并同步 motd
   断言；新增 `docs/external-reviews/` 外部评估报告索引（F-xx ↔ BUG 号 ↔ commit 对照）
 
-## \[v0.32] - 2026-08-31 · 修复 cc500 编译器三缺陷（F-3 字符串自噬 / F-2 未定义静默 / F-1 关系运算残缺）
+## [v0.32] - 2026-08-31 · 修复 cc500 编译器三缺陷（F-3 字符串自噬 / F-2 未定义静默 / F-1 关系运算残缺）
 
 > 三个缺陷均会破坏 guest 内"写-编-跑"教学闭环（静默误编译 / 编译器自杀 / 无声失败），
 > 宿主 hostcc 复现实锤后逐条修复（见 bugs.md BUG-039/040/041）。
@@ -447,7 +447,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
   `repro_bugs.sh`（BUG-031/032 双断言）；尺寸锚点 `entry=800a0054` 未动，cc500 产物 18079B→21283B
   随代码体积自然漂移（无硬编码字节断言）
 
-## \[v0.31] - 2026-08-31 · 内核资源归属收口：per-process fd 表 + socket 归属/回收
+## [v0.31] - 2026-08-31 · 内核资源归属收口：per-process fd 表 + socket 归属/回收
 
 > 连续两项：把"全局单表 + 无归属 + 不随进程回收"的共享内核资源改造成"每进程私有 +
 > 进程绑定 + 退出归还"，根治跨进程槽污染与资源泄漏。
@@ -483,7 +483,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 全层回归绿；socket 攻击回归（F-0a/F-0b）在修复前后红→绿区分成立
 
-## \[v0.30] - 2026-08-30 · 修复工具链严重 BUG（文件槽泄漏 + 自编译产物丢 argv）
+## [v0.30] - 2026-08-30 · 修复工具链严重 BUG（文件槽泄漏 + 自编译产物丢 argv）
 
 > 两个带复现的真 bug 由独立实操报告、逐条核验属实后修复（见 bugs.md BUG-031/032）。
 
@@ -538,7 +538,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
   GCC 14 环境 `make` EXIT=2 构建失败（-Wint-conversion ×13）；恢复该项后
   修复。记录于 docs/bugs.md，教训：`-w` 不压 permerror，GCC>=14 需显式 `-Wno-*`
 
-## \[v0.29] - 2026-08-30 · 加固：宿主侧 fuzz + 内核堆审计
+## [v0.29] - 2026-08-30 · 加固：宿主侧 fuzz + 内核堆审计
 
 > 阶段二「加固」首批落地：不给新功能，只增信心。
 
@@ -599,7 +599,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
   `4 blocks, free 3 blocks/102320B used 16B pages=25`，used+free+4×16B 头 = 25×4096
   精确守恒）；串口回归 + ATA 持久化回归通过；200 万轮 fuzz 复核无崩溃
 
-## \[v0.28] - 2026-08-30 · DHCP 租期续约（T1/T2 renew，RFC 2131 §4.4.5）
+## [v0.28] - 2026-08-30 · DHCP 租期续约（T1/T2 renew，RFC 2131 §4.4.5）
 
 **Added**
 
@@ -665,7 +665,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 五层回归全绿（宿主 15/15 + qemu + serial + persist + net）
 
-## \[v0.27c] - 2026-08-30 · 评估反馈修复（GCC 14 构建卫生 + brk 守卫口径 + 回归补格 + 文档回补）
+## [v0.27c] - 2026-08-30 · 评估反馈修复（GCC 14 构建卫生 + brk 守卫口径 + 回归补格 + 文档回补）
 
 **Fixed**
 
@@ -700,7 +700,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 * GCC 14.2 clean build 验证：`make` 零告警，`kernel.elf` 329KB；五层回归全绿
   （宿主 15/15 + qemu 176 项 + serial + persist（含 S10 新用例）+ net）
 
-## \[v0.27b] - 2026-08-30 · 写-编-跑演示闭环：cc500 支持命令行路径
+## [v0.27b] - 2026-08-30 · 写-编-跑演示闭环：cc500 支持命令行路径
 
 **Added**
 
@@ -736,7 +736,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
   编译产物被加载 → PASS），与 ccboot（自举不动点）互补：前者证"能编译任意程序"、
   后者证"编译器对自身是不动点"
 
-## \[v0.27] - 2026-08-30 · 工具链与自举：guest 内「写-编-跑」闭环
+## [v0.27] - 2026-08-30 · 工具链与自举：guest 内「写-编-跑」闭环
 
 **Added**
 
@@ -794,7 +794,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 全量回归（宿主 + qemu + serial + persist + net）五层全绿
 
-## \[v0.26] - 2026-08-29 · 容量三连#1：用户栈按需生长
+## [v0.26] - 2026-08-29 · 容量三连#1：用户栈按需生长
 
 **Added**
 
@@ -842,7 +842,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * `deep` 演示程序尾递归被 `-O2` 改写为循环、栈占用不足 4KB 不触发生长（见 BUG-024）
 
-## \[v0.26#2] - 2026-08-29 · 容量三连#2：用户堆（brk/sbrk）
+## [v0.26#2] - 2026-08-29 · 容量三连#2：用户堆（brk/sbrk）
 
 **Added**
 
@@ -869,7 +869,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 * 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 `heapdemo` 用例
   （brk 查询 → 扩页日志 → 收缩保留映射 → 存活 → 退出码 0）
 
-## \[v0.26#3] - 2026-08-29 · 容量三连#3：ELF 加载去上限
+## [v0.26#3] - 2026-08-29 · 容量三连#3：ELF 加载去上限
 
 **Added**
 
@@ -894,7 +894,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 * 回归升级：`tests/qemu_regression.sh` 与 `tests/test_serial.sh` 新增 `bigdemo` 用例
   （启动 → 70KB 校验 → 存活 → 退出码 0），并断言加载帧数突破旧 8 帧上限
 
-## \[v0.25] - 2026-08-29 · DHCP 客户端：动态获取 IP/网关（静态可配置化）
+## [v0.25] - 2026-08-29 · DHCP 客户端：动态获取 IP/网关（静态可配置化）
 
 **Added**
 
@@ -928,7 +928,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 版本横幅与 motd 更新为 v0.25；roadmap 勾选该项
 
-## \[v0.24] - 2026-08-29 · UDP 校验和错误路径
+## [v0.24] - 2026-08-29 · UDP 校验和错误路径
 
 **Added**
 
@@ -953,7 +953,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 版本横幅与 motd 更新为 v0.24；roadmap 勾选该项
 
-## \[v0.23] - 2026-08-29 · ICMP Echo：PING 通宿主
+## [v0.23] - 2026-08-29 · ICMP Echo：PING 通宿主
 
 **Added**
 
@@ -982,7 +982,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * `make test-net` 六层 + HMP sendkey 交互注入 netping 断言；pcap UDP 4→6
 
-## \[v0.21] - 2026-08-29 · 内核自审计 + syscall 边界契约化
+## [v0.21] - 2026-08-29 · 内核自审计 + syscall 边界契约化
 
 **Added**
 
@@ -996,7 +996,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 * 调度日志（block/wake/exit）统一带单调 tick 戳；abuse 边界断言补齐至 17 项
   （exec argv / sendto·recvfrom iov / read·write buf 等内核地址一律 -1）
 
-## \[v0.20] - 2026-08-29 · 网络可用：用户态 UDP socket
+## [v0.20] - 2026-08-29 · 网络可用：用户态 UDP socket
 
 **Added**
 
@@ -1016,7 +1016,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * `make test-net` 升级六层（+sockdemo 断言 + pcap UDP≥4）
 
-## \[v0.19] - 2026-08-29 · 网络加厚：极简 IP/UDP
+## [v0.19] - 2026-08-29 · 网络加厚：极简 IP/UDP
 
 **Added**
 
@@ -1036,7 +1036,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 * 宿主单测 `tests/test_ip.c`（24 断言）/ `tests/test_udp.c`（24 断言），
   基准校验和由独立 python 参考实现算得
 
-## \[v0.18] - 2026-08-29 · e1000 网卡驱动 + 极简网络栈（PCI/ARP）
+## [v0.18] - 2026-08-29 · e1000 网卡驱动 + 极简网络栈（PCI/ARP）
 
 **Added**
 
@@ -1092,7 +1092,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 全量回归（宿主 + qemu + serial + persist + net）五层全绿
 
-## \[v0.17] - 2026-08-29 · syscall 边界校验（copyin/copyout）
+## [v0.17] - 2026-08-29 · syscall 边界校验（copyin/copyout）
 
 **Added**
 
@@ -1129,7 +1129,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 * 开发期自查修正：`user_ptr_valid` 首版 `len > END - a` 在 `a > END` 时减法回绕误判为
   合法，改为先 `a > END` 拒绝再判区间（未发布，已在本版修正）
 
-## \[v0.16] - 2026-08-29 · 用户态 CRT 收口 + ATA 真盘持久化 + 单行自检
+## [v0.16] - 2026-08-29 · 用户态 CRT 收口 + ATA 真盘持久化 + 单行自检
 
 **Added**
 
@@ -1179,7 +1179,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 版本横幅与 motd 更新为 v0.16；Makefile 接入 `ata.o`/`storage.o`，应用链接改 `-e _start`
 
-## \[v0.15] - 2026-08-29 · 补全 wait()/waitpid 语义与孤儿清理
+## [v0.15] - 2026-08-29 · 补全 wait()/waitpid 语义与孤儿清理
 
 **Added**
 
@@ -1213,7 +1213,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * Makefile/initramfs 接入 `waitdemo`
 
-## \[v0.14] - 2026-08-29 · 文件系统增强：目录层级 / 间接块 / 偏移定位与追加写
+## [v0.14] - 2026-08-29 · 文件系统增强：目录层级 / 间接块 / 偏移定位与追加写
 
 **Added**
 
@@ -1264,7 +1264,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 串口终端回归补 `mkdir /sd1` / `ls /sd1` / `run fsdemo` / `rmdir /sd1` 用例
 
-## \[v0.13] - 2026-08-29 · 用户栈守卫页与栈溢出检测
+## [v0.13] - 2026-08-29 · 用户栈守卫页与栈溢出检测
 
 **Added**
 
@@ -1298,7 +1298,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 初始化 Git 仓库：v0.12 基线提交 `ac80cc9`，v0.13 作为增量特性直接在主分支提交
 
-## \[v0.12] - 2026-08-29 · fork/exec 进程模型与 argv 参数传递
+## [v0.12] - 2026-08-29 · fork/exec 进程模型与 argv 参数传递
 
 **Added**
 
@@ -1345,7 +1345,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 共享内存区布局常量移入 mem.h（fork 识别共享页跳过深拷贝）
 
-## \[v0.11] - 2026-08-29 · 每进程地址空间与物理内存隔离
+## [v0.11] - 2026-08-29 · 每进程地址空间与物理内存隔离
 
 **Added**
 
@@ -1393,7 +1393,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * Makefile 新增 `isol` 应用构建与 initramfs 落盘
 
-## \[v0.10] - 2026-08-29 · 串口终端：外部 agent 经 QEMU 交互
+## [v0.10] - 2026-08-29 · 串口终端：外部 agent 经 QEMU 交互
 
 **Added**
 
@@ -1417,7 +1417,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * `make run-serial` 可用 `-serial stdio` 直接交互，也可被外部 agent/工具驱动
 
-## \[v0.9] - 2026-08-29 · 可执行程序加载与交互式 Shell
+## [v0.9] - 2026-08-29 · 可执行程序加载与交互式 Shell
 
 **Added**
 
@@ -1470,7 +1470,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 测试脚本同步基线：发送命令前记录日志行号，避免命中旧输出/漏掉同步写入
 
-## \[v0.8] - 2026-08-29 · 文件系统（内存盘 + 极简 mini-fs）
+## [v0.8] - 2026-08-29 · 文件系统（内存盘 + 极简 mini-fs）
 
 **Added**
 
@@ -1512,7 +1512,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 用户程序新增 `.text.fs` 段（procFSA/procFSB 入口）；Makefile 加入 blockdev.o/fs.o
 
-## \[v0.7] - 2026-08-29 · IPC：有界消息队列（生产者-消费者）
+## [v0.7] - 2026-08-29 · IPC：有界消息队列（生产者-消费者）
 
 **Added**
 
@@ -1547,7 +1547,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 用户程序新增 `.text.msg` 段（procMsgP/procMsgC 入口）
 
-## \[v0.6] - 2026-08-29 · IPC 与同步（信号量 + 共享内存）
+## [v0.6] - 2026-08-29 · IPC 与同步（信号量 + 共享内存）
 
 **Added**
 
@@ -1581,7 +1581,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 内存布局扩展：共享页区 0x80020000（避开用户栈区）
 
-## \[v0.5] - 2026-08-28 · 抢占式多任务与进程调度
+## [v0.5] - 2026-08-28 · 抢占式多任务与进程调度
 
 **Added**
 
@@ -1611,7 +1611,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * BUG-002：idle 空队列返回路径不再 `cli; hlt`，修复系统挂死
 
-## \[v0.4] - 用户态 ring3 与系统调用
+## [v0.4] - 用户态 ring3 与系统调用
 
 **Added**
 
@@ -1625,7 +1625,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 键盘回显主循环
 
-## \[v0.3] - 内存管理
+## [v0.3] - 内存管理
 
 **Added**
 
@@ -1639,7 +1639,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 内存自检与状态行（free / heap / lazy）
 
-## \[v0.2] - C 内核地基
+## [v0.2] - C 内核地基
 
 **Added**
 
@@ -1651,7 +1651,7 @@ Docs：本条目（roadmap 见 v1.4.4/4.5/4.6）。
 
 * 交互式回显（可键入内容，回车换行）
 
-## \[v0.1] - 引导与保护模式
+## [v0.1] - 引导与保护模式
 
 **Added**
 
