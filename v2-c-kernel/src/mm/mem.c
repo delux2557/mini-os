@@ -9,6 +9,7 @@
 #include "serial.h"
 #include "vga.h"
 #include "sched.h"
+#include "userptr.h"   /* USER_SPACE_BASE/END：pf_handler 降级判定用 */
 #include <stdint.h>
 
 #define PAGE_SIZE     4096u
@@ -309,6 +310,20 @@ void pf_handler(registers_t *r) {
             vga_printf("[lazy] PF@%x -> phys %x (#%u)\n", page, phys, lazy_pages);
         }
         return;   /* iret 后自动重试触发异常的指令 */
+    }
+
+    /* 内核态命中用户半区缺页：极可能是某条 syscall 校验盲区（不该发生）。铁律要求
+     * 绝不能因此 cli;hlt 整机停——降级为杀掉当前用户进程（与 CPL=3 越界路径同构）。
+     * 不影响栈按需生长（STACK_GROWTH 在 CPL=3 分支先行处理）与懒分配（懒区为低地址）。
+     * 注意：真内核 bug 的其它缺页仍落下方 [FATAL] 停机以便诊断，仅此用户半区例外降级。 */
+    if ((r->cs & 3) == 0 && fault >= USER_SPACE_BASE && fault < USER_SPACE_END) {
+        uint32_t p = sched_current_pid();
+        serial_printf("\n[kern] PF user-half @%x err=%u eip=%x -> kill pid=%u\n",
+                      fault, r->err_code, r->eip, p);
+        vga_printf("\n[kern] PF user-half @%x err=%u eip=%x -> kill pid=%u\n",
+                   fault, r->err_code, r->eip, p);
+        sched_kill(r, (uint32_t)-1);
+        __asm__ volatile ("cli; hlt");   /* 不可达，与既有 kill 路径一致 */
     }
 
     /* 其它页错误：不可恢复，停机 */
