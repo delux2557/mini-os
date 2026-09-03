@@ -42,6 +42,9 @@ void app_main(int argc, char **argv) {
     report("recvfrom iov@0x100000",syscall3(SYS_NET_RECVFROM, 0, 0x100000u, 0));
     /* 高地址回绕（> END，接近 4GB）也应被拒 */
     report("print@0xFFFFFFF0",     syscall3(SYS_PRINT, 0xFFFFFFF0u, 0, 0));
+    /* [gate] 设备 MMIO 0xFEB00000（> USER_SPACE_END）：合法地必被区间拒绝，不触碰设备内存。
+     * 布局不变量护栏：若未来把设备 MMIO 挪入用户半区，此用例即判红。 */
+    report("print@MMIO 0xFEB00000",syscall3(SYS_PRINT, 0xFEB00000u, 0, 0));
 
     /* 文件读写缓冲指针：先打开一个合法文件，再用内核地址当缓冲 -> 应被拒 */
     if ((int)syscall3(SYS_FS_CREATE, (uint32_t)"/abuse.tmp", 0, 0) < 0) {
@@ -60,6 +63,14 @@ void app_main(int argc, char **argv) {
             char small[8] = "x";
             report("write buf@valid huge len=32768",
                    syscall3(SYS_FS_WRITE, 1, (uint32_t)small, 32768u));
+        }
+        /* [gate] 深度拷贝攻击：合法地址 + 长度=64KB。预期绝不 [FATAL]：
+         * 若区间非全映射 -> user_ptr_valid 逐页穷举在触碰前 -1；
+         * 若全映射合法 -> fs 流式搬运成功，绝不 kmalloc(64KB) 一次性分配。 */
+        {
+            char buf64[8] = "x";
+            report("write deepcopy len=65536",
+                   syscall3(SYS_FS_WRITE, 1, (uint32_t)buf64, 65536u));
         }
         syscall3(SYS_FS_CLOSE, 1, 0, 0);
         syscall3(SYS_FS_DELETE, (uint32_t)"/abuse.tmp", 0, 0);
