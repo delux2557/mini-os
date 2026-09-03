@@ -90,7 +90,8 @@ int elf_load(const uint8_t *data, uint32_t size, uint32_t load_base,
         /* 段数据必须完整落在文件内 */
         if (ph->p_offset + filesz > size || ph->p_offset + filesz < ph->p_offset)
             return -1;
-        if (mapfn) mapfn(dst, memsz);
+        if (mapfn && mapfn(dst, memsz) != 0)
+            return -1;   /* 映射失败即中止，不再拷贝/清 bss——避免写未映射区触发内核态缺页 */
         memcpy_v((void *)dst, data + ph->p_offset, filesz);
         if (memsz > filesz)
             memset_v((void *)(dst + filesz), 0, memsz - filesz);

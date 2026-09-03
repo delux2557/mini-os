@@ -78,8 +78,10 @@ void *kmalloc(uint32_t size) {
         if (b->free && b->size >= size)
             return block_claim(b, size);
 
-    /* 不够则按需补连续页再试一次 */
-    uint32_t need = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    /* 不够则按需补连续页再试一次。
+     * BUG-056/审计：need 须含 16B 块头——否则请求恰为 N*4096 时新块
+     * (N*4096-16 < size) 恒分配失败（可用内存却 OOM）。 */
+    uint32_t need = (size + HDR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
     heap_add_pages(need);
     for (block_t *b = head; b; b = b->next)
         if (b->free && b->size >= size)
