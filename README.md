@@ -65,6 +65,17 @@ mini-os/
     └── build/             # 构建产物（gitignore，make clean 清理）
 ```
 
+## 许可证
+
+本项目采用**混合授权**：
+
+* **内核代码（`v2-c-kernel/src/` 等）**：采用 [MIT 许可证](LICENSE)。
+* **`v2-c-kernel/tools/cc500/` 下的 cc500 编译器**：派生自 Edmund GRIMLEY EVANS 的
+  cc500（Copyright © 2006，orig: http://homepage.ntlworld.com/edmund.grimley-evans/cc500/），
+  按 **GPL-2.0-or-later** 提供；许可证全文见
+  [`tools/cc500/LICENSE`](v2-c-kernel/tools/cc500/LICENSE)，来源与边界说明见
+  [`tools/cc500/README.md`](v2-c-kernel/tools/cc500/README.md)。
+
 ## 快速开始
 
 依赖：`gcc`(m32 支持)、`nasm`、`ld`、`objcopy`、`qemu-system-i386`、`python3`、`socat`。
