@@ -7,8 +7,8 @@
 
 ## 已完成里程碑（已归档）
 
-> v0.1 ~ v0.33 里程碑速览已归档至 [history/roadmap-milestones.md](history/roadmap-milestones.md)（只读）。
-> 版本历史唯一事实源是 [changelog.md](changelog.md)；本处不再维护重复表格。
+> v0.1 ~ v0.33 里程碑速览已归档至 [history/roadmap-milestones.md](../history/roadmap-milestones.md)（只读）。
+> 版本历史唯一事实源是 [changelog.md](../reference/changelog.md)；本处不再维护重复表格。
 
 ## 下一步规划
 
@@ -129,7 +129,7 @@
     无网络路径同加 `-nic none`。
 
   * ✅ **独立测评补格（fix 分支，2026-09-03，旁证）**：独立推演确认"日志撕裂"即为 RR 判据失真的
-    **总根因 K1**，并根治为三处修复（详情见 [docs/bugs.md](docs/bugs.md) BUG-051~053）：
+    **总根因 K1**，并根治为三处修复（详情见 [docs/bugs.md](../reference/bugs.md) BUG-051~053）：
     **BUG-051** `serial_printf/puts` 整行 IRQ 原子化（`pushfl/cli…popfl` 状态保持，零污染 icount 路径）
     → 串口行不再在字符粒度被抢占撕裂；**BUG-052** 收掉 test-tr 复现性步 ~67% 假红（`pick()` 里程碑
     子串化 + 快照锚点有界等末条完成里程碑，连跑 5 次 0 假红）——印证 P2 验收③"里程碑行稳定"依赖的
@@ -292,7 +292,7 @@
 ### 网络抽象层与虚拟 TCP（netif + 间接 TCP）——已完成主线
 
 > **状态：主线已全部落地**（v1.1 四步 → v1.2 可靠收发 → v1.3 上行滑动窗口；changelog v1.1~v1.3）。
-> 完整决策史（D1-D6 + Step 1-4 + 薄→厚演进预留）已归档：[history/netif-roadmap-v1.1.md](history/netif-roadmap-v1.1.md)（只读）。
+> 完整决策史（D1-D6 + Step 1-4 + 薄→厚演进预留）已归档：[history/netif-roadmap-v1.1.md](../history/netif-roadmap-v1.1.md)（只读）。
 > 协议契约以 `docs/tcp-session-proto.md` / `tcp-thin-api.md` / `tcp-mtu-fail.md` 为准（动码前定稿）。
 
 - **✅ 上行滑动窗口（v1.3）**：停-等 → N 在途（guest 发送窗口 `TCP_TXWIN=8` + 累计 ACK + 超时重传），吞吐 1/RTT → W/RTT。

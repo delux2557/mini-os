@@ -6,16 +6,16 @@
 
 > 项目已达成"教学闭环"（进程/内存/文件/网络/工具链全部完成），
 > 进入 **"收尾-加固-沉淀"** 阶段——最终交付物 = 可运行内核 + 工程方法论文档
-> + "AI 辅助系统编程"的实证案例（演进路线见 [docs/roadmap.md](docs/roadmap.md)）。
+> + "AI 辅助系统编程"的实证案例（演进路线见 [docs/explanation/roadmap.md](docs/explanation/roadmap.md)）。
 >
 > 代码由 AI 辅助编写；每个版本先跑通最小可用目标，再迭代扩展。
 > **文档导航见 [docs/README.md](docs/README.md)**（清单 + 生命周期 + 维护规则）：
-> 设计与思路见 [docs/design.md](docs/design.md)，Bug 记录见 [docs/bugs.md](docs/bugs.md)，
-> 版本变更见 [docs/changelog.md](docs/changelog.md)，演进路线见 [docs/roadmap.md](docs/roadmap.md)。
+> 设计与思路见 [docs/explanation/design.md](docs/explanation/design.md)，Bug 记录见 [docs/reference/bugs.md](docs/reference/bugs.md)，
+> 版本变更见 [docs/reference/changelog.md](docs/reference/changelog.md)，演进路线见 [docs/explanation/roadmap.md](docs/explanation/roadmap.md)。
 
 ## 版本矩阵（精简）
 
-> 完整版本史（v0.1 起，含 netif/RR 各版本）见 [docs/changelog.md](docs/changelog.md)——**版本历史的唯一事实源**。
+> 完整版本史（v0.1 起，含 netif/RR 各版本）见 [docs/reference/changelog.md](docs/reference/changelog.md)——**版本历史的唯一事实源**。
 > v0.1~v0.33 里程碑速览另见 [docs/history/roadmap-milestones.md](docs/history/roadmap-milestones.md)（只读归档）。
 
 | 版本   | 里程碑 |
@@ -41,12 +41,14 @@
 mini-os/
 ├── README.md              # 本文件（快速上手 + 文档导航）
 ├── .gitignore
-├── docs/                  # 文档（总入口见 docs/README.md）
+├── docs/                  # 文档（总入口见 docs/README.md；Diátaxis 分层）
 │   ├── README.md          # ★ docs 总入口：文档清单 + 生命周期 + 维护规则
-│   ├── design.md          # 架构设计与开发思路
-│   ├── roadmap.md         # 演进路线（只留未完成主线；已完成段归档 history/）
-│   ├── bugs.md            # Bug 记录（编号被代码引用，严禁改动）
-│   ├── changelog.md       # 版本变更日志（版本历史唯一事实源）
+│   ├── explanation/       # 理解导向（活文档）
+│   │   ├── design.md      # 架构设计与开发思路
+│   │   └── roadmap.md     # 演进路线（只留未完成主线；已完成段归档 history/）
+│   ├── reference/         # 信息导向（活文档）
+│   │   ├── changelog.md   # 版本变更日志（版本历史唯一事实源）
+│   │   └── bugs.md        # Bug 记录（编号被代码引用，严禁改动）
 │   ├── tcp-session-proto.md  # 虚拟 TCP 会话协议头规范（契约）
 │   ├── tcp-thin-api.md       # 虚拟 TCP 薄包装 API 契约表（契约）
 │   ├── tcp-mtu-fail.md       # MTU/大包失败路径规范（契约）

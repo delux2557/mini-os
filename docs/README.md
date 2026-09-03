@@ -15,10 +15,10 @@ mini-os 的开发文档遵循三条铁律：
 
 | 文档 | 内容 | 生命周期 | 何时更新 |
 |---|---|---|---|
-| [design.md](design.md) | 架构设计与开发思路（22 章，覆盖至 v1.4.x + 并发模型不变量） | 活文档 | 新子系统 / 新架构决策 → 加章（带版本戳） |
-| [roadmap.md](roadmap.md) | 当前阶段判断 + 未完成主线 + 支线 + 红线 | 活文档 | 规划变更时；已完成项迁出到 `history/` |
-| [changelog.md](changelog.md) | 版本变更日志（唯一版本历史源，最新在顶） | 活文档 | 每个版本发布时；**README/roadmap 不复制其内容** |
-| [bugs.md](bugs.md) | Bug 记录（**编号被代码注释引用，严禁改号/删号**） | 活文档 | 新 BUG → 新增条目 + changelog Fixed 段（两处都要） |
+| [design.md](explanation/design.md) | 架构设计与开发思路（22 章，覆盖至 v1.4.x + 并发模型不变量） | 活文档 | 新子系统 / 新架构决策 → 加章（带版本戳） |
+| [roadmap.md](explanation/roadmap.md) | 当前阶段判断 + 未完成主线 + 支线 + 红线 | 活文档 | 规划变更时；已完成项迁出到 `history/` |
+| [changelog.md](reference/changelog.md) | 版本变更日志（唯一版本历史源，最新在顶） | 活文档 | 每个版本发布时；**README/roadmap 不复制其内容** |
+| [bugs.md](reference/bugs.md) | Bug 记录（**编号被代码注释引用，严禁改号/删号**） | 活文档 | 新 BUG → 新增条目 + changelog Fixed 段（两处都要） |
 | [tcp-session-proto.md](tcp-session-proto.md) | 虚拟 TCP 会话协议头规范（netif Step 4, 1/3） | 契约（定稿） | 协议变更时（动码前先改文档） |
 | [tcp-thin-api.md](tcp-thin-api.md) | 虚拟 TCP 薄包装 API 契约表（netif Step 4, 2/3） | 契约（定稿） | API 变更时（动码前先改文档） |
 | [tcp-mtu-fail.md](tcp-mtu-fail.md) | MTU/大包失败路径规范（netif Step 4, 3/3） | 契约（定稿） | 失败路径变更时 |
@@ -45,9 +45,9 @@ mini-os 的开发文档遵循三条铁律：
 |---|---|
 | changelog 版本顺序乱序（v1.4.4→1.4.7 顶部后接 v1.4.3） | ✅ 已修（PR #49，3e54458） |
 | design.md 落后 ~10 版（停 v0.27/v0.28，缺 v0.29~v1.x） | ✅ 已补写（20~22 章：加固收口 / RR 确定性 / 并发不变量，见 PR #51） |
-| docs 目录四象限重组（explanation/reference/guides 分层） | 待 P2 |
+| docs 目录四象限重组（explanation/ / reference/ 分层） | ✅ 已落地（PR #52：design/roadmap → explanation/，changelog/bugs → reference/；契约与 history/ 留根，不设空 guides/） |
 | external-reviews 命名统一（部分缺审计对象 sha） | ✅ 已闭环（P2 迁移 history/，规则明文化：sha 可考才带后缀） |
 
 ---
 
-*本文档随 P0 文档治理建立；结构重组（P2）完成后本清单同步更新归属路径。*
+*本文档随 P0 文档治理建立；结构重组（P2）落地于 PR #52，活文档已按 explanation/（design、roadmap）与 reference/（changelog、bugs）分层，契约文档 tcp-\* 与归档 history/、资源 screenshots/ 留在 docs 根。*
