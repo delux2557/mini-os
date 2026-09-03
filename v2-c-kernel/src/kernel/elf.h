@@ -9,8 +9,9 @@
 #include <stdint.h>
 
 /* 平台映射钩子：把 [vaddr, vaddr+len) 虚拟地址区映射到可用物理内存。
- * vaddr 可能未按页对齐，实现需自行向下取整到页并覆盖整段。宿主测试传 NULL。 */
-typedef void (*elf_map_fn)(uint32_t vaddr, uint32_t len);
+ * vaddr 可能未按页对齐，实现需自行向下取整到页并覆盖整段。宿主测试传 NULL。
+ * 返回 0=成功 / 非 0=映射失败（elf_load 检测到失败会中止，不再拷贝/清零）。 */
+typedef int (*elf_map_fn)(uint32_t vaddr, uint32_t len);
 
 /* 加载 ELF32 可执行文件：
  *  - data/size：ELF 文件内容

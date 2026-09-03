@@ -1326,6 +1326,42 @@
 
 ***
 
+## BUG-056 \[已修复] ELF 段 p_memsz 无上限 + 内核低 16MB 恒等映射假设 → 整机宕机隐患
+
+* **版本**：当前 main（DoS 审计发现，非线上复现）
+
+* **现象/隐患**：ELF 加载器对 `PT_LOAD` 的 `p_memsz`（段内存尺寸）**没有上限**，且与文件大小脱钩
+  ——一个仅 84 字节的 ELF 可声称 `p_memsz=96MB`。`load_elf_file` 据此把 `load_region`（=ELF 自带
+  区间）设为 96MB，`mapfn` 单次申请巨大映射：耗尽物理帧后，新的**页表帧**（`frame_alloc` 分配、
+  [mem.c:158](file:///workspace/mini-os/v2-c-kernel/src/mm/mem.c#L158) 直接按物理地址当虚拟地址解引用）
+  落在 >16MB 的恒等映射区外，内核态写未映射物理 → 非用户半区 [FATAL] 整机停（PR #59 的降级只管
+  用户半区，兜不住此路径）。实测中因堆碎片 `kmalloc(记账数组)` 提前失败而常被掩盖为 -1，但属
+  **状态/内存布局相关的整机宕机潜伏向量**，直接威胁"最坏只能杀进程"铁律。
+
+* **根因**：① `p_memsz` 与文件大小脱钩、加载区间无用户空间/容量钳制；② `elf_load` 在 `mapfn`
+  映射失败（`load_failed`）后仍执行 `memset_v` 清 bss，触碰未映射区；③ 内核仅为低 16MB 做恒等
+  映射，却对**任意** `frame_alloc` 结果按虚拟地址解引用（>16MB 即失效）。
+
+* **修复**（返回 -1 式降级，不开新 cli;hlt、不改 guard.c）：
+  * [load_elf_file](file:///workspace/mini-os/v2-c-kernel/src/kernel/usermode.c#L124-L128)：
+    `elf_load_range` 后强制 `lbase>=USER_SPACE_BASE && lend<=USER_SPACE_END && lend-lbase<=APP_ELF_MAXSIZE(1MB)`
+    否则 -1 —— 把畸形 p_memsz 在映射前钳死；
+  * [elf.c](file:///workspace/mini-os/v2-c-kernel/src/kernel/elf.c#L93-L94)：`elf_map_fn` 改返回 int，
+    `mapfn` 失败即中止、不再 memcpy/memset 未映射区；
+  * `app_mapfn` 恒返回 0/非 0（失败即广传）;
+  * [heap.c](file:///workspace/mini-os/v2-c-kernel/src/mm/heap.c#L84)：`kmalloc` 补页计数把 16B 块头
+   计入（`need=(size+HDR+4095)/4096`），修"请求恰为 N×4096 时恒分配失败"的功能缺陷（本审计的 P1）。
+  * 残余（P2，未随本 PR）：根治 >16MB 解引用假设——为 pd/pt 等元数据帧保留低 16MB 专用帧池。
+
+* **回归**：
+  - 新增 DoS 夹具 `zbig`（84B 畸形 ELF，p\_memsz=96MB）进 initramfs；qemu\_regression / test\_serial
+    `run zbig` 门禁断言"cannot load 'zbig'"（必 -1）且整机不 [FATAL]；
+  - test\_elf 新增 4.11：mapfn 映射失败时 `elf_load` 必须中止且不写目标区/bss；
+  - `make test-host` pass=20 fail=0（test\_elf 39 断言）；`make test-qemu` 全量通过（含 bigdemo 70KB、
+    cc500 自举、shell 等合法加载不误伤）；`test-serial` zbig 被 -1 拒绝。
+
+***
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号      | 场景               | 现象                                                                                                                   | 处置/教训                                                                                                                                             |
@@ -1347,4 +1383,5 @@
 | OBS-006（压测 2026-09-01）        | ccrun 判定 `code==0 ? PASS : FAIL`（[shell.c](../../v2-c-kernel/src/app/shell.c) L473 非 0 一律 FAIL，`main{return 0}` 视为成功）                                                                                                              | 验证"某个正确的非零值"不能靠 `return 该值`（必被标 FAIL）；应程序内部 `if(x==期望)return 0;return 1;`。已据此把 test-cc500 guest 层扩为 `a=1+2;a==3` 整机真值断言，顺带覆盖 `==`（此前 guest 层只测 `<`）                                                                                     |
 | OBS-007（虚拟 TCP 压测 2026-09-01） | 恶意下行事件（未知 sid 的 CLOSED/ERROR/TIMEOUT/OPENED + 非法 mtype + 错版本号 + 保留位非 0 + 超大 MSG\_DATA 1392B + 过短头 0..7B + 随机字节）**并行 10s × \~900pkt/s 注入**，合法 HTTP 8KB+TAIL 仍 `RESULT PASS closed=1 tail=TAIL refuse=-1`，内核无 OOP/PANIC/TRIPLE | 验证 BUG-050（netsock 单帧泵取背压 e1000 环）和会话解析器 `conn_by_session(sid)==NULL` 的"无副作用 drop"——4209 脏数据报没混进合法连接，也没撑爆 NET\_RXQ。固化为 `tests/test_tcp_attack.sh + tests/tcp_attack.py`，注入面=转发器 UDP 监听口（与 test-tcp 同入口，可 CI 直接跑）                        |
 | OBS-008（协议 压测 2026-09-01）     | 宿主层解析器（IP / UDP / ICMP / DHCP / SLIP / 虚拟 TCP 会话头）**ASan+UBSan 150w 轮 fuzz = 1200w 次 parse 调用**，无崩溃/越界/UB（19 项宿主单测 0 fail）                                                                                                   | 解析器加固到位，1200w 调用未暴露新协议漏洞。ASan+UBSan 清洁是业界回归基线；保留 `tests/fuzz_parse.c` + `run_host_tests.sh`，`FUZZ_ITERS=1500000` CI 可直接跑。                                                                                                               |
+| OBS-010（ATA 设备残留）             | ATA 超时恢复：`ata_wait_ready` 超时返回 -1 但**未发 SRST 软复位**，设备命令状态可能残留（[ata.c](file:///workspace/mini-os/v2-c-kernel/src/drv/ata.c#L52-L61) 超时路径）——QEMU 下近不可达，仅 fs_sync/save 偶发触发且返回 -1 不崩                                                                                              | 低危观察；建议超时后发 `0x08(SRST)` 软复位恢复（状态机 + 超时计数，勿用 `sleep`）；当前未改，待后续小 PR                                                                                                        |
 

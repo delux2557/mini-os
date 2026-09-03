@@ -3,6 +3,37 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.10] - 2026-09-03 · ELF 段尺寸钳制 + mapfn 失败中止 + heap 页整倍缺陷（BUG-056）
+
+> DoS 审计落地：堵"单条 guest 命令整机宕机"的第 5 类向量（ELF 段 p_memsz 无上限叠加 mm 低
+> 16MB 恒等映射假设）。把加载区间钳到用户半区 ≤1MB、`elf_load` 在映射失败时中止（不再清
+> bss 未映射区）、`kmalloc` 补页计数计入块头（修"可用内存却 OOM"）。全部返回 -1 式降级，
+> 未开新 cli;hlt、未改 guard.c。
+
+**Fixed**
+
+* `load_elf_file`（usermode.c）：`elf_load_range` 后强制 `lbase∈用户半区 && lend≤END && 区间≤1MB`
+  否则 -1 —— 畸形 p\_memsz 在映射前钳死。
+* `elf.c`：`elf_map_fn` 改返回 int；`mapfn` 返回非 0 时 `elf_load` 立即中止，不再 memcpy/memset
+  未映射区（规避"部分映射后清 bss 触碰空洞/高位页表帧"的内核态缺页路径）。
+* `app_mapfn` 恒返回 0/非 0（失败即向 `elf_load` 广传）。
+* `heap.c`：`kmalloc` 补页 `need` 计入 `HDR_SIZE`——修"请求恰为 N×4096 时新增块恒差 16B 而
+  分配失败"的功能缺陷（审计 P1）。
+
+**Tests**
+
+* DoS 夹具 `zbig`（84B 畸形 ELF，p\_memsz=96MB）入 initramfs；qemu\_regression / test\_serial
+  `run zbig` 门禁断言 `cannot load 'zbig'`（必 -1）、整机不 [FATAL]。
+* test\_elf 新增 4.11：mapfn 映射失败时 `elf_load` 中止且不写目标区/bss。
+
+**自测实录**
+
+* `make test-host` pass=20 fail=0（test\_elf 39 断言）。
+* `make test-qemu` 全量通过（bigdemo 70KB / cc500 自举 / shell 等合法加载不误伤；`run zbig` 门禁过）。
+* `make test-serial` 通过（`zbig 被 -1 拒绝`）。
+
+Docs：bugs.md 新增 BUG-056；残余 P2（>16MB 元数据帧专用池）另行立项。
+
 ## [v1.4.9] - 2026-09-03 · pf_handler 降级：内核态命中用户半区缺页改杀进程、不再停整机（BUG-055）
 
 > 纵深防御第四道防线收口：`user_ptr_valid`（第一层入口）旁路之后，pf_handler（第四层审计）过去
