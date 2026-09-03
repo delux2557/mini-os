@@ -187,6 +187,9 @@ wait_for "selftest 自检通过"   "\[selftest\] PASS (6 checks)"
 send "run abuse"
 wait_for "abuse 内核指针被拒"  "\[abuse\] print@0x100000 -> 4294967295"
 wait_for "abuse 校验通过"     "\[abuse\] verify OK"
+# ---- BUG-056: 畸形大 p_memsz ELF 必须 -1 拒绝、不得整机 [FATAL] ----
+send "run zbig"
+wait_for "zbig 被 -1 拒绝"    "cannot load 'zbig'"
 
 # 稳定后收尾（让串口缓冲落盘）
 sleep 1

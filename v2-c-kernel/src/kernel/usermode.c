@@ -83,26 +83,27 @@ static void load_frames_free(void) {
  * 段数据由 elf_load 直接写入目标地址空间，不再污染当前（父进程）页目录。
  * 若父进程与子进程链接到同一虚拟地址，旧方案（临时映射进当前页目录）会
  * 覆盖父进程自身映射导致其恢复运行时缺页。 */
-static void app_mapfn(uint32_t vaddr, uint32_t len) {
-    if (load_failed) return;
+static int app_mapfn(uint32_t vaddr, uint32_t len) {
+    if (load_failed) return -1;
     uint32_t start = vaddr & 0xFFFFF000u;
     uint32_t end = (vaddr + len + 0xFFFu) & 0xFFFFF000u;
-    if (start < load_vbase || end > load_vbase + load_region) { load_failed = 1; return; }
+    if (start < load_vbase || end > load_vbase + load_region) { load_failed = 1; return -1; }
     for (uint32_t pg = start; pg < end; pg += 0x1000) {
-        if (load_fcount >= load_maxframes) { load_failed = 1; return; }
+        if (load_fcount >= load_maxframes) { load_failed = 1; return -1; }
         uint32_t phys = frame_alloc();
-        if (!phys) { load_failed = 1; return; }
+        if (!phys) { load_failed = 1; return -1; }
         /* OBS-009：页表帧 OOM（map_page_in 返 -1）→ 释放刚分配的数据帧并中止加载，
          * 否则该页静默未映射、运行到才缺页崩（与 BUG-033 栈生长处理一致）。不把 phys
          * 记入 load_frames，避免 load_elf_file 失败清理时 double free。 */
         if (map_page_in(load_pd, pg, phys, 0x7) != 0) {
             frame_free(phys);
             load_failed = 1;
-            return;
+            return -1;
         }
         load_frames[load_fcount] = phys;
         load_fcount++;
     }
+    return 0;
 }
 
 /* 从文件系统读取 ELF 并加载到指定区域，成功返回 0 并把入口写入 *entry */
@@ -121,6 +122,10 @@ static int load_elf_file(const char *name, uint32_t vbase, uint32_t *entry) {
      * 注意 ELF 头页在 -Ttext 地址的前一页，region 必须含它，否则 mapfn 拒绝、拷贝缺页。 */
     uint32_t lbase, lend;
     if (elf_load_range(buf, sz, &lbase, &lend) != 0) { kfree(buf); return -1; }
+    /* BUG-056/审计：钳制加载区间。p_memsz 由文件头声称、与文件大小脱钩，畸形值会让
+     * mapfn 单次申请巨大映射（拖死/耗尽帧）。强制：区间≤1MB 且整体落在用户半区。 */
+    if (lbase < USER_SPACE_BASE || lend > USER_SPACE_END ||
+        lend - lbase > APP_ELF_MAXSIZE) { kfree(buf); return -1; }
     load_vbase = lbase;
     load_region = lend - lbase;
     load_maxframes = load_region / 0x1000u;
