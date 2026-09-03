@@ -58,6 +58,12 @@ jobs:
         run: make test-tcp-attack
         working-directory: v2-c-kernel
 
+      # BUG-052 稳定性回归（K1 串口原子化 + 判据加固的显性回归）：test-tr 连跑 TR_STA_RUNS=3 次 0 假红。
+      # 挂在非 required 的 regression-rr（不绑定 main 门禁）；慢（3×QEMU 冷启），故不并入 make test。
+      - name: RR 判据稳定性回归（test-tr ×3 零假红）
+        run: make test-tr-stable TR_STA_RUNS=3
+        working-directory: v2-c-kernel
+
       - name: 失败上传构建日志
         if: failure()
         uses: actions/upload-artifact@v4
