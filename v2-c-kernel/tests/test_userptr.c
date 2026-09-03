@@ -9,9 +9,17 @@
 #include <stdint.h>
 
 /* @修复 stub：sycall 预检后 is_mapped 引入 mem.o 内核依赖，宿主单测无法链接；
- * 这里提供"全映射"可判定假实现，保持拒绝路径（在触碰内存前返 -1）断言不变。
+ * 这里提供"假页表"可判定实现：用户半区仅低区 [0x80000000,0x80100000) 与末页
+ * 0x80FFF000"已映射"，其余为空洞页 —— 用于宿主单测验证 user_ptr_valid 的
+ * "区间 + 逐页映射"双重预检（空洞页拒绝在触碰内存前返回 0，不会段错误）。
  * 真实页表预检由 abuse/其它 QEMU 回归覆盖。 */
-int is_mapped(uint32_t virt) { (void)virt; return 1; }
+static int fake_mapped(uint32_t virt) {
+    uint32_t a = virt & ~0xFFFu;
+    if (a >= 0x80000000u && a < 0x80100000u) return 1;   /* 低区 app/栈/brk */
+    if (a == 0x80FFF000u) return 1;                       /* 用户空间末页 */
+    return 0;                                             /* 其余空洞 */
+}
+int is_mapped(uint32_t virt) { return fake_mapped(virt); }
 
 int main(void) {
     /* user_ptr_valid：纯逻辑边界 */
@@ -27,6 +35,15 @@ int main(void) {
     CHECK(user_ptr_valid((void *)0xFFFFFFFFu, 1) == 0);            /* 高地址回绕 */
     CHECK(user_ptr_valid((void *)0xFFFFFFFFu, 4) == 0);
 
+    /* user_ptr_valid：区间内逐页映射预检（假页表：空洞页拒绝） */
+    CHECK(user_ptr_valid((void *)0x80500000u, 8) == 0);            /* 区间内空洞页 */
+    CHECK(user_ptr_valid((void *)0x80100000u, 4) == 0);            /* 已映射区上界(空洞) */
+    CHECK(user_ptr_valid((void *)0x800FFFF0u, 32) == 0);           /* 跨页：进 0x80100000 空洞 */
+    CHECK(user_ptr_valid((void *)0x80000000u, 0x2000) == 1);       /* 连续两已映射页 */
+    CHECK(user_ptr_valid((void *)0x80FFF000u, 4) == 1);            /* 用户空间末页 */
+    /* len=0 跳过映射循环（不要求目标已映射） */
+    CHECK(user_ptr_valid((void *)0x80500000u, 0) == 1);
+
     /* copyin / copyout：拒绝路径（在触碰内存前返回 -1） */
     char kern[16];
     CHECK(copyin((void *)0x7FFFFFFFu, kern, 4) == -1);
@@ -34,6 +51,8 @@ int main(void) {
     CHECK(copyin((void *)0xFFFFFFFFu, kern, 4) == -1);
     CHECK(copyout(kern, (void *)0x7FFFFFFFu, 4) == -1);
     CHECK(copyout(kern, (void *)0xFFFFFFFFu, 4) == -1);
+    CHECK(copyin((void *)0x80500000u, kern, 4) == -1);             /* 空洞页拒绝 */
+    CHECK(copyout(kern, (void *)0x80500000u, 4) == -1);            /* 空洞页拒绝 */
 
     /* copyin_str：拒绝路径 */
     char dst[16];

@@ -1,33 +1,32 @@
 /* mini-os/v2-c-kernel/src/userptr.c
  * 用户指针安全访问实现（v0.17）：syscall 边界校验。
  * 校验通过后内核直接读/写用户内存（当前 CR3 即用户页目录，用户半区已映射）。
+ * v0.17 修复：预检从"纯区间"升级为"区间 + 逐页已映射"，见 user_ptr_valid 注释。
  */
 #include "userptr.h"
-#include "mem.h"   /* 修复：is_mapped() 逐页预检，封堵"区间内空洞页"整机宕机 */
+#include "mem.h"   /* is_mapped() 逐页预检，封堵"区间内空洞页"整机宕机 */
 
+/* 校验 [p, p+len) 全部落在用户空间(无回绕)，且覆盖的每一页均已映射。
+ * 用户半区 [BASE,END) 绝大多数页是空洞：逐页预检让 syscall 在触碰前返回 0，
+ * 避免内核态读未映射页 -> 懒分配区外 -> pf_handler 落到 [FATAL] cli;hlt 整机停机
+ * （单用户进程即可 DoS 整个内核）。
+ * 前提：本内核 syscall 期间不替换页表，mem_current_pd() 即目标进程页目录，
+ * 检查后不会变化（无 TOCTOU）；len 可为 0（空指针需单独判定）。 */
 int user_ptr_valid(const void *p, uint32_t len) {
     uint32_t a = (uint32_t)p;
     if (a < USER_SPACE_BASE) return 0;                 /* 指向内核低地址，拒绝 */
     if (a > USER_SPACE_END) return 0;                  /* 超过上限（防下方减法回绕） */
     if (len > USER_SPACE_END - a) return 0;            /* 区间越界 / 长度回绕 */
-    return 1;
-}
-
-/* 校验 [s, s+len) 覆盖的每一页均已映射。用户半区 [BASE,END) 绝大多数页是空洞：
- * 预检让 syscall 在触碰前返回 -1，避免内核态读未映射页 -> 懒分配区外 ->
- * pf_handler 落到 [FATAL] cli;hlt 整机停机（单用户进程即可 DoS 整个内核）。
- * 前提：已由 user_ptr_valid 保证区间在用户空间且无回绕；本内核 syscall 期间
- * 不替换页表，mem_current_pd() 即目标进程页目录，检查后不会变化（无 TOCTOU）。 */
-static int region_mapped_pages(uint32_t s, uint32_t len) {
-    uint32_t end = s + len;
-    for (uint32_t pg = s; pg < end; pg = (pg & ~0xFFFu) + 0x1000u)
-        if (!is_mapped(pg)) return 0;
+    if (len) {
+        uint32_t end = a + len;
+        for (uint32_t pg = a & ~0xFFFu; pg < end; pg = (pg & ~0xFFFu) + 0x1000u)
+            if (!is_mapped(pg)) return 0;              /* 命中空洞页：拒绝 */
+    }
     return 1;
 }
 
 int copyin(const void *user_src, void *kern_dst, uint32_t len) {
-    if (!user_ptr_valid(user_src, len)) return -1;
-    if (!region_mapped_pages((uint32_t)user_src, len)) return -1;
+    if (!user_ptr_valid(user_src, len)) return -1;     /* 区间 + 逐页映射预检 */
     const uint8_t *s = (const uint8_t *)user_src;
     uint8_t *d = (uint8_t *)kern_dst;
     while (len--) *d++ = *s++;
@@ -35,8 +34,7 @@ int copyin(const void *user_src, void *kern_dst, uint32_t len) {
 }
 
 int copyout(const void *kern_src, void *user_dst, uint32_t len) {
-    if (!user_ptr_valid(user_dst, len)) return -1;
-    if (!region_mapped_pages((uint32_t)user_dst, len)) return -1;
+    if (!user_ptr_valid(user_dst, len)) return -1;     /* 区间 + 逐页映射预检 */
     const uint8_t *s = (const uint8_t *)kern_src;
     uint8_t *d = (uint8_t *)user_dst;
     while (len--) *d++ = *s++;

@@ -1270,18 +1270,27 @@
   纯区间逻辑、不涉页表。QEMU 复现：`sys_print(0x80500000)` → `[FATAL] page fault @80500000
   err=0`（err P 位=0 确为未映射页；eip 为内核态地址）。
 
-* **修复**：
+* **修复**（两轮，最终收敛到单一检查点）：逐页 `is_mapped()` 预检上移到
+  `user_ptr_valid()` —— 区间/回绕判定通过后再逐页确认已映射，未映射即返 0，syscall
+  在触碰前即 -1 返回：
 
-  * `copyin`/`copyout`：新增 `region_mapped_pages()` 逐页 `is_mapped()` 预检，未映射即返 -1；
-  * `copyin_str`：逐字节且长度未知（到 NUL 为止），改为**跨页处**检查映射，覆盖"空洞页无
-    NUL 越过"路径；
-  * fs/net 的 iov 走 `copyin`/`copyout`，一并封堵；
-  * 宿主单测 [test_userptr.c](../../v2-c-kernel/tests/test_userptr.c) 补 `is_mapped` stub
-    （真实页表预检由 QEMU 回归覆盖）。
+  * 第一轮（PR #53）只在 `copyin`/`copyout`/`copyin_str` 三个 helper 上预检，**漏掉** 6 处
+    仅调 `user_ptr_valid`(纯区间)就直接解引用的 syscall：`fs_write(15)`/`fs_read(16)`/
+    `readline(20)`/`wait status(22)`/`exec argv(25)`/`recvfrom iov.buf(32)`。"fs 的 iov
+    走 copyin 一并封堵"对 fs **不成立**——`fs_write(fd, 空洞,8)`、`fs_read(fd, 空洞,8)`、
+    `fs_write(fd, 合法buf, 32768)` 三条仍会整机 [FATAL]（外部 A/B 的 V5/V6/V7 反证）。
+  * 本轮把映射预检并入 `user_ptr_valid()` 单一收敛点，上述 6 处直接解引用 syscall 与
+    `copyin`/`copyout` 全部受益（fs_write/read/exec 均在切页表/阻塞前于当前地址空间预检，
+    无 TOCTOU）；`copyin`/`copyout` 删除重复的本地逐页 helper；`copyin_str` 保留跨页检查
+    （`last_pg` 初值 -1 使首字节即查起始页，正确覆盖非页对齐起点）。
+  * 宿主单测 [test_userptr.c](../../v2-c-kernel/tests/test_userptr.c) 的 `is_mapped` stub
+    升级为"假页表"（仅低区 + 末页映射），新增空洞页/跨页界/末页拒绝断言，直接覆盖新预检路径。
 
 * **回归**：QEMU 实测修复后 `sys_print(0x80500000)` 返 -1、abuse 全部边界用例 `(rejected)`
   + `[abuse] verify OK`、进程正常退出、整机存活；`make test-host` pass=20 fail=0；
-  [abuse.c](../../v2-c-kernel/src/app/abuse.c) 新增"空洞页 0x80500000"门禁用例，被
+  [abuse.c](../../v2-c-kernel/src/app/abuse.c) 新增门禁用例：`print@0x80500000`、
+  `write buf@hole 0x80500000`、`read buf@hole 0x80500000`、`write buf@valid huge len=32768`
+  （后三条对应 V5/V6/V7，任何一条再漏都会整机 [FATAL] 使 verify OK 不到），被
   qemu\_regression / test\_serial / rp\_torture 三门禁自动覆盖（一旦回归即整机宕、verify OK
   不到 → CI 判红）。
 
