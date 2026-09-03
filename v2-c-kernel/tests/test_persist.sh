@@ -5,14 +5,15 @@
 #   第 2 次：挂载同一镜像重启 -> ls / 应见 persist/（用户数据跨重启存活）
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 # v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失
 for c in qemu-system-i386; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
 
-IMG="build/persist.img"
-TIN="build/persist_in.fifo"
-TOUT="build/persist_out.fifo"
+IMG="$BUILD/persist.img"
+TIN="$BUILD/persist_in.fifo"
+TOUT="$BUILD/persist_out.fifo"
 FAIL=0
 QPID=""; CAT_PID=""
 
@@ -39,7 +40,7 @@ boot() {   # boot <日志>：启动 QEMU（-hda 共享磁盘镜像），返回�
     rm -f "$log" "$TIN" "$TOUT"
     mkfifo "$TIN" "$TOUT"
     (cat "$TOUT" > "$log") & CAT_PID=$!
-    qemu-system-i386 -kernel build/kernel.elf -hda "$IMG" -display none -vga std \
+    qemu-system-i386 -kernel "$BUILD/kernel.elf" -hda "$IMG" -display none -vga std \
         -no-reboot -no-shutdown -m 64 -serial stdio -monitor none \
         < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!
@@ -56,7 +57,7 @@ shutdown() {
 send() { printf '%s\n' "$1" >&9; sleep 0.3; }
 
 echo "== [1/4] 构建内核 =="
-make >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
+make BUILD="$BUILD" >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
 echo "      构建完成"
 
 echo "== [2/4] 生成 1MB 空白磁盘镜像 =="
@@ -64,7 +65,7 @@ dd if=/dev/zero of="$IMG" bs=1024 count=1024 2>/dev/null
 echo "      镜像: $(stat -c%s "$IMG") bytes"
 
 echo "== [3/4] 第 1 次运行：格式化 + 建目录 + save =="
-LOG1="build/persist1.log"
+LOG1="$BUILD/persist1.log"
 boot "$LOG1"
 wait_for "$LOG1" "shell 提示符"        "mini-os\$ " 20
 wait_for "$LOG1" "ATA 探测到磁盘"      "\[ata\] IDE disk:"
@@ -85,7 +86,7 @@ wait_for "$LOG1" "shell 退出"          "bye"
 shutdown
 
 echo "== [4/4] 第 2 次运行：重启挂载同一镜像，校验数据仍在 =="
-LOG2="build/persist2.log"
+LOG2="$BUILD/persist2.log"
 boot "$LOG2"
 wait_for "$LOG2" "重启挂载持久盘"      "persistent FS mounted"
 wait_for "$LOG2" "shell 提示符"        "mini-os\$ " 20
