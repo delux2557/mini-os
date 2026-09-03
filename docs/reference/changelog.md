@@ -3,6 +3,38 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.9] - 2026-09-03 · pf_handler 降级：内核态命中用户半区缺页改杀进程、不再停整机（BUG-055）
+
+> 纵深防御第四道防线收口：`user_ptr_valid`（第一层入口）旁路之后，pf_handler（第四层审计）过去
+> 仍以 `cli;hlt` 整机停机兜底。把"内核态访问用户半区未映射页"从 `[FATAL] 停机`降级为
+> `sched_kill(current) 杀进程`，兑现"最坏只能是杀进程"的铁律（任何单一用户程序的错误绝不
+> 触发整机宕机）。已实测：模拟 syscall 绕过收敛点时，缺页由 `[FATAL] 停机` 变为 `[kern] kill`，
+> 整机心跳持续。
+
+**Fixed**
+
+* `src/mm/mem.c` 的 `pf_handler`：CPL=0 且 fault ∈ 用户半区 `[USER_SPACE_BASE, USER_SPACE_END)` 时，
+  由末尾 `[FATAL] cli;hlt` 改为 `sched_kill(current)` 降级杀进程（与 CPL=3 用户越界路径同构）。
+  - **不影响栈按需生长**：STACK_GROWTH 在 CPL=3 分支先行处理，新分支在 CPL=0 路径，其后执行；
+  - **不影响懒分配**：懒区 `[0x40000000,0x41000000)` 在用户半区判定之外；
+  - 仅"用户半区"例外降级，其余内核 bug 级缺页仍停机以便诊断。
+
+**Tests**
+
+* [abuse.c](../../v2-c-kernel/src/app/abuse.c) 新增两门禁：
+  - **C1** `print@MMIO 0xFEB00000`：设备 MMIO 恒在用户上界之外，必被区间拒绝——布局不变量护栏；
+  - **C2** `write deepcopy len=65536`：合法地址 + 64KB，预期绝不 `[FATAL]`，非全映射即逐页拒绝 / 全映射则流式搬运。
+* qemu\_regression / test\_serial / rp\_torture 仍以 `[abuse] verify OK` 为哨兵，任一门禁漏放即判红。
+
+**自测实录**
+
+* 真实修复下：C1/C2 与 V5/V6/V7 全 `(rejected)`、`[abuse] verify OK`；`make test-host` pass=20 fail=0；
+  `make test-qemu` 全量通过（含 stackovf/STACK\_GROWTH 演示路径不误伤）。
+* 降级自验（临时跳过 fs\_write 预检模拟盲区）：`[kern] PF user-half @80500000 … -> kill pid=5`、
+  `FATAL=0`、tick 心跳持续 → 整机存活。
+
+Docs：bugs.md 新增 BUG-055；design.md 校验层/审计段见 BUG-054 表述，pf\_handler 降级语义见 BUG-055。
+
 ## [v1.4.8] - 2026-09-03 · syscall 用户指针校验上移单一收敛点 user_ptr_valid（BUG-054 二轮）
 
 > 把"区间内空洞页"的逐页 `is_mapped()` 预检，从 copyin/copyout/copyin_str 三个 helper
