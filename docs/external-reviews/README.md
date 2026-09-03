@@ -20,6 +20,11 @@
 | F-6 | — | **OBS-004** | writefile 128B 行截断 | 限速不修 | F-3 修复后已非崩溃引信，仅教学限制 |
 | 评审残留 | — | **OBS-003** | netsock send/recv 无进程归属 | 威胁模型声明 | close 已隔离（BUG-038），send/recv 保持共享语义 |
 | F1–F6 | v1.4.8(#28) | （工具链/测试基建，待立项为修补 PR） | RR 地基：回放/录制无输入背压(P1)、HTTP_PORT 不贯穿、golden 无窗口、网络流无格式 | 见 `mini-os-rr-handoff-for-dev_bd2f598a.md` | 仅登记核实与处置，代码修复另拆 PR 后再补 commit |
+| OBS-MM-1 | v1.5 | （观察/加固，非 bug） | 内核集中式堆只增不还帧池；kmalloc 依赖连续帧竞争帧池 | 见 `mini-os-mm-subsystem-deep-audit_d3b0c68.md` | P3，教学定位可推迟 |
+| OBS-MM-2 | v1.5 | （观察/加固，非 bug） | frame_alloc O(nframes) 首次适配未声明复杂度假设 | 同上 | P3 |
+| OBS-MM-3 | v1.5 | （hygiene，非 bug） | mem_init 位图清零到 nframes/8 字节边界 | 同上 | P3 |
+| OBS-MM-4 | v1.5 | （观察，非 bug） | ZOMBIE 延迟持有的页目录/页表帧直到 reap | 同上 | P2 |
+| OBS-MM-5 | v1.5 | （重构建议，非 bug） | 每进程资源配额散落定义，应收敛为 resource_t | 同上 | P2，呼应架构总览 |
 
 ## 非独立 bug 的演进记录
 
