@@ -69,6 +69,25 @@ hrun t_lt 'int main(){int i;i=0;while(i<3){i=i+1;}return 0;}' 0 'compiled OK' ''
 hrun t_gt 'int main(){int i;i=9;while(i>3){i=i-1;}return 0;}' 0 'compiled OK' ''
 hrun t_ge 'int main(){int i;i=3;while(i>=3){i=i-1;}return 0;}' 0 'compiled OK' ''
 hrun t_le 'int main(){int i;i=0;while(i<=3){i=i+1;}return 0;}' 0 'compiled OK' ''
+# OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
+# 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
+# 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
+python3 - "$VD/deep.c" <<'PY'
+import sys
+N = 640                              # > CC_DEPTH_MAX(512)，保证触发护栏
+with open(sys.argv[1], 'w') as f:
+    f.write('void f(){')
+    f.write('{' * N)
+    f.write('0;')
+    f.write('}' * N)
+    f.write('}\n')
+PY
+dout=$(timeout 15 "${RUN[@]}" "$VD/deep.c" "$VD/deep.elf" 2>&1); drc=$?
+if [ "$drc" = 1 ] && echo "$dout" | grep -q 'cc500: error' && ! echo "$dout" | grep -q 'compiled OK'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 OBS-CC-1 护栏拒绝深嵌套 (rc=$drc)"
+else
+    echo "[FAIL] 宿主 OBS-CC-1 rc=$drc"; echo "$dout" | sed 's/^/        /'; HOST_FAIL=$((HOST_FAIL+1))
+fi
 # F-1：新增关系运算机器码编码锁定（setl=0f 9c，确认操作数序 != 照抄）—— 若符号缺失/错编码则该断言红
 LT_PAT='0f 9c'
 if objdump -D -b binary -m i386 "$VD/t_lt.elf" 2>/dev/null | grep -q "$LT_PAT"; then
