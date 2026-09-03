@@ -42,7 +42,7 @@
   执行 `cli; hlt` —— 关中断并停机，从此再也没有任何中断能唤醒 CPU。
 
 * **修复**：该返回路径改为**正常返回**，让 `iret` 回到 idle 循环
-  继续刷新状态并再次 `hlt` 等待心跳（见 [src/sched.c](v2-c-kernel/src/sched.c) 中 `sched_tick`/`sched_yield`）。
+  继续刷新状态并再次 `hlt` 等待心跳（见 [src/kernel/sched.c](../../v2-c-kernel/src/kernel/sched.c) 中 `sched_tick`/`sched_yield`）。
 
 * **回归**：QEMU 回归中"idle 状态行心跳"与"定时器心跳正常"由失败转通过；
   串口日志可见 100Hz 心跳持续、内存稳定无泄漏。
@@ -60,7 +60,7 @@
   符号变成 `_binary_build_userprog_bin_start`，与内核代码引用的旧名不符。
 
 * **修复**：Makefile 中 `cd build && objcopy ... userprog.bin`，以纯文件名转换，
-  保持符号名 `_binary_userprog_bin_start` 稳定（见 [Makefile](v2-c-kernel/Makefile)）。
+  保持符号名 `_binary_userprog_bin_start` 稳定（见 [Makefile](../../v2-c-kernel/Makefile)）。
 
 * **回归**：`make clean && make test` 全绿。
 
@@ -1073,7 +1073,7 @@
   （宿主 hostcc 挂起、`timeout` 返回 124；guest ccrun 无响应）。畸形输入 fuzz 500 例命中
   **12 个 TIMEOUT，全部含未闭合** **`/*`**，且无 segfault/越界崩溃（崩溃健壮性尚可，唯死循环）。
 
-* **根因**：[cc500.c L128-139](v2-c-kernel/tools/cc500/cc500.c) `get_token` 块注释循环
+* **根因**：[cc500.c L128-139](../../v2-c-kernel/tools/cc500/cc500.c) `get_token` 块注释循环
   `while (nextc != '/') { while (nextc != '*') nextc = getchar(); nextc = getchar(); }`
   **无 EOF 守卫**。`getchar()` 到 EOF 恒返回 `-1`，而 `-1 != '*'`(42) 恒真 → 内层死循环。
   这是 F-3（未闭合字符串，L106-114 已加 `nextc==0-1` 守卫）的**同款 bug**，但块注释路径漏修。
@@ -1098,10 +1098,10 @@
 
 * **根因（两层叠加）**：
 
-  1. [cc500.c L97-99](v2-c-kernel/tools/cc500/cc500.c) `get_token` 把**字母/数字/下划线吃成同一
+  1. [cc500.c L97-99](../../v2-c-kernel/tools/cc500/cc500.c) `get_token` 把**字母/数字/下划线吃成同一
      个 token**（循环条件含 `('0'<=nextc&nextc<='9')` 与 `('a'<=nextc&nextc<='z')`），故 `0x10` 是
      "一个 token"；
-  2. [cc500.c L407-413](v2-c-kernel/tools/cc500/cc500.c) `primary_expr` 数字解析只校验 `token[0]`
+  2. [cc500.c L407-413](../../v2-c-kernel/tools/cc500/cc500.c) `primary_expr` 数字解析只校验 `token[0]`
      是数字就进 `while(token[i]) n=n*10+token[i]-'0'`，**不校验后续字符全为数字** → `'x'` 被当数码。
      "垃圾进、静默错出"，比"干净报错拒绝"危害更大（学员难归因）。
 
@@ -1130,7 +1130,7 @@
   1. 宿主转发器（`tcp_proxy.py` UDP 模式）不回串口通道那样 `SLIP_CAP=500 + 20ms` 节拍，而是
      `CHUNK=1392` 全速下行；8192B 响应经 `recv(4096)` 边界切成 **7×MSG\_DATA + 1×MSG\_CLOSED
      \= 8 个数据报**一次性涌入 guest；
-  2. [netsock.c](v2-c-kernel/src/net/netsock.c) `netsock_drain` 用 `for(;;)` **全量排空 e1000 环**，
+  2. [netsock.c](../../v2-c-kernel/src/net/netsock.c) `netsock_drain` 用 `for(;;)` **全量排空 e1000 环**，
      把 8 个数据报一口气 `dispatch_frame` 进本地 socket 环（`NET_RXQ=8` 有效容量 7），第 8 个
      （恰为末位 `MSG_CLOSED`）在 `next==rx_head` 处被**队列满丢帧**；
   3. `MSG_DATA` 可牺牲（有 `ev_overflow` 观测），但 `MSG_CLOSED` 是控制事件绝不可丢——丢了即
@@ -1161,7 +1161,7 @@
   `[shell] 'nosuchprog[sched] sleep pid=1 10 ticks (wake@466)' exited code=1`
   另一现场（edge 攻击会话）命令回显被切开：`n /u.c /u.[sched] wake pid=1 at tick=...`
 
-* **根因**：[serial.c L56-L97](v2-c-kernel/src/drv/serial.c) `serial_puts`/`serial_printf` 逐字符
+* **根因**：[serial.c L56-L97](../../v2-c-kernel/src/drv/serial.c) `serial_puts`/`serial_printf` 逐字符
   `serial_putc`，**整行无 IRQ 原子性**——写一半可被定时器 IRQ 抢占，另一上下文再写即把行撕开。
   单 CPU 内核里"谁先写 UART"由中断抢占决定，非确定性。
 
@@ -1195,7 +1195,7 @@
 * **根因（两层叠加）**：
 
   1. 底层：K1（BUG-051）——golden 捕获对"并发日志"本就非确定性撕裂；
-  2. 判据层：[test\_transcript.sh 复现性步](v2-c-kernel/tests/test_transcript.sh) 与 rp\_torture 靠
+  2. 判据层：[test\_transcript.sh 复现性步](../../v2-c-kernel/tests/test_transcript.sh) 与 rp\_torture 靠
      `pick()`/`func()` 的"行级干净输出"用全日志 grep，**未统一走** **`tr_mark ready`** **窗口归一化**
      （即交接单 F4 的"窗口锚"），boot auto-demo/命令回显混排即污染判据。
 
@@ -1224,13 +1224,13 @@
 * **版本**：当前 main @ 9711cbc · 独立测评 2026-09-03 复核
 
 * **现象**：`build/transcripts`（TR\_BASE 默认）与各 harness 的 `TR_LOG` 均住在 `build/` 内；
-  `make clean`（[Makefile L278](v2-c-kernel/Makefile)）`rm -rf $(BUILD)/`。任一并发重负荷 harness
+  `make clean`（[Makefile L278](../../v2-c-kernel/Makefile)）`rm -rf $(BUILD)/`。任一并发重负荷 harness
   （test-tcp-attack 的 `make clean && make TCP_DEMO=1`、test-slip 等）都会**抹掉另一并发 harness
   的存活** **`build/transcripts/<runid>/`** **与串口日志现场** → 假 ack 超时 / 金标丢失 / 现场被删。
 
 * **根因**：测试基建的构建/录制产物目录全局共享，无 per-harness 隔离；并发即竞态。
 
-* **修复（本次，使能层）**：[Makefile](v2-c-kernel/Makefile) `BUILD` 由 `= build` 改为 `?= build`
+* **修复（本次，使能层）**：[Makefile](../../v2-c-kernel/Makefile) `BUILD` 由 `= build` 改为 `?= build`
   （可覆盖），并将 `CFLAGS -Ibuild`、`clean: rm -rf build tests/build` 统一改指 `$(BUILD)`。
   验证：`make BUILD=build-tmp` 产出 `build-tmp/kernel.elf`，`make BUILD=build-tmp clean` 完整清除。
 
@@ -1266,7 +1266,7 @@
 | OBS-003（=评审残留）                | netsock send/recv 无进程归属（`netsock_sendto`/`recvfrom` 不校验调用者是否为该 socket 的打开者）                                                                                                                                                  | 现设计语义：单用户教学 OS 将网络 socket 视为进程共享资源。close 已做归属隔离（BUG-038），send/recv 保持共享；威胁模型声明之，需强化时再列缺陷                                                                                                                                                |
 | OBS-004（=F-6）                 | `writefile` 整行 128B 截断（shell/kb 行缓冲容量）——超长源码被截断                                                                                                                                                                              | F-3 修复前是未闭合字符串崩溃引信；F-3 修复后仅为教学限制（单行 ≤128B）。**✅ 已缓解（v1.4）**：`writefile <<DELIM <path>` heredoc 多行写入，逐行收集直至独立 DELIM 行，任意行数拼接，绕开单行截断；每行仍 ≤128B、单位逻辑行不允超（键盘单行物理上限），大程序经 heredoc 一次写入。验证：test\_serial heredoc 用例（>128B 多行源码 ccrun 编译运行 PASS） |
 | OBS-005（压测 2026-09-01）        | `qemu-i386` 直跑 cc500 编译产物 ELF 退不出真实退出码（产物假设 mini-os 整机 int 0x80 契约，无内核支持）——`int main(){int a;a=1+2;return a;}` 宿主直跑一律返 1，一度误报为"变量返回算错"                                                                                       | **语义验证必须走整机 ccboot 内核 ccrun**，宿主仅可信"编译 rc 0/1"（畸形 fuzz 3000 例即只测编译阶段）。整机证实 `a=1+2;return a` 实返 3，算法无误，非缺陷                                                                                                                               |
-| OBS-006（压测 2026-09-01）        | ccrun 判定 `code==0 ? PASS : FAIL`（[shell.c](v2-c-kernel/src/app/shell.c) L473 非 0 一律 FAIL，`main{return 0}` 视为成功）                                                                                                              | 验证"某个正确的非零值"不能靠 `return 该值`（必被标 FAIL）；应程序内部 `if(x==期望)return 0;return 1;`。已据此把 test-cc500 guest 层扩为 `a=1+2;a==3` 整机真值断言，顺带覆盖 `==`（此前 guest 层只测 `<`）                                                                                     |
+| OBS-006（压测 2026-09-01）        | ccrun 判定 `code==0 ? PASS : FAIL`（[shell.c](../../v2-c-kernel/src/app/shell.c) L473 非 0 一律 FAIL，`main{return 0}` 视为成功）                                                                                                              | 验证"某个正确的非零值"不能靠 `return 该值`（必被标 FAIL）；应程序内部 `if(x==期望)return 0;return 1;`。已据此把 test-cc500 guest 层扩为 `a=1+2;a==3` 整机真值断言，顺带覆盖 `==`（此前 guest 层只测 `<`）                                                                                     |
 | OBS-007（虚拟 TCP 压测 2026-09-01） | 恶意下行事件（未知 sid 的 CLOSED/ERROR/TIMEOUT/OPENED + 非法 mtype + 错版本号 + 保留位非 0 + 超大 MSG\_DATA 1392B + 过短头 0..7B + 随机字节）**并行 10s × \~900pkt/s 注入**，合法 HTTP 8KB+TAIL 仍 `RESULT PASS closed=1 tail=TAIL refuse=-1`，内核无 OOP/PANIC/TRIPLE | 验证 BUG-050（netsock 单帧泵取背压 e1000 环）和会话解析器 `conn_by_session(sid)==NULL` 的"无副作用 drop"——4209 脏数据报没混进合法连接，也没撑爆 NET\_RXQ。固化为 `tests/test_tcp_attack.sh + tests/tcp_attack.py`，注入面=转发器 UDP 监听口（与 test-tcp 同入口，可 CI 直接跑）                        |
 | OBS-008（协议 压测 2026-09-01）     | 宿主层解析器（IP / UDP / ICMP / DHCP / SLIP / 虚拟 TCP 会话头）**ASan+UBSan 150w 轮 fuzz = 1200w 次 parse 调用**，无崩溃/越界/UB（19 项宿主单测 0 fail）                                                                                                   | 解析器加固到位，1200w 调用未暴露新协议漏洞。ASan+UBSan 清洁是业界回归基线；保留 `tests/fuzz_parse.c` + `run_host_tests.sh`，`FUZZ_ITERS=1500000` CI 可直接跑。                                                                                                               |
 
