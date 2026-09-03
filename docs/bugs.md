@@ -1234,10 +1234,17 @@
   （可覆盖），并将 `CFLAGS -Ibuild`、`clean: rm -rf build tests/build` 统一改指 `$(BUILD)`。
   验证：`make BUILD=build-tmp` 产出 `build-tmp/kernel.elf`，`make BUILD=build-tmp clean` 完整清除。
 
-* **残留（全量隔离 wiring，待跟进）**：`tests/*.sh` 内的 `build/`（kernel.elf、transcripts、各
-  `*.log`/`*.fifo`/`*.pcap`）仍为字面路径。完整并发隔离需每重负荷 harness 各自 `make BUILD=<私有>`+
-  `TR_BASE=<私有>`（TR\_BASE 本就 env 可覆盖），或对并发 suite 用 `make -j1` 串行 gate。此 wiring
-  涉及多脚本机械改动，排期在 K1/BUG-052 回归后、由实际并发编排需求驱动时落地。
+* **已收口（全量隔离 wiring 完成）**：新增共享接线原语 `tests/_build_env.sh`——缺省 `BUILD=build`、
+  自动 `mkdir -p $BUILD`；所有 QEMU/shell/宿主测试脚本在其 `cd ..` 后立即 `source` 该原语，字面
+  `build/xxx` 一律改为 `$BUILD/xxx`。覆盖范围：16 个主脚本（qemu_regression / repro_bugs /
+  rp_torture / replay / test_transcript / test_replay / test_net / test_socket / test_tcp /
+  test_tcp_attack / test_tcp_dl / test_persist / test_determinism / test_serial / test_slip_net /
+  test_cc500 / run_host_tests，经 grep 核实全部 source `tests/_build_env.sh`；transcript.sh 库经
+  `${BUILD:-build}` 兜底）全量接入。
+  使用方式：`make BUILD=<私有目录>` 或 `BUILD=<私有目录> bash tests/xxx.sh`；`TR_BASE` 缺省
+  `${BUILD:-build}/transcripts`，随隔离目录各自独立。
+  验证：`make BUILD=build-tmp` 产出 `build-tmp/kernel.elf`，produce/日志/fifo 全落 `build-tmp/`，
+  `make BUILD=build-tmp clean` 完整清除且不触碰默认 `build/`；并发 harness 各用独立 BUILD 互不污染。
 
 ***
 

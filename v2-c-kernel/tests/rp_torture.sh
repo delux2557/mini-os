@@ -4,7 +4,7 @@
 #   A) 确定性差分 : 两次 `-icount` 冷启跑同一高维命令集, 比对 out.tr 逐字节(掩掉已知 demo tick 行)
 #   B) 压力/边界扫描: 同一声明集里故意掺入 syscall 边界/不存在对象/深嵌套, 扫内核致命标记
 #   C) 现场复原 : transcript(in.tr/out.tr) + tr2sqlite 检索; 差分不一致处即"复现现场"
-# 用法: bash tests/rp_torture.sh [out-brain-base=build/torture]
+# 用法: bash tests/rp_torture.sh [out-brain-base=$BUILD/torture]
 set -u
 cd "$(dirname "$0")/.." || exit 1
 source tests/_build_env.sh

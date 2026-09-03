@@ -34,12 +34,14 @@ cleanup() {
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
     [ -n "$HTTP_PID" ] && kill "$HTTP_PID" 2>/dev/null || true
     # v1.1 收尾2（CI 现场取证）：restore_kernel 的 make clean 会清空 $BUILD/，
-    # 先把两通道日志转存到 build-logs/（在 v2-c-kernel/ 下、不被 make clean 清除）
-    mkdir -p build-logs 2>/dev/null
-    [ -s "$BUILD/tcp_a.log" ]       && cp "$BUILD/tcp_a.log"       build-logs/ 2>/dev/null || true
-    [ -s "$BUILD/tcp_b.log" ]       && cp "$BUILD/tcp_b.log"       build-logs/ 2>/dev/null || true
-    [ -s "$BUILD/tcp_proxy_a.log" ] && cp "$BUILD/tcp_proxy_a.log" build-logs/ 2>/dev/null || true
-    [ -s "$BUILD/tcp_proxy_b.log" ] && cp "$BUILD/tcp_proxy_b.log" build-logs/ 2>/dev/null || true
+    # 先把两通道日志转存到取证目录 ${BUILD}-logs/（S-3：随 BUILD 名字隔离，并发 harness
+    # 各落各自取证目录，互不覆盖；且不被 `make BUILD=$BUILD clean` 清除，保留现场）
+    local logdir="${BUILD}-logs"
+    mkdir -p "$logdir" 2>/dev/null
+    [ -s "$BUILD/tcp_a.log" ]       && cp "$BUILD/tcp_a.log"       "$logdir/" 2>/dev/null || true
+    [ -s "$BUILD/tcp_b.log" ]       && cp "$BUILD/tcp_b.log"       "$logdir/" 2>/dev/null || true
+    [ -s "$BUILD/tcp_proxy_a.log" ] && cp "$BUILD/tcp_proxy_a.log" "$logdir/" 2>/dev/null || true
+    [ -s "$BUILD/tcp_proxy_b.log" ] && cp "$BUILD/tcp_proxy_b.log" "$logdir/" 2>/dev/null || true
     restore_kernel
 }
 trap cleanup EXIT

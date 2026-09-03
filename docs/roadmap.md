@@ -169,7 +169,7 @@
     子串化 + 快照锚点有界等末条完成里程碑，连跑 5 次 0 假红）——印证 P2 验收③"里程碑行稳定"依赖的
     正是串口行原子性；**BUG-053** `BUILD ?=` 可覆盖，为并发重负荷 harness 隔离提供使能原语。
     伴生收益：K1 造成的 **ack 计数握手失步**（`edge_atk.log` 回显被切开）随之消失，RR/AI-agent
-    输入同步协议恢复确定。真逐字节确定性仍归 P1 test-det，未越权（详见 EVAL-LOG.md）。
+    输入同步协议恢复确定。真逐字节确定性仍归 P1 test-det，未越权（详见 docs/external-reviews/mini-os-eval-log_9711cbc.md）。
 
 * ✅ **回归盲区补格**（v0.29）：
 

@@ -17,10 +17,10 @@
 #   task    [list|<task.json>]    列出可用任务/查看单个 task 契约
 #   gates                         列出已注册判据
 #
-# 用法：
-#   python3 tests/arena/qw.py status build/torture/torture.sqlite
+# 用法（产物默认在 build/，可用 BUILD 环境变量改目录）：
+#   python3 tests/arena/qw.py status "${BUILD:-build}/torture/torture.sqlite"
 #   python3 tests/arena/qw.py submit tests/arena/tasks/arena-001-torture-a.json \
-#       --run build/transcripts/torture-a-XXX --base build/transcripts/torture-a-YYY
+#       --run "${BUILD:-build}/transcripts/torture-a-XXX" --base "${BUILD:-build}/transcripts/torture-a-YYY"
 #   exit: 0=ok / 1=判定 FAIL 或命令失败 / 2=参数/用法错误
 import argparse
 import json
