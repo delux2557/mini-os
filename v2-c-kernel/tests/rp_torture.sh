@@ -4,20 +4,21 @@
 #   A) 确定性差分 : 两次 `-icount` 冷启跑同一高维命令集, 比对 out.tr 逐字节(掩掉已知 demo tick 行)
 #   B) 压力/边界扫描: 同一声明集里故意掺入 syscall 边界/不存在对象/深嵌套, 扫内核致命标记
 #   C) 现场复原 : transcript(in.tr/out.tr) + tr2sqlite 检索; 差分不一致处即"复现现场"
-# 用法: bash tests/rp_torture.sh [out-brain-base=build/torture]
+# 用法: bash tests/rp_torture.sh [out-brain-base=$BUILD/torture]
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 command -v qemu-system-i386 >/dev/null 2>&1 || { echo "[ERR] 缺 qemu-system-i386"; exit 2; }
 # L1: 记录编译阶段耗时(host 墙钟)，进 stages.tsv 供跨轮"哪段变慢"分析
 TBASE0=$(date +%s%3N)
-make >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
+make BUILD="$BUILD" >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
 COMPILE_MS=$(( $(date +%s%3N) - TBASE0 ))
 echo "      编译耗时 ${COMPILE_MS}ms"
 . tests/transcript.sh
-TR_BASE="build/transcripts"
+TR_BASE="$BUILD/transcripts"
 mkdir -p "$TR_BASE"
 
-OUTBASE="${1:-build/torture}"
+OUTBASE="${1:-$BUILD/torture}"
 ICOUNT="-icount shift=auto,align=on,sleep=on"
 mkdir -p "$OUTBASE"
 
@@ -28,7 +29,7 @@ boot_battery() {
     rm -f "$log" "$TIN" "$TOUT"; mkfifo "$TIN" "$TOUT"
     (cat "$TOUT" > "$log") & CAT_PID=$!
     TBOOT0=$(date +%s%3N)          # L1: boot 耗时起算（qemu 拉起）
-    qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown \
+    qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -vga std -no-reboot -no-shutdown \
         -m 64 -nic none -serial stdio -monitor none $ICOUNT < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!
     exec 9>"$TIN"
@@ -149,7 +150,7 @@ echo "============ C] tr2sqlite 索引 + 检索 ============"
 DB="$OUTBASE/torture.sqlite"
 mkdir -p "$OUTBASE"
 # L1: 增量导入(不复位 rm，跨轮基线才成立；按 runid 幂等，坏行不影响录放主路径)
-python3 tests/tr2sqlite.py --dirs build/transcripts "$DB" >/dev/null 2>&1
+python3 tests/tr2sqlite.py --dirs "$BUILD/transcripts" "$DB" >/dev/null 2>&1
 python3 tests/tr2sqlite.py "$DB" -q "SELECT runid,result,in_count,out_lines,substr(contract_hash,1,8) FROM transcripts WHERE runid LIKE 'torture%' ORDER BY runid"
 echo "-- 命令直方图(跨两轮) --"
 python3 tests/tr2sqlite.py "$DB" -q "SELECT cmd,count(*) FROM in_events WHERE runid LIKE 'torture%' GROUP BY cmd ORDER BY 2 DESC"
@@ -163,7 +164,7 @@ echo "============ D] replay 现场复原 (黄金 transcript 重放 + 差分) ==
 # 即"录现场 -> 回放 -> 复原原文"闭环成立。任何契约分歧即 equals 一个回归 bug 的重现现场。
 # source replay.sh 暴露 replay_into <in.tr> <out.log> [runid] [done_re]
 . tests/replay.sh
-GOLD="$(ls -1d build/transcripts/torture-a-* | sort | tail -1)"
+GOLD="$(ls -1d "$BUILD"/transcripts/torture-a-* | sort | tail -1)"
 echo "黄金现场(证据原件): $GOLD"
 REPLAY_ICOUNT=1 replay_into "$GOLD/in.tr" "$OUTBASE/replay.log" torture-replay >/dev/null 2>&1
 echo "复原 out: $(wc -l < "$OUTBASE/replay.log") 行 | 黄金 out: $(wc -l < "$GOLD/out.tr") 行"
@@ -185,5 +186,5 @@ if ! cmp -s "$GOLD/out.tr" "$OUTBASE/replay.log"; then
     echo "[note] 原始字节有差: 预期=后台 demo(app 启动期调度)尾行时段差异(icount sleep=on 对齐墙钟); 功能契约已判别复原性"
 fi
 
-echo "归档现场: build/transcripts/torture-a, torture-b"
+echo "归档现场: $BUILD/transcripts/torture-a, torture-b"
 exit 0

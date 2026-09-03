@@ -21,6 +21,7 @@
 # 依赖：qemu-system-i386。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 for c in qemu-system-i386; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
@@ -29,10 +30,10 @@ ICOUNT="-icount shift=auto,align=on,sleep=on"
 IC="${ICOUNT:-}"
 DURATION="${DURATION:-30}"     # 哨兵等待上限（秒）；boot 到哨兵在 icount 下通常 <15s，留裕量
 SENTINEL='\[ok\] subsystems ready; creating processes'
-LA="build/det_a.log"; LB="build/det_b.log"
+LA="$BUILD/det_a.log"; LB="$BUILD/det_b.log"
 
 echo "== [1/2] 内核构建 =="
-make >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
+make BUILD="$BUILD" >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
 echo "      构建完成"
 
 echo "== [2/2] 两次 icount 冷启动（串行 + -nic none），比对 boot 确定性前缀 =="
@@ -42,7 +43,7 @@ echo "== [2/2] 两次 icount 冷启动（串行 + -nic none），比对 boot 确
 boot_once() {
     local out="$1" p t=0
     rm -f "$out"
-    timeout "$DURATION" qemu-system-i386 -kernel build/kernel.elf -display none \
+    timeout "$DURATION" qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none \
         -serial file:"$out" -no-reboot -no-shutdown -m 64 -nic none $IC >/dev/null 2>&1 &
     p=$!
     while kill -0 "$p" 2>/dev/null; do
