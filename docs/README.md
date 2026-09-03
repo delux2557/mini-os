@@ -22,11 +22,13 @@ mini-os 的开发文档遵循三条铁律：
 | [tcp-session-proto.md](tcp-session-proto.md) | 虚拟 TCP 会话协议头规范（netif Step 4, 1/3） | 契约（定稿） | 协议变更时（动码前先改文档） |
 | [tcp-thin-api.md](tcp-thin-api.md) | 虚拟 TCP 薄包装 API 契约表（netif Step 4, 2/3） | 契约（定稿） | API 变更时（动码前先改文档） |
 | [tcp-mtu-fail.md](tcp-mtu-fail.md) | MTU/大包失败路径规范（netif Step 4, 3/3） | 契约（定稿） | 失败路径变更时 |
-| [external-reviews/](external-reviews/README.md) | 外部评审报告 + 缺陷对账索引（F-x/OBS-y ↔ bugs.md ↔ commit） | 时点产物 | 新评审入库；活文档区不放时点快照 |
-| [history/](history/) | 已归档时点产物（路线图等，只读） | 只读归档 | 内容全落地后归档入库 |
+| [history/external-reviews/](history/external-reviews/README.md) | 外部评审报告 + 缺陷对账索引（F-x/OBS-y ↔ bugs.md ↔ commit） | 只读归档 | 新评审入库（时点产物不占活文档区） |
+| [history/](history/) | 已归档时点产物（路线图、里程碑、外部评审等，只读） | 只读归档 | 内容全落地后归档入库 |
 | [screenshots/](screenshots/) | 各版本运行截图 | 资源 | 随版本补充 |
 
 > 命名约定：时点产物（评审/审计/路线图）一律 `history/` 归档，文件名带对象版本或 commit sha 标识。
+> external-reviews 子目录细则：审计对象为**单点 commit** 的报告带对象 sha 后缀（如 `_6ac70e4`）；
+> 审计对象为**代码目录/多文件**（无单点 sha 可指）的深审报告省略后缀，其对象在报告头"审计对象"行标注。
 
 ## 维护规则（摘要）
 
@@ -41,10 +43,10 @@ mini-os 的开发文档遵循三条铁律：
 
 | 项 | 状态 |
 |---|---|
-| changelog 版本顺序乱序（v1.4.4→1.4.7 顶部后接 v1.4.3） | 待 P2 修复（趁文件未更长） |
+| changelog 版本顺序乱序（v1.4.4→1.4.7 顶部后接 v1.4.3） | ✅ 已修（PR #49，3e54458） |
 | design.md 落后 ~10 版（停 v0.27/v0.28，缺 v0.29~v1.x） | 待 P2 补写（可与并发模型不变量一节合并） |
 | docs 目录四象限重组（explanation/reference/guides 分层） | 待 P2 |
-| external-reviews 命名统一（部分缺审计对象 sha） | 待 P2 |
+| external-reviews 命名统一（部分缺审计对象 sha） | ✅ 已闭环（P2 迁移 history/，规则明文化：sha 可考才带后缀） |
 
 ---
 

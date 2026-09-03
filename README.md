@@ -50,8 +50,7 @@ mini-os/
 │   ├── tcp-session-proto.md  # 虚拟 TCP 会话协议头规范（契约）
 │   ├── tcp-thin-api.md       # 虚拟 TCP 薄包装 API 契约表（契约）
 │   ├── tcp-mtu-fail.md       # MTU/大包失败路径规范（契约）
-│   ├── external-reviews/  # 外部评审报告 + 缺陷对账索引（时点产物）
-│   ├── history/           # 已归档时点产物（netif 路线图/里程碑表等，只读）
+│   ├── history/           # 已归档时点产物（只读）：netif 路线图 / 里程碑表 / external-reviews 评审账本
 │   └── screenshots/       # 各版本运行截图
 ├── v1-floppy/             # 历史版本：软盘引导（冻结）
 │   ├── boot.asm
