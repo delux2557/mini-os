@@ -2,13 +2,14 @@
 # 实锤复现 BUG-A（文件槽泄漏污染工具链）与 BUG-B（cc500 产物丢失 exec argv）
 set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/_build_env.sh"   # BUG-053：先定 BUILD，transcript 默认读写随其走
 source "$SCRIPT_DIR/transcript.sh"   # record/replay · P2 录制：把下面复现命令流固化为 .in.tr/.out.tr
 cd "$SCRIPT_DIR/.." || exit 1        # 相对路径定位到 v2-c-kernel/，任意机器可跑
-make >/dev/null 2>&1
-LOG=build/repro.log
+make BUILD="$BUILD" >/dev/null 2>&1
+LOG="$BUILD/repro.log"
 export TR_LOG="$LOG"
-TIN=build/repro_in.fifo
-TOUT=build/repro_out.fifo
+TIN="$BUILD/repro_in.fifo"
+TOUT="$BUILD/repro_out.fifo"
 QPID=""; CAT_PID=""
 FAIL=0
 cleanup() { exec 9>&- 2>/dev/null || true; [ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true; [ -n "$CAT_PID" ] && kill "$CAT_PID" 2>/dev/null || true; rm -f "$TIN" "$TOUT"; }
@@ -16,7 +17,7 @@ trap cleanup EXIT
 rm -f "$LOG" "$TIN" "$TOUT"
 mkfifo "$TIN" "$TOUT"
 (cat "$TOUT" > "$LOG") & CAT_PID=$!
-qemu-system-i386 -kernel build/kernel.elf -display none -vga std -no-reboot -no-shutdown -m 64 -nic none -serial stdio -monitor none < "$TIN" > "$TOUT" 2>/dev/null &
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -vga std -no-reboot -no-shutdown -m 64 -nic none -serial stdio -monitor none < "$TIN" > "$TOUT" 2>/dev/null &
 QPID=$!
 exec 9>"$TIN"
 

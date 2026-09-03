@@ -7,14 +7,15 @@
 # 与 qemu_regression.sh（键盘 sendkey 路径）互补，验证"终端通道"而非"键盘通道"。
 set -u
 cd "$(dirname "$0")/.." || exit 1
+source tests/_build_env.sh
 # v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失
 for c in qemu-system-i386; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
 
-LOG="build/serial_term.log"
-TIN="build/term_in.fifo"
-TOUT="build/term_out.fifo"
+LOG="$BUILD/serial_term.log"
+TIN="$BUILD/term_in.fifo"
+TOUT="$BUILD/term_out.fifo"
 QPID=""; CAT_PID=""
 
 cleanup() {
@@ -26,14 +27,14 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== [1/3] 构建内核 =="
-make >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
+make BUILD="$BUILD" >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
 echo "      构建完成"
 
 echo "== [2/3] QEMU -serial stdio 串口终端（FIFO 模拟 agent 通道） =="
 rm -f "$LOG" "$TIN" "$TOUT"
 mkfifo "$TIN" "$TOUT"
 cat "$TOUT" > "$LOG" & CAT_PID=$!      # 串口输出 -> 日志（可轮询断言）
-qemu-system-i386 -kernel build/kernel.elf -display none -vga std \
+qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -vga std \
     -no-reboot -no-shutdown -m 64 -serial stdio -monitor none \
     < "$TIN" > "$TOUT" 2>/dev/null &
 QPID=$!
