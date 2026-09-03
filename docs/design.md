@@ -703,3 +703,218 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
   端到端「写-编-跑」一键。完整剧本：`writefile /hello.c <源码>` → `ccrun /hello.c /hello.elf`
   → 编译产物被加载运行（`[elf] '/hello.elf' loaded`）→ 退出码 0；cc500 对任意合法源程序
   编译出可运行 ELF，不再局限于编译自身。
+
+## 20. 加固与工程化收口（v0.29~v0.33 核心）
+
+> v0.29 起进入"阶段二·加固"：不给新功能，只让回归更可信、更可定位。四条主线——
+> 宿主 fuzz 把"畸形输入"变成大规模被测（v0.29）；工具链真 bug 复现实锤 + 版本单一来源（v0.30）；
+> 共享内核资源归属收口（v0.31）；自举编译器缺陷修复 + 回归可观测性 + CI 全链（v0.32/v0.33）。
+
+### 宿主侧 fuzz + 内核堆审计（v0.29）
+
+- **确定性 fuzz**（`tests/fuzz_parse.c`，挂 `run_host_tests.sh` 第 16 项）：xorshift32 确定性
+  PRNG（固定种子可复现）对纯逻辑解析模块注入随机路径/随机字节，ASan+UBSan 下断言"畸形输入被
+  拒绝而不崩溃"。覆盖 `fs_walk`（随机路径与写/建/删/列混合）、`elf_load_range`（畸形头/段表
+  越界读）、`net_eth_type`/`net_parse_arp_reply`/`ip_parse`/`udp_parse`/`icmp_parse`（帧内
+  载荷指针越界）、`dhcp_parse_reply`（畸形选项长度）；FS 内存盘每 4096 轮重置防 inode/块耗尽。
+  缺省 60000 轮（36 万次解析调用），`FUZZ_ITERS` 可调。设计动机：把解析模块从"被测过几次"
+  变成"被测过几十万次"，畸形输入成本降到接近零。
+- **内核堆审计**（`src/mm/heap.c/h` `heap_audit()`，挂入 `kern_audit`）：遍历 `block_t` 链表
+  校验 magic/free 一致性、size 上界，块数超上界即判 next 成环停止（防死循环）；新增
+  `used_bytes`/`free_bytes` 记账计数器与遍历统计**对账**——泄漏（块游离于计数外）、双重释放
+  （计数提前减）、写越界破坏块头的场景都会使两者漂移而暴露；报告碎片（空闲块数/字节）。
+  宿主 `test_heap.c` + QEMU selftest `[audit] heap ok` 双重锁定（守恒断言：
+  `4 blocks, free 3 blocks/102320B used 16B pages=25`，used+free+4×16B 头 = 25×4096 精确守恒）。
+- **fuzz/补格抓到两 bug**：BUG-029 `icmp_parse` 短帧越界读（`len < 14` 越过帧尾 + 无符号下溢
+  成巨大值 → 堆越界读；开头 `if (len < 14) return -1`）；BUG-030 fork 子进程在继承的已生长栈上
+  递归被误判缺页（`sched_fork` 继承 `stack_bottom` 但 `stack_guard_hit` 按子 pid 反推槽位 →
+  槽位改由**实际栈位置** `stack_bottom & ~(USER_STACK_SLOT-1)` 推导，普通进程=自身槽、fork
+  子进程=继承的父槽）。
+- **回归盲区补格**：`deepfork`（已生长栈×fork）与 `deepexec`（已生长栈×exec）演示挂双层断言；
+  `test_guard.c` 补 4 条 fork 继承栈守卫断言。方法论：每发现一类"逻辑正确但边界未测"的盲区，
+  立即补演示应用 + 宿主断言，把盲区变成常驻回归。
+
+### 工具链严重 BUG 修复与版本单一来源（v0.30）
+
+- **BUG-031 全局文件槽泄漏污染工具链**：`fs_files[8]` 全局表无进程归属、退出不清理——cc500
+  一次 parse error（裸 `exit(1)` 跳过 `flush_output`）即永久占用 slot2，此后所有编译
+  `setup_output` 失败直到重启。修复：文件槽记**打开者 pid**，`terminate_current` 调
+  `fs_files_close_pid(pid)` 按归属归还；**不**关闭其他并发进程的槽（首版"关全部槽"被 repro
+  抓到误伤 procSemB 与 P1 并存场景——"精准归还"而非"全清"是资源回收的正确粒度）。
+- **BUG-032 cc500 自编译产物静默丢 argv**（`be_start`）：入口桩裸 `call` 不编组 argc/argv，
+  自编译产物 exec 带 argv 时静默走默认路径写 /out.elf 且退出 0。修复：`call` 前把内核栈
+  `[esp+4]=argc、[esp+8]=argv` 压给首函数，与 cc500 "首参 8(%esp)/末参 4(%esp)" 约定精确对齐；
+  `e_entry` 不变、`call` rel32 回填 85→95。
+- **代码审查三连**：BUG-033 `map_page_in` 页表帧 OOM 返回 0 未检查 → `(uint32_t*)0` 清零低
+  4KB 且页目录项指向物理 0（改返回 int，`pf_handler` 检查失败转 `STACK_BOOM` 并释放已分配帧）；
+  BUG-034 kb 行缓冲 `line_ready` 期间仍追加输入（仅 `!line_ready` 才入缓冲）；BUG-035
+  `fork_frames[24]` 硬编码限制大进程 fork（改 kmalloc 动态数组，同 `own_frames`）。
+- **`repro_bugs.sh` 双断言**：BUG-A（good.c 编译 OK → 坏源 FAIL → 同源 good2.c 再编译必须成功，
+  证槽不污染）与 BUG-B（ccboot 产 P1 → exec 带 argv 再编译 → /out2.elf 必须被创建）。修复后
+  实测 `[ls] out2.elf size=19217`（argv 生效）。复现实锤文化：外部报告 bug 先固化为可复现脚本，
+  再谈修复。
+- **版本串单一来源**（L-4/L-5）：新增 `src/version.h` 的 `MINI_OS_VERSION`，内核启动横幅 /
+  shell banner / initramfs motd / 回归断言统一取宏——消灭"改版本只改了一处"的漂移。
+- **BUG-036 编译卫生教训**：`-w` 压不住 permerror——GCC 14 中 `-Wint-conversion` 是硬错误，
+  必须显式 `-Wno-int-conversion`（GCC 13 下 `-w` 单独够用是曾误删此项的根源）。
+
+### 内核资源归属收口：per-process fd + socket 归属（v0.31）
+
+- **per-process fd 表入 PCB**（`sched.h/usermode.c/sched.c`）：`pcb_t` 增
+  `fd_table[FS_FDS_PER_PROC]`，fd 号从"全局约定号"改为"本进程私有号"；`sys_open/read/write/
+  close` 一律在当前进程自己的 fd 表上做，`sys_fork` 深拷贝子进程 fd 表、`exec/exit` 清本进程
+  fd 表——根治 v0.30 方案仍留的跨进程槽号互污染（v0.30 记 pid 是过渡，收进 PCB 才是终态）。
+  `procFSB` 改用与 `procFSA` 相同的 `fd=1` 打开自己的文件作负对照。
+- **socket 归属/回收**（F-0a/b/c，见 bugs.md BUG-037/038）：`net_sock_t` 增 `pid` +
+  `reserved`；`terminate_current` 调 `netsock_close_pid(pid)` 归还其所有 socket（此前开 socket
+  不关即退出使槽位永久失踪直到表满网络降级）；`case 33` 改 `netsock_close_if_owner`——仅可关
+  本进程打开、非保留的槽，**端口 68 的 DHCP 保留槽拒绝关闭**，续约链不再被打断；
+  `netsock_audit()` 并入 `kern_audit`（占用计数 + 保留槽恒计数），创建失败加"表满"专项日志。
+- **攻击回归**（`tests/test_socket.sh`，挂 `make test`）：F-0a 退出回收（leak2 后 netping 仍
+  PONG）+ F-0b 保留槽防 close + 观测断言，修复前后红→绿区分成立。设计主线：共享资源
+  "谁打开谁所有、退出必归还"，先于并发模型本身（见 22 章门纪律）。
+
+### 自举编译器三缺陷修复（v0.32）
+
+- **hostcc 基座**（`tools/cc500/host_crt.c`）：把 cc500 编成 Linux 宿主程序——缺陷与内核无关，
+  宿主秒级红绿 + gdb 可调（先于 QEMU 全量回归定位）。
+- **F-3 未闭合字符串自噬**（BUG-039）：`get_token` 无 EOF 守卫 + `primary_expr` 无 NUL 守卫 →
+  越界读写直到堆里偶遇 `"`（前：guest 内核击杀 exit=-1 / hostcc SIGSEGV rc=139）。修复：两处
+  守卫，命中即 `cc500: bad string` 干净报错。
+- **F-2 只声明未定义函数静默编废产物**（BUG-040）：纯原型声明不触发 `sym_define_global`
+  回填，符号恒留 `'U'=code_offset`，调用即 `PAGE FAULT`。修复：`be_finish` 收尾遍历符号表
+  （锚点=名字 NUL 位），检出残留 'U' 且 `value != code_offset` → `cc500: undefined symbol`。
+- **F-1 关系运算残缺 + error() 零诊断**（BUG-041）：只识别 `<=`。修复：`error()` 打印
+  `cc500: error at <token>`；补齐 `<`/`>`/`>=`（setle=0x9e/setl=0x9c/setge=0x9d/setg=0x9f，
+  操作数序 objdump 实测锁定）；字符串解码补 `\n`/`\t`。
+- **症状对立断言**（`tests/test_cc500.sh`）："新症状必须出现 + 旧症状必须缺席"杜绝假绿——
+  宿主 T 系列 + `<` 编码 `0f 9c` 锁定；guest 自举不动点 P1==P2 + `<` 运行语义保持。
+- 全回归绿：宿主 16/16 + QEMU + 串口 + 持久化 + 网络 + socket + cc500 + repro_bugs；尺寸锚点
+  `entry=800a0054` 未动（无硬编码字节断言，产物随代码体积自然漂移）。
+
+### 回归可观测性收口 + harness 语义 + CI 全链（v0.33）
+
+- **F-4 selftest 汇总行撕裂**（BUG-042）：PASS/FAIL 汇总行多次 `sys_print` 拼，片段间可被内核
+  异步打印（孤儿 reap / DHCP 续约）插入撕裂 → 整行锚定回归假阴性。修复：走 `nl_*` 缓冲原子行
+  （一次 flush，与 netping/ccboot/writefile 同机制）——行原子性是回归可观测性的地基（22 章
+  uart 归属）。
+- **F-5 pid 表耗尽静默**（BUG-043）：`alloc_pid` 耗尽静默 `return -1`，三处调用方对 `pid<0`
+  无声返回（fork 炸弹先到的是无声槽耗尽而非有日志的深拷贝 OOM）。修复：`alloc_pid` 每耗尽
+  周期报一次 `[sched] pid table full`（防风暴刷屏）+ `sched_audit` 补 `slots=%u/MAX_PROCS`。
+- **harness 退出码语义统一**：7 个测试脚本统一"缺依赖 → `[ERR]` + exit 2"（此前缺 socat 等会
+  退化成全断言超时 `[FAIL]/exit 1`，**环境病伪装代码病**）。约定：`0` 全绿 / `1` 断言失败 /
+  `2` 环境或依赖缺失（CI 显式将 `2` 标环境错误）。
+- **CI 全链 + 分步矩阵**：单 job `make test` 全 7 层门禁 + 失败上传 build-logs 工件 +
+  `workflow_dispatch`；新增 `layers.yml` 并行矩阵（host/qemu/serial/persist/net/socket/cc500
+  每层独立 job 定位）——矩阵定位与单链门禁并存，既快又严。
+
+## 21. record/replay 确定性基建（v1.4.x 核心）
+
+> 面对"回归假阴性/假阳性不可信"的工程问题，用录放给回归"照镜子"。三档分工：
+> P1 icount 钉**内核执行**确定性（同输入同输出）→ P2 transcript 录**输入输出流**为可归档证据 →
+> P3 回放**消费证据**驱动内核证 bug 表现。它自己是"测试的测试"。
+
+### P1 icount 确定性启动验收（`make test-det`，v1.4.1）
+
+- `tests/test_determinism.sh`：两次 QEMU `-icount shift=auto,align=on,sleep=on` 冷启动，串口
+  日志**逐字节 diff** 判定确定性——定时器/中断/调度/网络握手同输入同输出。实测铁证：icount 下
+  启动段含 **DHCP OFFER/ACK 握手**两次运行逐字节一致。
+- **诚实边界**：交互回归脚本（HMP sendkey / serial / persist / cc500）基于 host 墙钟轮询
+  （`wait_for`/`sleep`），与 icount 虚拟时钟流速不匹配 → icount 下 run 窗内超时误报。
+  **不回编**这些脚本（其语义是"墙钟真实交互"），icount 确定性独立收编为 `test-det`。
+
+### P2 transcript 固化（`make test-tr`，v1.4.2）
+
+- `tests/transcript.sh`（录制内核，`source` 用）：`tr_start/tr_send/tr_snapshot/tr_abort/
+  tr_finish`。`*.in.tr` 列为 **seq / 相对毫秒 / 命令**（TSV，可重放可审计），`*.out.tr` 原始
+  字节流，`RESULT` 标 PASS/FAIL 及失败点。
+- `tests/test_transcript.sh` 验收三连：① 成功固化产物完整；② **失败自动归档**（`tr_abort`
+  固化现场标 FAIL，"人为触发失败可得可复现 transcript"）；③ 复现性雏形（两次冷启同命令集，
+  里程碑语义行逐字节一致）。
+- **诚实发现**：非 icount 两次运行 `Hello ticks=296/297` 差 1——guest tick 随墙钟调度浮动，
+  印证 roadmap"公共时钟须用 icount 虚拟时钟、非 guest tick"。复现性按 `ticks=N` pin 掉噪音，
+  真逐字节确定性交给 P1。
+
+### P3 replay 回放差分闭环（`make test-rp`，v1.4.3）
+
+- `tests/replay.sh`（回放器）：`replay_into <in.tr> <out.log> <runid> <done_regex>` 按
+  seq/rel_ms/payload 打拍注入串口、等完成信号驱动真实内核路径。**不用"日志静止"作结束判据**
+  （本内核有后台 demo 应用持续打印，日志永不静止）。
+- `tests/test_replay.sh`：bug 本质闭环——从 bugs.md 抽 **BUG-026**（cc500 形参列表 EOF 未闭合
+  →死循环），录 `writefile 写 int main(int x` + `ccrun` 的 transcript → 回放 → 修复版见
+  `cc500: error at`（exit(1)，不死循环）。
+- **诚实发现**（P3 实测边界，已规避）：icount(TCG) 下 cc500 编译分钟级 + 后台 demo 抢 tick →
+  回放不用 icount，bug 闭环靠信号断言（逐字节确定性由 P1 test-det 承担）；跨独立冷启里程碑
+  一致不机械稳定 → 两遍一致性作 `REPLAY_VERIFY=1` soft 检查。
+
+### 防御与加固（v1.4.4~v1.4.7）
+
+- **无网络路径 `-nic none`**（v1.4.4）：回放/编译/录制三条不需要网络的路径统一去默认网卡，
+  消除启动期 e1000/DHCP 墙钟等待 + 少一个非确定源。内核无网卡优雅跳过（`[net] e1000 not
+  found on PCI` + selftest skipped）。理由澄清：icount 下 cc500 慢是用户态 demo 抢指令预算，
+  非网卡导致。
+- **sqlite 旁路分析索引**（v1.4.4，`tests/tr2sqlite.py`）：`.tr` 文本是**证据原件**，sqlite 是
+  只读"放大镜"（三表 transcripts/in_events/out_rows，幂等 DELETE+INSERT 按 runid）——坏了
+  绝不影响录放正确性，跨 runid 检索（命令直方图/FAIL 血统/LIKE 编译结果行）不走文本扫描。
+- **TSV 守卫**（v1.4.6）：`tr_send` 检测 payload 含原始 TAB/换行即拒绝（不发送、不记录、
+  rc=1）并 `%q` 报违规 + 规约提示；文件头加规约行（payload 须单行，多行须显式编码
+  `\t\n\\`）——归档 TSV 永不脱列，坏证据不深入。
+- **repro_bugs 接录放**（v1.4.5）：BUG-A/BUG-B 复现命令流经 transcript 录制固化为
+  `.in.tr/.out.tr`（补上"repro_bugs.sh 只脚本化、未录时间关系"缺口），`send()` 改调 `tr_send`
+  （wait 驱动的实际打拍也固化真实相对 ms）；`make test-repro` 独立目标（不在 `test:` 聚合内，
+  语义=首方复现/回归）。
+- **rp_torture 实战**（v1.4.7，`tests/rp_torture.sh`）：A 两轮 `-icount` 冷启功能契约差分 ·
+  B 内核致命/越权/溢出标记扫描（区分预期 procCrash 隔离演示）· C tr2sqlite 检索 · D 重放黄金
+  transcript 做结果集复原。初测抓出**两处测试壳"假绿"缺陷**（非内核）：
+  - **空判据假绿**：`func()` 未把 `$1` 传给 grep → 读空 stdin → 确定性判定比对两个空文件，
+    无条件 PASS。修复后判定真实落到输出文件。
+  - **打点节奏缺陷**：26 条连续 `tr_send` 无间隔灌入 + 末尾盲 `sleep 3` 把末条命令掐在半路。
+    改为**提示符同步打点** `tsend`（每条等下一个 `mini-os$ ` 再发，计数自增）。
+  - **结果集复原语义**：跨打点路径叠加并发 demo 调度，尾部两行偶发对调 → GO/NO-GO 改用
+    **结果集相等（排序后）**，顺序差单列已知边界提示，不把顺序噪声误报为回归。
+  修复后两轮 `-icount` 冷启确定性成立（out_lines 均精确 =1165 行）、内核无意外缺陷标记、
+  现场可复原——"用录放基因为测试本身照镜子"。
+
+## 22. 并发模型不变量（v1.5 审计固化）
+
+> 由来：外部评审（`history/external-reviews/mini-os-arch-and-quality-review_6ac70e4.md`，
+> "驱动层锁"follow-up）指出——本内核并发正确性靠**未文档化的隐式约定**维系（单核 + 全中断门
+> IF=0 + e1000 设备中断永不使能）。当前无活跃竞态，但契约必须显式化，否则任何一条被无意打破
+> 都会静默引入数据竞争。本节把隐式约定固化为不变量，零代码成本。
+
+- **I1 单 vCPU**：QEMU 默认单核（无 SMP 启动路径、无多处理器内存序问题）。所有"并发"都是
+  单核上的交错，不存在真并行。
+- **I2 门纪律（内核态默认 IF=0）**：全部 IDT 入口为中断门——异常/IRQ 用 `0x8E`、syscall
+  （0x80）用 `0xEE` → 进入内核即自动 `cli`，内核态默认 IF=0。推论：**任意时刻至多一个内核
+  执行上下文**持有 CPU——ISR 与 syscall 不并发、ISR 与 ISR 不嵌套（中断门自动清 IF），共享
+  内核状态的互斥由门纪律免费提供。IF=1 只出现在显式开中断的窗口（见 I3 uart 行）。
+- **I3 共享状态归属表**：
+  | 共享状态 | 消费者 | 互斥机制 |
+  |---|---|---|
+  | e1000 rx ring | IRQ0-timer `dhcp_tick` 与 syscall netif 收发 | I2：timer ISR 运行时不进 syscall，反之亦然 |
+  | uart 输出行 | IRQ / syscall / IF=1 窗口内任意上下文 | 整行输出须 **xirq 原子化**（`nl_*` 原子行缓冲一次 flush；K1 = 全内核唯一锁原语，为串口行撕裂 BUG-042 而设） |
+  | PID / socket / fd 表 | 各 syscall + terminate_current 回收 | I2 + "谁打开谁所有、退出必归还"（v0.31 收口） |
+- **I4 演进禁令**：**使能 e1000 设备中断（真异步）或把 trap gate 改回普通门之前，必须先引入
+  真锁**（自旋锁或等价协议）。否则 I2 的互斥担保失效、I3 归属表被异步打断——e1000 rx ring
+  会从"两消费者串行"退化为"真并发"。当前设备中断永不使能是本模型的前提，不是待办缺陷。
+- **与回归体系的关系**：v0.33 的 F-4（selftest 行撕裂）修复正是 I3 中 uart 行原子性的落实；
+  `usermode.c:710/722` exec 错误路径"先 `sti` 后 `serial_printf`"（建议：先打印后 sti，
+  消除 IF=1 打印窗口）是本节追踪的待办项。
+
+## 23. 文档覆盖对照（治理自证）
+
+| design.md 章 | 覆盖版本 | 说明 |
+|---|---|---|
+| 1~9 | v0.5~v0.11 | 内核主体（sched/IPC/fs/elf/shell/串口/地址空间） |
+| 10 | v0.16~v0.18 | 测试策略五层 + 单行自检 |
+| 11~16 | v0.12~v0.17 | 进程/驱动/存储/syscall 边界/设计取舍 |
+| 17 | v0.18~v1.3 | 网络全链（e1000→UDP→DHCP→netif v1.1→虚拟 TCP 路标） |
+| 18 | v0.26 | 容量三连 |
+| 19 | v0.27~v0.27b | 工具链与自举 |
+| 20 | v0.29~v0.33 | 加固与工程化收口 |
+| 21 | v1.4~v1.4.7 | record/replay 确定性基建 |
+| 22 | v1.5 审计 | 并发模型不变量（横切全部版本） |
+
+> 版本演进的事实主源是 `changelog.md`（逐版本）与 `bugs.md`（逐 BUG）；`design.md` 只记
+> **跨版本的设计主线与决策理由**，不复制 changelog 流水。后续新版本按维护规则"新子系统
+> / 新架构决策 → 加章（带版本戳）"增量维护，避免再次出现"落后 N 版"。
