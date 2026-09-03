@@ -484,13 +484,17 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
 内核数据拷进文件、或借 `sys_readline` 往内核地址写，绕过页保护。
 
 ### 校验层（src/userptr.c/h，纯逻辑可宿主单测）
-- `user_ptr_valid(p, len)`：`p >= USER_SPACE_BASE(0x80000000)` 且 `p <= END(0x80100000)`
-  且 `len <= END - p`（先判 `p > END` 防止减法回绕，再判区间）。
-- `copyin / copyout`：校验通过后直接 memcpy（当前 CR3 即用户页目录，用户半区已映射，
-  内核可直接寻址）；失败返回 -1，不触碰任何内存。
-- `copyin_str`：逐字节拷 NUL 结尾字符串到内核缓冲，任何一步越过用户空间上限即 -1
-  （防"无 NUL 一直读到缺页"）。
-- 上界 END=0x80100000 比实际映射区宽裕，属安全侧收紧；重点是**拒绝内核低地址**。
+- `user_ptr_valid(p, len)`：先做**区间/回绕**判定（`p >= USER_SPACE_BASE(0x80000000)` 且
+  `p <= END(0x81000000)` 且 `len <= END - p`，先判 `p > END` 防止减法回绕），再对 `[p, p+len)`
+  **逐页 `is_mapped()`** 确认已映射。这是用户指针校验的**单一收敛点**：下面 6 处直接解引用
+  syscall 与 `copyin/copyout` 全走它——命中"区间内空洞页"时在**触碰内存前**即返 0（防内核态缺页
+  [FATAL] 整机停机）。`len` 可为 0（空指针须单独判定）。
+- `copyin / copyout`：内部即 `user_ptr_valid` 预检，通过后直接 memcpy（当前 CR3 即用户页目录，
+  用户半区已映射，内核可直接寻址）；失败返回 -1，不触碰任何内存。
+- `copyin_str`：长度未知（到 NUL 为止），不套定长前预检，逐字节拷时**跨页处 `is_mapped()`** 检查
+  （含非页对齐起始页），与 `user_ptr_valid` 共用同一谓词，仍受映射保护。
+- 上界 END=0x81000000（v0.26#3 用户空间扩 16MB）比实际映射区宽裕，属安全侧收紧；
+  重点是**拒绝内核低地址 + 拒绝区间内空洞页**。
 
 ### 接入点（usermode.c）
 - 字符串入参：`print / spawn_file / fs 的 create/open/ls/delete/mkdir/rmdir`、
