@@ -86,9 +86,15 @@ static void build_elf(uint8_t *img, uint32_t text_vaddr, uint32_t bss_vaddr,
 
 static uint32_t map_calls[8][2];
 static int map_n;
-static void my_map(uint32_t vaddr, uint32_t len) {
+static int my_map(uint32_t vaddr, uint32_t len) {
     if (map_n < 8) { map_calls[map_n][0] = vaddr; map_calls[map_n][1] = len; }
     map_n++;
+    return 0;
+}
+/* 映射失败钩子：让 elf_load 在中途中止（不得再 memcpy/memset 未映射区） */
+static int fail_map(uint32_t vaddr, uint32_t len) {
+    (void)vaddr; (void)len;
+    return -1;
 }
 
 int main(void) {
@@ -166,6 +172,12 @@ int main(void) {
     build_elf(img, 0x08048000u, 0x08049000u, 0x08048000u);
     ((elf32_hdr *)img)->e_phentsize = 20;
     CHECK_EQ(elf_load(img, sizeof(img), base, NULL, &entry), -1);
+    /* 4.11 mapfn 映射失败：elf_load 必须中止（返回 -1），且不得再写目标区/清 bss */
+    memset(arena, 0xAA, sizeof(arena));
+    build_elf(img, 0x08048000u, 0x08049000u, 0x08048000u);
+    CHECK_EQ(elf_load(img, sizeof(img), base, fail_map, &entry), -1);
+    CHECK_EQ(arena[0], 0xAA);            /* .text 未写入 */
+    CHECK_EQ(arena[0x1000], 0xAA);       /* bss 未清零 */
 
     /* 5) elf_load_range：返回页对齐的 PT_LOAD 覆盖区间（供 mapfn 决定映射范围）。
      *    纯解析，不写内存，可用任意链接地址。 */

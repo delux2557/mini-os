@@ -152,6 +152,9 @@ cmd "selftest 自检"   "selftest
 # ---- v0.17 syscall 边界校验：内核指针全部被拒 ----
 cmd "run abuse"       "run abuse
 "      "\[abuse\] write buf@0xB8000 -> 4294967295" "\[abuse\] verify OK"
+# ---- BUG-056: 畸形大 p_memsz ELF 必须 -1 拒绝、不得整机 [FATAL] ----
+cmd "run zbig(DoS)"   "run zbig
+"      "cannot load 'zbig'"
 
 # 等待剩余时间（让后台 sem/msg/fs 演示继续输出），随后收尾
 END=$((QSTART + DURATION))
