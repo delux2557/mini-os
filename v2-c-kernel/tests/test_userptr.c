@@ -8,6 +8,11 @@
 #include "utest.h"
 #include <stdint.h>
 
+/* @修复 stub：sycall 预检后 is_mapped 引入 mem.o 内核依赖，宿主单测无法链接；
+ * 这里提供"全映射"可判定假实现，保持拒绝路径（在触碰内存前返 -1）断言不变。
+ * 真实页表预检由 abuse/其它 QEMU 回归覆盖。 */
+int is_mapped(uint32_t virt) { (void)virt; return 1; }
+
 int main(void) {
     /* user_ptr_valid：纯逻辑边界 */
     CHECK(user_ptr_valid((void *)0x80000000u, 0) == 1);            /* 用户空间起点 */
