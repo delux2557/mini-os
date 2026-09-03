@@ -495,12 +495,28 @@ static void cmd_writefile(char *args) {
     nl_end();
 }
 
+/* B1/B4 工具：轻量字符串拼接（无 libc）。B4 把判据行先拼入缓冲再单次 sys_print，
+ * 避免多次 sys_print 之间被其它串口输出插入，导致 wait_for 的 grep 判据匹配失败（F-0a 撕裂族）。 */
+static int cc_append(char *buf, int k, const char *s) {
+    while (*s) buf[k++] = *s++;
+    return k;
+}
+static int cc_append_u32(char *buf, int k, uint32_t v) {
+    char tmp[12]; int n = 0;
+    do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v > 0 && n < 12);
+    while (n) buf[k++] = tmp[--n];
+    return k;
+}
+
 /* v0.27b: ccrun <src> <out> —— fork+exec cc500 编译 <src> 为 <out>，随后运行 <out>。
- * 端到端"写-编-跑"一键：writefile 写源 → ccrun 编译并运行 → 观察程序输出与退出码。 */
+ * 端到端"写-编-跑"一键：writefile 写源 → ccrun 编译并运行 → 观察程序输出与退出码。
+ * B1（排查打点）：compile/run 段各自耗时（100Hz tick → ms），供 F-0a/ccrun flake 归因；
+ * B4：退出判据行单缓冲一次 sys_print，原子输出防撕裂。 */
 static void cmd_ccrun(char *args) {
     char *tok[4];
     int n = tokenize(args, tok, 4);
     if (n < 2) { sys_print("usage: ccrun <src> <out>\n"); return; }
+    uint32_t t0 = sys_getticks();                   /* B1：compile 段起点 */
     /* 1) fork 子进程 exec cc500 <src> <out> 编译 */
     uint32_t pid = sys_fork();
     if (pid == 0) {
@@ -513,19 +529,30 @@ static void cmd_ccrun(char *args) {
     int code = 0;
     (void)sys_wait((uint32_t)pid, &code);
     if (code != 0) {
-        sys_print("[ccrun] compile FAIL code="); user_putdec((uint32_t)code); sys_print("\n");
+        sys_print("[ccrun] compile FAIL code="); user_putdec((uint32_t)code);
+        sys_print(" compile="); user_putdec((sys_getticks() - t0) * 10u); sys_print("ms\n");
         return;
     }
+    uint32_t t_compile = (sys_getticks() - t0) * 10u;   /* B1：compile 耗时(ms)，100Hz */
     /* 2) 运行编译产物 */
+    uint32_t t1 = sys_getticks();                   /* B1：run 段起点 */
     pid = sys_spawn_file(tok[1]);
     if (pid <= 0) {
         sys_print("[ccrun] cannot run '"); sys_print(tok[1]); sys_print("'\n"); return;
     }
     code = 0;
     (void)sys_wait((uint32_t)pid, &code);
-    sys_print("[ccrun] '"); sys_print(tok[1]); sys_print("' exited code=");
-    user_putdec((uint32_t)code);
-    sys_print(code == 0 ? " PASS\n" : " FAIL\n");
+    uint32_t t_run = (sys_getticks() - t1) * 10u;   /* B1：run 耗时(ms) */
+    /* B4：判据行原子化（单次 sys_print）并附 B1 耗时 */
+    char obuf[192];
+    int o = 0;
+    o = cc_append(obuf, o, "[ccrun] '");        o = cc_append(obuf, o, tok[1]);
+    o = cc_append(obuf, o, "' exited code=");   o = cc_append_u32(obuf, o, (uint32_t)code);
+    o = cc_append(obuf, o, code == 0 ? " PASS (compile=" : " FAIL (compile=");
+    o = cc_append_u32(obuf, o, t_compile); o = cc_append(obuf, o, "ms run=");
+    o = cc_append_u32(obuf, o, t_run);       o = cc_append(obuf, o, "ms)\n");
+    obuf[o] = 0;
+    sys_print(obuf);
 }
 
 void app_main(int argc, char **argv) {
