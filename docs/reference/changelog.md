@@ -3,6 +3,42 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.8] - 2026-09-03 · syscall 用户指针校验上移单一收敛点 user_ptr_valid（BUG-054 二轮）
+
+> 把"区间内空洞页"的逐页 `is_mapped()` 预检，从 copyin/copyout/copyin_str 三个 helper
+> 上移到 **`user_ptr_valid` 单一收敛点**。前一轮（PR #53）漏掉的 6 处"仅调 user_ptr_valid
+> 就直接解引用"的 syscall（fs_write/fs_read/readline/wait status/exec argv/recvfrom iov.buf）
+> 现在全部在触碰用户内存前即被拒绝——实测这三条仍能整机壳死的路径（V5/V6/V7）全部封堵。
+> 以后新增 syscall 只要调 `user_ptr_valid`（或 `copyin/copyout`）即天然自带"状态空间穷举"防御。
+
+**Fixed**
+
+* 预检收敛：`user_ptr_valid` 区间/回绕判定后追加逐页 `is_mapped()` 检查，空洞页在触碰前返 0；
+  `copyin/copyout` 删除重复的本地逐页 helper（受益于收敛点），`copyin_str` 沿用跨页检查
+  （`last_pg` 初值 -1 已正确覆盖非页对齐起始页）。逃逸面从"4/7 入口封堵"收敛为"全部入口"。
+* 触发补证（外部 A/B 的 V5/V6/V7）：`fs_write(fd, 空洞, 8)`、`fs_read(fd, 空洞, 8)`、
+  `fs_write(fd, 合法buf, 32768)`（普通写法越界，无需恶意）修复前均实测 `[FATAL] cli;hlt`
+  整机停，是上轮"fs iov 走 copyin 一并封堵"表述对 fs 不成立的实证。
+
+**Tests**
+
+* [abuse.c](../../v2-c-kernel/src/app/abuse.c) 新增三门禁：`write buf@hole 0x80500000`、
+  `read buf@hole 0x80500000`、`write buf@valid huge len=32768`（对应 V5/V6/V7），
+  qemu\_regression / test\_serial / rp\_torture 三门禁一旦回归即 verify OK 不到 → CI 判红。
+* [test_userptr.c](../../v2-c-kernel/tests/test_userptr.c) 的 `is_mapped` stub 升级为"假页表"
+  （仅低区 + 末页映射），新增空洞页 / 已映射区上界 / 跨页进空洞 / 连续已映射页 / 末页 / len=0
+  拒绝与放行断言，宿主层直接覆盖新预检路径。
+
+**自测实录**
+
+* `make test-host` pass=20 fail=0（test_userptr 28 断言全过）。
+* `make test-qemu` 全量交互回归通过（含 exec 参数/forkdemo/fsdemo/wait/ccboot 合法路径不误伤）。
+* 修复前 A/B：`run abuse` 打到 write@hole 即 `[FATAL] @80500000`、verify OK=0；修复后 FATAL=0、
+  verify OK=2，全部边界用例 `(rejected)`、合法路径 write/read=8。
+
+Docs：BUG-054"修复"与"回归"两节改写为两轮收敛描述；design.md 校验层同步"区间+逐页映射"与
+END=0x81000000 常量。
+
 ## [v1.4.7] - 2026-09-02 · 压测壳修复：确定性判定空判据 + 打点节奏，落地"结果集复原"语义
 
 > 用 record/replay 地基做**业内最佳实践测试**（`tests/rp_torture.sh` 新增：确定性差分 + 压力/边界
