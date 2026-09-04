@@ -164,7 +164,11 @@ wait_for "ccrun 编译运行 PASS"  "\[ccrun\] '/hello.elf' exited code=0 PASS"
 #     ⚠ 两点工程约束：
 #       a) writefile 单行有 128B 截断，源名 22B 时命令行须精简（源码刻意短小，含 syscall3 声明总长 ≤ ~120B）；
 #       b) 断言必须按"本轮(SN0)之后的新行"切片——`cc500: compiled OK` 在先前 cc500 自举用例中已出现，
-#          整日志 wait_for 会虚假命中；compiled OK → loaded → 运行输出 → PASS(run>0) 用轮询逐段验证。
+#          整日志 wait_for 会虚假命中；compiled OK → loaded → 运行输出 → PASS 用轮询逐段验证。
+# ⚠ run 计时语义（插曲 2，类型 II 断言根修）：`run=` 为 10ms tick 粒度（wall 100Hz），快速 TCG / tick
+#  边界取整下 **run=0ms 是合法快执行**，不能作为"未运行"判据。程序真实性由 `[elf] ... loaded` +
+#  程序自打印（F1ok）承担；BUG-066"假 PASS"防回归由下方 F2 负向断言独立覆盖——故 run>0 为纯冗余过严，
+#  断言收敛为 `run=[0-9]+`（只需声明本行是 PASS 行带 run 字段，不校对时序）。
 # F2：cmd_ccrun 旧用 uint32_t 收 sys_spawn_file 返回值，失败 -1 化 4294967295 使 `pid<=0` 恒假、
 #     静默落入 sys_wait(-1) → code=0 → 打印假 "PASS (run=0ms)"。现改有符号判败；下方做负向断言。
 SN0=$(wc -l < "$LOG")
@@ -178,15 +182,15 @@ for _ in $(seq 1 16); do LSEG=$(SLICE); \
     [ -n "$(printf '%s\n' "$LSEG" | grep -a "cc500: compiled OK")" ] && \
     [ -n "$(printf '%s\n' "$LSEG" | grep -a "\[elf\] '/mmmmmmmmmmmmmmmmmm.elf' loaded")" ] && \
     [ -n "$(printf '%s\n' "$LSEG" | grep -aF "F1ok")" ] && \
-    [ -n "$(printf '%s\n' "$LSEG" | grep -aE "PASS \(compile=[0-9]+ms run=[1-9]")" ] && break; sleep 0.5; done
+    [ -n "$(printf '%s\n' "$LSEG" | grep -aE "PASS \(compile=[0-9]+ms run=[0-9]+")" ] && break; sleep 0.5; done
 printf '%s\n' "$LSEG" | grep -a "cc500: compiled OK" >/dev/null \
   && echo "[ok]   长 20 字符源名可编译" || { echo "[FAIL] 长 20 字符源名可编译"; FAIL=$((FAIL+1)); }
 printf '%s\n' "$LSEG" | grep -a "\[elf\] '/mmmmmmmmmmmmmmmmmm.elf' loaded" >/dev/null \
   && echo "[ok]   长 18 字符加载名成功加载" || { echo "[FAIL] 长 18 字符加载名成功加载"; FAIL=$((FAIL+1)); }
 printf '%s\n' "$LSEG" | grep -aF "F1ok" >/dev/null \
   && echo "[ok]   长名程序真实运行" || { echo "[FAIL] 长名程序真实运行"; FAIL=$((FAIL+1)); }
-printf '%s\n' "$LSEG" | grep -aE "PASS \(compile=[0-9]+ms run=[1-9]" >/dev/null \
-  && echo "[ok]   长名运行 PASS 且 run>0" || { echo "[FAIL] 长名运行 PASS 且 run>0"; FAIL=$((FAIL+1)); }
+printf '%s\n' "$LSEG" | grep -aE "PASS \(compile=[0-9]+ms run=[0-9]+" >/dev/null \
+  && echo "[ok]   长名运行 PASS 行存在" || { echo "[FAIL] 长名运行 PASS 行缺失"; FAIL=$((FAIL+1)); }
 # F2 负向：失败的 ccrun 必须显式编译失败，且绝不追加假 PASS（防 run=0ms 假阳性归来）。
 SN1=$(wc -l < "$LOG")
 send 'ccrun /no_such_src_xyz.c /no_out.elf'
