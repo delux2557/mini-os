@@ -27,4 +27,9 @@ int copyout(const void *kern_src, void *user_dst, uint32_t len);
  * 返回长度（不含 NUL）；非法基址 / 越过用户空间上限返回 -1；超长则截断并返回 max-1 */
 int copyin_str(const void *user_src, char *kern_dst, uint32_t max);
 
+/* copyin_str_full：同 copyin_str，但不静默截断。
+ * 返回 0 = 成功（完整拷入含 NUL）；-1 = 无效/未映射；-2 = 超长（未遇 NUL）。
+ * 供"按名/按路径加载"这类截断会撞名前缀误加载的边界使用（红队 F1 修复）。 */
+int copyin_str_full(const void *user_src, char *kern_dst, uint32_t max);
+
 #endif

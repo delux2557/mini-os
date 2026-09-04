@@ -62,3 +62,29 @@ int copyin_str(const void *user_src, char *kern_dst, uint32_t max) {
     kern_dst[max - 1] = 0;                             /* 超长：截断 */
     return (int)(max - 1);
 }
+
+/* copyin_str_full：与 copyin_str 相同，但**不静默截断**——在缓冲上限内未读到 NUL
+ * 即判为越界失败。供"按名/按路径加载"这类一旦截断就撞同名前缀、误加载错误程序的
+ * syscall 边界使用（SEC/红队 F1 修复）；普通 copyin_str 保持原截断语义、勿改全局。
+ * 返回：0 = 成功（完整拷入含末尾 NUL，内容上限 max-1 字符）；
+ *       -1 = 来源无效 / 跨页命中未映射（与 copyin_str 一致）；
+ *       -2 = 超长（在 max 字节内未遇 NUL，kern_dst 已安全终止，调用方应判失败丢弃）。 */
+int copyin_str_full(const void *user_src, char *kern_dst, uint32_t max) {
+    if (max == 0) return -2;
+    if ((uint32_t)user_src < USER_SPACE_BASE) return -1;
+    uint32_t last_pg = (uint32_t)-1;
+    for (uint32_t i = 0; i < max; i++) {
+        uint32_t a = (uint32_t)user_src + i;
+        if (a >= USER_SPACE_END) return -1;
+        uint32_t pg = a & ~0xFFFu;
+        if (pg != last_pg) {
+            last_pg = pg;
+            if (!is_mapped(pg)) return -1;             /* 命中空洞页：拒绝 */
+        }
+        char c = ((const char *)user_src)[i];
+        kern_dst[i] = c;
+        if (c == 0) return 0;                          /* 读到 NUL：完整字符串 */
+    }
+    kern_dst[max - 1] = 0;                             /* 未遇 NUL：超长，安全终止 */
+    return -2;
+}

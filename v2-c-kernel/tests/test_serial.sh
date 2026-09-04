@@ -156,6 +156,46 @@ send "ccrun /hello.c /hello.elf"
 wait_for "cc500 编译成功"       "cc500: compiled OK"
 wait_for "编译产物被加载"        "\[elf\] '/hello.elf' loaded"
 wait_for "ccrun 编译运行 PASS"  "\[ccrun\] '/hello.elf' exited code=0 PASS"
+# ---- v0.35（Red Team F1/F2 修复）长合法名(16..23)可加载运行；失败显式、绝不伪装 PASS ----
+# F1：旧 16B 按名/按路径加载缓冲会把 16~23 字符合法程序名静默截断撞前名前缀、误加载错误程序。
+#     现统一 64B + copyin_str_full（超长显式失败）。正向断言：20 字符源名 + 18 字符加载名真正跑通。
+#     （加载名 basename 取 22 字符含 .elf，≤ FS_MAX_NAME=24；若取 23 字符会被 cc500 拒为超限，
+#      与 F1 无关，那是 fs 单分量上限校验的正常拒绝。）
+#     ⚠ 两点工程约束：
+#       a) writefile 单行有 128B 截断，源名 22B 时命令行须精简（源码刻意短小，含 syscall3 声明总长 ≤ ~120B）；
+#       b) 断言必须按"本轮(SN0)之后的新行"切片——`cc500: compiled OK` 在先前 cc500 自举用例中已出现，
+#          整日志 wait_for 会虚假命中；compiled OK → loaded → 运行输出 → PASS(run>0) 用轮询逐段验证。
+# F2：cmd_ccrun 旧用 uint32_t 收 sys_spawn_file 返回值，失败 -1 化 4294967295 使 `pid<=0` 恒假、
+#     静默落入 sys_wait(-1) → code=0 → 打印假 "PASS (run=0ms)"。现改有符号判败；下方做负向断言。
+SN0=$(wc -l < "$LOG")
+send 'writefile /aaaaaaaaaaaaaaaaaaaa.c int syscall3(int n,int a,int b,int c);int main(){syscall3(1,"F1ok\x0a",0,0);return 0;}'
+wait_for "长 20 字符源名写入"    "\[writefile\] '/aaaaaaaaaaaaaaaaaaaa.c' wrote"
+send 'ccrun /aaaaaaaaaaaaaaaaaaaa.c /mmmmmmmmmmmmmmmmmm.elf'
+# 轮询等待本轮切片出现 编译成功+加载+运行输出+PASS且run>0 四连，再逐段断言
+SLICE() { tail -n "+$((SN0+1))" "$LOG"; }
+LSEG=""
+for _ in $(seq 1 16); do LSEG=$(SLICE); \
+    [ -n "$(printf '%s\n' "$LSEG" | grep -a "cc500: compiled OK")" ] && \
+    [ -n "$(printf '%s\n' "$LSEG" | grep -a "\[elf\] '/mmmmmmmmmmmmmmmmmm.elf' loaded")" ] && \
+    [ -n "$(printf '%s\n' "$LSEG" | grep -aF "F1ok")" ] && \
+    [ -n "$(printf '%s\n' "$LSEG" | grep -aE "PASS \(compile=[0-9]+ms run=[1-9]")" ] && break; sleep 0.5; done
+printf '%s\n' "$LSEG" | grep -a "cc500: compiled OK" >/dev/null \
+  && echo "[ok]   长 20 字符源名可编译" || { echo "[FAIL] 长 20 字符源名可编译"; FAIL=$((FAIL+1)); }
+printf '%s\n' "$LSEG" | grep -a "\[elf\] '/mmmmmmmmmmmmmmmmmm.elf' loaded" >/dev/null \
+  && echo "[ok]   长 18 字符加载名成功加载" || { echo "[FAIL] 长 18 字符加载名成功加载"; FAIL=$((FAIL+1)); }
+printf '%s\n' "$LSEG" | grep -aF "F1ok" >/dev/null \
+  && echo "[ok]   长名程序真实运行" || { echo "[FAIL] 长名程序真实运行"; FAIL=$((FAIL+1)); }
+printf '%s\n' "$LSEG" | grep -aE "PASS \(compile=[0-9]+ms run=[1-9]" >/dev/null \
+  && echo "[ok]   长名运行 PASS 且 run>0" || { echo "[FAIL] 长名运行 PASS 且 run>0"; FAIL=$((FAIL+1)); }
+# F2 负向：失败的 ccrun 必须显式编译失败，且绝不追加假 PASS（防 run=0ms 假阳性归来）。
+SN1=$(wc -l < "$LOG")
+send 'ccrun /no_such_src_xyz.c /no_out.elf'
+wait_for "不存在的源显式编译失败" "\[ccrun\] compile FAIL code="
+if tail -n "+$((SN1+1))" "$LOG" | grep -aqE "exited code=0 PASS"; then
+    echo "[FAIL] 失败命令却出现 PASS（F2 假阳性未消除）"; FAIL=$((FAIL+1))
+else
+    echo "[ok]   失败命令未出现 PASS（F2 判败修复确认）"
+fi
 # ---- v1.4 heredoc 多行写入：writefile <<EOF /multi.c（逐行拼接，绕开单行 128B 截断） ----
 send 'writefile <<EOF /multi.c'
 send 'int syscall3(int n,int a,int b,int c);'
