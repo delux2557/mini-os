@@ -131,7 +131,8 @@ static inline uint32_t sys_limit(uint32_t mask_lo, uint32_t mask_hi) {
 #define SC_NETC  (1ull << 33)   /* net_close */
 #define SC_NET   (SC_SEN | SC_RECV | SC_NETC)      /* 整条网络面 */
 #define SC_FSC   (1ull << 13)   /* fs_create */
-#define SC_FSO   (1ull << 14)   /* fs_open（写/追加口）*/
+#define SC_FSO   (1ull << 14)   /* fs_open（按 syscall 号粗粒度：禁 14 连只读 open 一并禁，
+                                   掩码不解析 mode 参数，偏严安全但无法只放行只读触口）*/
 #define SC_FSW   (1ull << 15)   /* fs_write */
 #define SC_FSR   (1ull << 16)   /* fs_read（dev 按需取舍，非必须禁）*/
 #define SC_FSD   (1ull << 19)   /* fs_delete */
