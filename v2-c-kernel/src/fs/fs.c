@@ -46,6 +46,9 @@ static int str_eq(const char *a, const char *b) {
 }
 
 /* ---- inode 存取 ---- */
+/* RD3（BUG-069/070）：一切把 inode 块号用于 blockdev 寻址的路径先过本校验；定义在 :317，
+ * 此处前向声明，供排在其前的 dir_add/dir_remove/dir_empty/fs_lookup_in 等使用。 */
+static int blk_valid(blockdev_t *bd, uint32_t blk);
 static void inode_get(blockdev_t *bd, uint32_t i, fs_inode_t *out) {
     if (i >= FS_MAX_INODES) { memsetb(out, 0, sizeof(*out)); return; }
     memcpb(out, blockdev_ptr(bd, INODE_TABLE_BLK, i * sizeof(fs_inode_t)),
@@ -94,7 +97,9 @@ static int dir_add(blockdev_t *bd, uint32_t dir, const char *name, uint32_t inod
             di.size += BLOCK_SIZE;
             inode_put(bd, dir, &di);
         }
+        if (!blk_valid(bd, di.blocks[b])) continue;   /* RD3 BUG-069/070：目录损坏块视同跳过，不解引用 */
         fs_dir_entry_t *e = (fs_dir_entry_t *)blockdev_ptr(bd, di.blocks[b], 0);
+        if (!e) continue;   /* 纵深：blockdev_ptr 返 0（off 越界等后端扩展路径） */
         for (uint32_t k = 0; k < ENTRIES_PER_BLOCK; k++) {
             if (e[k].inode == 0 && e[k].name[0] == 0) {
                 memsetb(e[k].name, 0, FS_MAX_NAME);
@@ -113,7 +118,9 @@ static void dir_remove(blockdev_t *bd, uint32_t dir, const char *name) {
     inode_get(bd, dir, &di);
     for (uint32_t b = 0; b < FS_DIRECT_BLOCKS; b++) {
         if (!di.blocks[b]) continue;
+        if (!blk_valid(bd, di.blocks[b])) continue;   /* RD3 BUG-069/070：损坏块跳过，不解引用 */
         fs_dir_entry_t *e = (fs_dir_entry_t *)blockdev_ptr(bd, di.blocks[b], 0);
+        if (!e) continue;   /* 纵深：blockdev_ptr 返 0 */
         for (uint32_t k = 0; k < ENTRIES_PER_BLOCK; k++) {
             if (e[k].inode && str_eq(e[k].name, name)) {
                 memsetb(e[k].name, 0, FS_MAX_NAME);
@@ -131,7 +138,9 @@ static int dir_empty(blockdev_t *bd, uint32_t dir) {
     inode_get(bd, dir, &di);
     for (uint32_t b = 0; b < FS_DIRECT_BLOCKS; b++) {
         if (!di.blocks[b]) continue;
+        if (!blk_valid(bd, di.blocks[b])) continue;   /* RD3 BUG-069/070：损坏块跳过，不解引用 */
         fs_dir_entry_t *e = (fs_dir_entry_t *)blockdev_ptr(bd, di.blocks[b], 0);
+        if (!e) continue;   /* 纵深：blockdev_ptr 返 0 */
         for (uint32_t k = 0; k < ENTRIES_PER_BLOCK; k++)
             if (e[k].inode) return 0;
     }
@@ -229,7 +238,9 @@ int fs_lookup_in(blockdev_t *bd, uint32_t dir, const char *name) {
     inode_get(bd, dir, &di);
     for (uint32_t b = 0; b < FS_DIRECT_BLOCKS; b++) {
         if (!di.blocks[b]) continue;
+        if (!blk_valid(bd, di.blocks[b])) continue;   /* RD3 BUG-069/070：损坏块跳过，不解引用（V1 防崩） */
         fs_dir_entry_t *e = (fs_dir_entry_t *)blockdev_ptr(bd, di.blocks[b], 0);
+        if (!e) continue;   /* 纵深：blockdev_ptr 返 0 */
         for (uint32_t k = 0; k < ENTRIES_PER_BLOCK; k++)
             if (e[k].inode && str_eq(e[k].name, name))
                 return (int)e[k].inode;
@@ -298,9 +309,14 @@ int fs_is_ro(blockdev_t *bd, uint32_t inode) {
     return (in.mode & FS_MODE_RO) ? 1 : 0;
 }
 
-/* 数据块号合法性检查（SEC-03）：块号必须落在数据区 [FS_DATA_START, bd->blocks)。
- * 防御 inode 表被恶意镜像篡改时 free_inode_blocks 用非法块号越界写数据块位图
- * （bit>>3 越过位图块 2 进入相邻内存）。正常路径 alloc_block 已保证合法。 */
+/* 数据块号合法性检查（SEC-03 + RD3，BUG-069/070）：块号必须落在数据区
+ * [FS_DATA_START, bd->blocks)，块 0-3（位图/inode 表）永不作为数据块寻址。
+ * SEC-03 起用于释放路径（free_inode_blocks）防非法块号越界写数据块位图；
+ * RD3 起推广到一切把 inode 块号用于 blockdev 寻址的路径（读/写/目录遍历/释放）——
+ * 统一前置校验、拒绝损坏块号（返回 0 或跳过该块），一举断掉两类链路：
+ *  V1（越界块号）→ blockdev_ptr 返 NULL → 调用方解引用崩；
+ *  V2（块号指向 inode 表/位图）→ 别名读写击穿 BUG-057 系统文件只读。
+ * 正常路径 alloc_block 已保证合法；此处专挡恶意镜像篡改后的 inode 块号。 */
 static int blk_valid(blockdev_t *bd, uint32_t blk) {
     return (blk >= FS_DATA_START && blk < bd->blocks) ? 1 : 0;
 }
@@ -363,7 +379,11 @@ uint32_t fs_size(blockdev_t *bd, uint32_t inode) {
     return in.size;
 }
 
-/* 返回文件第 b 个数据块号（不存在返回 0）；create=1 时惰性分配（含间接块） */
+/* 返回文件第 b 个数据块号（不存在返回 0）；create=1 时惰性分配（含间接块）。
+ * RD3 BUG-069/070 统一语义：损坏块号（越界 / 指向 inode 表位图）一律返回 0
+ * （=不存在/不可用），杜绝把非法块号透传 blockdev_ptr 解引用崩（V1），或别名写 inode
+ * 表位图击穿 BUG-057（V2）。对 create=1：损坏块号不可重分配覆盖（该块可能被镜像别处引用），
+ * 返回 0 交由 fs_write 既有"首块失败 -1 / 中间块短写"逻辑处理。 */
 static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t b, int create) {
     if (b < FS_DIRECT_BLOCKS) {
         if (in->blocks[b] == 0) {
@@ -373,6 +393,7 @@ static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t b, int creat
             memsetb(blockdev_ptr(bd, (uint32_t)blk, 0), 0, BLOCK_SIZE);
             in->blocks[b] = (uint32_t)blk;
         }
+        if (!blk_valid(bd, in->blocks[b])) return 0;   /* RD3 BUG-069/070：损坏直接块号不可用 */
         return in->blocks[b];
     }
     uint32_t ib = b - FS_DIRECT_BLOCKS;
@@ -384,7 +405,9 @@ static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t b, int creat
         memsetb(blockdev_ptr(bd, (uint32_t)blk, 0), 0, BLOCK_SIZE);
         in->indirect = (uint32_t)blk;
     }
+    if (!blk_valid(bd, in->indirect)) return 0;        /* RD3 BUG-069/070：损坏间接块号不可用 */
     uint32_t *ptrs = (uint32_t *)blockdev_ptr(bd, in->indirect, 0);
+    if (!ptrs) return 0;                               /* 纵深：blockdev_ptr 返 0 */
     if (ptrs[ib] == 0) {
         if (!create) return 0;
         int blk = alloc_block(bd);
@@ -392,6 +415,7 @@ static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t b, int creat
         memsetb(blockdev_ptr(bd, (uint32_t)blk, 0), 0, BLOCK_SIZE);
         ptrs[ib] = (uint32_t)blk;
     }
+    if (!blk_valid(bd, ptrs[ib])) return 0;            /* RD3 BUG-069/070：损坏拾取块号不可用 */
     return ptrs[ib];
 }
 
@@ -461,7 +485,9 @@ int fs_list_dir(blockdev_t *bd, uint32_t dir, fs_dir_entry_t *out, uint32_t max)
     uint32_t n = 0;
     for (uint32_t b = 0; b < FS_DIRECT_BLOCKS; b++) {
         if (!di.blocks[b]) continue;
+        if (!blk_valid(bd, di.blocks[b])) continue;   /* RD3 BUG-069/070：损坏块跳过，不解引用（V1 防崩） */
         fs_dir_entry_t *e = (fs_dir_entry_t *)blockdev_ptr(bd, di.blocks[b], 0);
+        if (!e) continue;   /* 纵深：blockdev_ptr 返 0 */
         for (uint32_t k = 0; k < ENTRIES_PER_BLOCK && n < max; k++) {
             if (e[k].inode) {
                 memsetb(out[n].name, 0, FS_MAX_NAME);
