@@ -17,15 +17,16 @@ CC      = gcc
 # 默认开；本地临时豁免用 `make WERROR=`（空串）关闭——注意是"默认开、显式传空串关"，
 # 门禁性质的变量不当默认关。cc500 自有 -w/-Wno-int-conversion 豁免，与 -Werror 不冲突。
 WERROR  ?= -Werror
-CFLAGS  = -m32 -ffreestanding -fno-pie -fno-stack-protector \
+CFLAGS  = -m32 -ffreestanding -fno-pie \
+          -fstack-protector-strong -mstack-protector-guard=global -fno-omit-frame-pointer \
           -fno-builtin -fno-asynchronous-unwind-tables -fcf-protection=none \
           -Wall -Wextra $(WERROR) -O2 -std=gnu99 -nostdlib \
           -MMD -MP \
           -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -I$(BUILD)
 # ---- P2 编译硬化（教学增强）：用户态 app 栈金丝雀 ----
-#  - 只对 src/app/ 的用户态程序生效，内核 src/ 保持 -fno-stack-protector（CFLAGS 已含）。
+#  - 作用于 src/app/ 的用户态程序（CFLAGS 的 -fstack-protector-strong 已存在，
+#    此处再叠加 -all 收紧为"所有含局部数组的函数"，gcc 命令最后出现的 -f*stack-protector 生效）。
 #  - 32 位无 TLS，必须 -mstack-protector-guard=global 走全局变量取金丝雀（否则 gcc 用 GS 段会崩）。
-#  - 该 flag 只是叠加在 CFLAGS 之后，gcc 命令行里最后的 -f*stack-protector 生效。
 #  - __stack_chk_guard / __stack_chk_fail 由 crt.c 提供（每个 app ELF 链 crt.o 均可得）。
 APP_SEC_CFLAGS = -fstack-protector-all -mstack-protector-guard=global
 ASM     = nasm
@@ -42,6 +43,9 @@ VPATH = src:src/arch:src/kernel:src/mm:src/drv:src/fs:src/net:src/app
 # 注意：tests/*.sh 内对 `build/` 的引用当前仍为字面路径，全量隔离 wiring 见 bugs.md BUG-053。
 BUILD        ?= build
 KERNEL       = $(BUILD)/kernel.elf
+# 显式默认目标为最终内核（加固 A-1 ③ 把 kernel_nosym.elf 提前成首条规则，
+# 若不加此行，`make` 会默认只构建 phase-1 就停）。
+.DEFAULT_GOAL := $(KERNEL)
 USERPROG_ELF = $(BUILD)/userprog.elf
 USERPROG_BIN = $(BUILD)/userprog.bin
 USERPROG_OBJ = $(BUILD)/userprog_bin.o
@@ -56,7 +60,8 @@ OBJS = $(addprefix $(BUILD)/, \
        brk.o usermode.o sched.o sched_policy.o sem.o msg.o blockdev.o fs.o elf.o userptr.o \
        pci.o e1000.o netutil.o ip.o udp.o icmp.o dhcp.o netsock.o \
        e1000_netif.o netif.o slip.o uart_netif.o \
-       ata.o storage.o userprog_bin.o) \
+       ata.o storage.o userprog_bin.o \
+       ssp.o ksym.o) \
        $(APP_ELFOBJS) $(SHELL_ELFOBJ)
 # v0.27: cc500 编译器源码 blob（嵌入 initramfs 作 /cc500.c，供 guest 内自举）。
 # 必须在 $(KERNEL): $(OBJS) 规则之前 append，否则该规则解析时（prereq 即时展开）
@@ -64,8 +69,26 @@ OBJS = $(addprefix $(BUILD)/, \
 CC500_CSRC = $(BUILD)/apps/cc500_csrc.o
 OBJS += $(CC500_CSRC)
 
-$(KERNEL): $(OBJS)
-	$(LD) $(LDFLAGS) -o $@ $(OBJS)
+# ---- 加固 A-1 ③：panic 调用栈回溯符号表（两阶段链接） ----
+# phase-1 先链出无符号表内核，经 nm 抽函数符号生成 ksym_tab.c，编成 ksym_tab.o，
+# phase-2 连同符号表重链出最终 kernel.elf。避免 kernel.elf -> ksym_tab.o 的循环依赖。
+KSYM_TAB   = $(BUILD)/ksym_tab.o
+KSYM_TOOLS = tools/gen_kernsym.sh
+
+$(BUILD)/kernel_nosym.elf: $(OBJS) $(BUILD)/ksym_stub.o
+	$(LD) $(LDFLAGS) -o $@ $(OBJS) $(BUILD)/ksym_stub.o
+
+$(BUILD)/ksym_stub.o: tools/ksym_stub.c
+	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
+
+$(BUILD)/ksym_tab.c: $(BUILD)/kernel_nosym.elf $(KSYM_TOOLS)
+	bash $(KSYM_TOOLS) $< $@
+
+$(KSYM_TAB): $(BUILD)/ksym_tab.c
+	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
+
+$(KERNEL): $(OBJS) $(KSYM_TAB)
+	$(LD) $(LDFLAGS) -o $@ $(OBJS) $(KSYM_TAB)
 
 # ---- 汇编 / C（默认模式规则，源文件经 VPATH 定位） ----
 $(BUILD)/%.o: %.s
@@ -108,7 +131,7 @@ $(BUILD)/sched.o: src/kernel/sched.c $(USERPROG_OFFS)
 
 # ---- 用户程序：编译 -> 链接(0x80000000) -> 转二进制 -> 以 .o 嵌入内核 ----
 $(BUILD)/userprog.o: src/app/userprog.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
 
 $(USERPROG_ELF): $(BUILD)/userprog.o src/userprog.ld
 	$(LD) -m elf_i386 -T src/userprog.ld -o $@ $(BUILD)/userprog.o
@@ -134,7 +157,7 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 # SEC-01 回归：badinsn 以 ring3 执行 ud2（#UD），验证用户态 CPU 异常被隔离杀进程而非整机停机
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash sandboxdemo badinsn
+APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash sandboxdemo badinsn chaos
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -151,6 +174,9 @@ $(BUILD)/apps/echo.elf: $(BUILD)/apps/echo.o $(BUILD)/apps/crt.o
 $(BUILD)/apps/crash.elf: $(BUILD)/apps/crash.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/badinsn.elf: $(BUILD)/apps/badinsn.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+# 加固 A-1 ④：chaos ring3 随机指令流探针（ud2/div0/int3/cli/hlt/nop 前缀 + 随机 syscall）
+$(BUILD)/apps/chaos.elf: $(BUILD)/apps/chaos.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/isol.elf: $(BUILD)/apps/isol.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
@@ -197,12 +223,12 @@ $(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o $(BUILD)/apps/crt.o
 #    -Wcompare-distinct-pointer-types 惯用法、-Wmaybe-uninitialized 等），
 #    该源本就不能在源码层修复，只能豁免。GCC 8+ 两者均有效、可并存。
 $(BUILD)/apps/cc500.o: tools/cc500/cc500.c
-	$(CC) $(CFLAGS) -Wno-int-conversion -w -c $< -o $@
+	$(CC) $(CFLAGS) -fno-stack-protector -Wno-int-conversion -w -c $< -o $@
 # cc500 专用 CRT：与 cc500.o 同属工具链，显式豁免 canary（APP_SEC_CFLAGS）。
 # 关键：cc500.elf 只链接 cc500_crt.o + cc500.o（无 crt.o 的 __stack_chk_* 符号），
 # 若这里也带 canary，会因未定义 __stack_chk_guard 链接失败。显式规则优先于 apps 模式规则。
 $(BUILD)/apps/cc500_crt.o: src/app/cc500_crt.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
 $(BUILD)/apps/cc500.elf: $(BUILD)/apps/cc500.o $(BUILD)/apps/cc500_crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/cc500_crt.o $<
 
