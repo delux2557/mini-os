@@ -15,6 +15,11 @@
 
 #define NETIF_MAX 4   /* 注册表容量（当前 2 及时够用：e1000 + 串口） */
 
+/* 单个以太网帧上限（MTU1500 载荷 + 14B 链路头 = 1514；留 4B 裕量到 1518）。
+ * SEC-07：DHCP 续约链在 IRQ0 中断栈（4KB）上层层拷贝整帧，据此把各接收缓冲
+ * 钳到恰好容纳一帧的最小值，避免 4 倍放大叠加超过内核栈。 */
+#define NET_ETH_FRAME_MAX 1518
+
 typedef struct netif_ops {
     int (*init)(void);                 /* 探测+初始化驱动；成功 0，无硬件 -1 */
     int (*ready)(void);                /* 驱动是否就绪：0 就绪 */

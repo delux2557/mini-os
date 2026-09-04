@@ -202,7 +202,10 @@ static void print_ip(uint32_t ip) {
  * 抢先消费无匹配端口的 DHCP 应答，见 netsock.c；socket 队列与用户流量共享分发路径）。 */
 static int dhcp_poll_once(uint8_t *mt, uint32_t *yi, uint32_t *si,
                           uint32_t *rt, uint32_t *ls) {
-    uint8_t bootp[NET_RXMAX];
+    /* SEC-07：原用 bootp[NET_RXMAX]=2048，在 IRQ0 中断栈上叠加溢出 4KB。
+     * DHCP 报文上限 = RFC 2131 最小 IP 重组缓冲 576B，此处钳到恰好容纳一条 DHCP
+     * 应答即可（netsock_dhcp_recv 按 max 截断，超长截断后 parse 拒绝，不越界）。 */
+    uint8_t bootp[576];
     int n = netsock_dhcp_recv(bootp, sizeof(bootp));
     if (n <= 0) return 0;
     return dhcp_parse_reply(bootp, (uint32_t)n, dhcp_xid, mt, yi, si, rt, ls) == 0;

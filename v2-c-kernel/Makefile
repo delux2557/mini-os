@@ -304,8 +304,20 @@ test-repro:
 test-tcp-attack:
 	bash tests/test_tcp_attack.sh
 
+# SEC-07 内核栈预算门禁：DHCP 续约 IRQ0 链栈帧总和断言（tests/check_stack_budget.sh）。
+# -fstack-usage 是纯分析（不改代码生成），只对链上几个文件单独开启并产出 .su，
+# 不进全局 CFLAGS；秒级，故并进 make test 主链。
+STACK_SU     = $(BUILD)/stackbudget
+STACK_FILES  = e1000.o netsock.o netif.o e1000_netif.o
+STACK_OBJS   = $(addprefix $(STACK_SU)/, $(STACK_FILES))
+$(STACK_SU)/%.o: %.c
+	@mkdir -p $(STACK_SU)
+	$(CC) $(CFLAGS) -fstack-usage -c $< -o $@
+test-stack: $(STACK_OBJS)
+	bash tests/check_stack_budget.sh $(STACK_SU) 3584
+
 # 完整测试
-test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp
+test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp test-stack
 
 # ---- 编译硬化门禁（P1）：危险 libc 调用检查 ----
 # 审计已确认全库无 strcpy/strcat/sprintf/vsprintf/gets；此目标把"人工检查"固化为可执行门禁，
@@ -326,4 +338,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack lint clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack lint clean
