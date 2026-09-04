@@ -126,6 +126,21 @@ send "run cansmash"
 wait_for "cansmash 启动"       "\[cansmash\] starting stack smash"
 wait_for "cansmash 触发金丝雀"  "\[CRIT\] stack smashing detected"
 wait_for "cansmash 退出"       "'cansmash' exited code="
+# ---- 加固 A-1 ④：ring3 chaos 探针（随机坏指令流 fork N 轮）----
+# 子进程每轮随机执行 ud2/int3/cli/hlt/div0/lgdt 一条，必触发 #UD/#BP/#GP/#DE；
+# 内核须把它隔离杀该子进程（panic_dump 现场 + sched_kill），父进程连跑 N 轮后
+# 自审计 0 并存活。任一坏指令未捕获（NOT_TRAPPED）即断言失败。
+send "run chaos"
+wait_for "chaos 启动"           "\[chaos\] start pid=.* rounds=[0-9]"
+wait_for "chaos 完成全部轮次"   "\[chaos\] survived [0-9][0-9]* rounds audit=0"
+wait_for "chaos 退出码"         "'chaos' exited code=0"
+SN_CHAOS=$(wc -l < "$LOG")
+sleep 0.5
+if tail -n "+$((SN_CHAOS+1))" "$LOG" | grep -aq "NOT_TRAPPED"; then
+    echo "[FAIL] chaos 存在未被捕获的坏指令（NOT_TRAPPED）"; FAIL=$((FAIL+1))
+else
+    echo "[ok]   chaos 无漏杀（无 NOT_TRAPPED）"
+fi
 # ---- v0.34 BUG-058 per-process syscall 掩码（最小权限，seccomp 教学版） ----
 # 单向收窄：受限后 fs 写面/网络 syscall 返回 -1，生存项仍活，sys_limit(0,0) 无法放宽。
 send "run sandboxdemo"

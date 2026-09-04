@@ -3,6 +3,36 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.16] - 2026-09-05 · 加固 A-1：内核 SSP + panic 寄存器/调用栈回溯 + ring3 chaos 探针（BUG-072+）
+
+> 承接 #69（异常族单点已清）后的可观测性加固：编译期兜底 + 故障可观测性两层，非单一崩点修复。
+> ① 内核 SSP：CFLAGS 开 `-fstack-protector-strong -mstack-protector-guard=global -fno-omit-frame-pointer`；
+> `ssp_seed()` 用 RDTSC 随机化 `__stack_chk_guard`（区别 app 层固定值防绕过），`__stack_chk_fail` 打印
+> `[PANIC] kernel stack canary mismatch` 后停机——宁要可诊断停机不要静默内存破坏。
+> ② panic 现场增强：`tools/gen_kernsym.sh`（`nm` 提取）+ 两阶段链接嵌入符号表，`ksym_name` 二分符号化 +
+> `dump_backtrace`（EBP 链）+ `panic_dump`（寄存器 + eip 符号 + 内核态回溯/ring3 注明），接入 idt.c 异常路径。
+> ④ ring3 chaos 探针：`run chaos` 每轮 fork 子进程随机执行 ud2/int3/cli/hlt/div0/lgdt 一条，
+> 内核隔离杀该子进程（panic_dump 现场 + sched_kill），父进程连跑 6 轮后自审计 0 存活，接入 test-serial 断言。
+> 非目标：不引入 PAE/NX、不做 ASLR、不变中断模型、不扩 KSTACK。
+
+**Engineered**
+
+* [Makefile](../../v2-c-kernel/Makefile)：CFLAGS 启用 SSP/帧指针；OBJS 增 `ssp.o` `ksym.o`；两阶段链接
+  （`kernel_nosym.elf` → `gen_kernsym.sh` → `ksym_tab.c` 重链），`.DEFAULT_GOAL` 固定最终内核；APPS 增 `chaos`。
+* [ssp.c](../../v2-c-kernel/src/kernel/ssp.c)：RDTSC 混合随机化内核栈金丝雀 + `__stack_chk_fail` panic dump。
+* [ksym.c](../../v2-c-kernel/src/kernel/ksym.c) + [gen_kernsym.sh](../../v2-c-kernel/tools/gen_kernsym.sh)+ [ksym_stub.c](../../v2-c-kernel/tools/ksym_stub.c)：
+  符号表二分 + 寄存器 dump + EBP 回溯；接入 [idt.c](../../v2-c-kernel/src/arch/idt.c)（用户态异常隔离杀进程）。
+* [kernel.c](../../v2-c-kernel/src/kernel/kernel.c)：`kernel_main` 早期（serial_init 后）执行 `ssp_seed()`。
+* [apps/chaos.c](../../v2-c-kernel/src/app/chaos.c) + [storage.c](../../v2-c-kernel/src/fs/storage.c)：ring3 随机坏指令探针注册入 initramfs。
+* [test_serial.sh](../../v2-c-kernel/tests/test_serial.sh)：`run chaos` 断言 survived rounds audit=0 + 无 NOT_TRAPPED
+  （`[0-9]+` 需写作 `[0-9][0-9]*`——grep 默认 BRE 中 `+` 是字面量，非量词）。
+
+**自测实录**
+
+* `make`（-Werror 默认开）干净；`make test-host` pass=20 fail=0；`make test-stack` OK；`make test-serial` 全绿（含 chaos 断言）；`make test-qemu` 通过。
+* 手动验证：内核态临时栈溢出 → 串口出 `[PANIC] kernel stack canary mismatch (__stack_chk_fail)` 后停机（非静默）；chaos 各轮 #UD/#DE/#GP dump 寄存器 + ring3 隔离，6 轮后系统存活。验证后临时代码已还原。
+Docs：bugs.md 登记 BUG-072+（加固 A-1）。
+
 ## [v1.4.15] - 2026-09-04 · Red Team 四轮 RD5：块归属账本——关闭"合法范围内重复块"（BUG-071）
 
 > 红队四轮 RD5-V4，属 RD3（BUG-069/070）诚实边界清单中的**内容层矛盾**。RD3 只做块号**范围校验**

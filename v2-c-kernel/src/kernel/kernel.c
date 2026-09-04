@@ -60,6 +60,12 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     vga_init();
     serial_init();
 
+    /* 加固 A-1 ①：尽早随机化内核栈金丝雀（防固定值被绕过）。
+     * 须在 serial_init 之后（ssp_seed 印日志）；此时内核各子系统函数尚未大量入栈，
+     * 之后的函数序言/返回前读的都是新值，语义一致。 */
+    extern void ssp_seed(void);
+    ssp_seed();
+
     vga_puts("Mini-OS " MINI_OS_VERSION "  (toolchain self-host: cc500 compiles itself in guest)\n");
     serial_puts("[boot] VGA + serial ready\n");
 
