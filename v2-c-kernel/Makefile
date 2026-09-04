@@ -13,9 +13,13 @@
 # 构建技巧：源文件查找用 VPATH（子目录），头文件用 -I 逐目录找，
 #          因此 #include "xxx.h" 与 OBJS 里的裸文件名都无需改。
 CC      = gcc
+# 编译硬化门禁（P1）：CI 固定 gcc13 下把告警升级为错误，防新增代码告警回退。
+# 默认开；本地临时豁免用 `make WERROR=`（空串）关闭——注意是"默认开、显式传空串关"，
+# 门禁性质的变量不当默认关。cc500 自有 -w/-Wno-int-conversion 豁免，与 -Werror 不冲突。
+WERROR  ?= -Werror
 CFLAGS  = -m32 -ffreestanding -fno-pie -fno-stack-protector \
           -fno-builtin -fno-asynchronous-unwind-tables -fcf-protection=none \
-          -Wall -Wextra -O2 -std=gnu99 -nostdlib \
+          -Wall -Wextra $(WERROR) -O2 -std=gnu99 -nostdlib \
           -MMD -MP \
           -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -I$(BUILD)
 ASM     = nasm
@@ -283,10 +287,23 @@ test-tcp-attack:
 # 完整测试
 test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp
 
+# ---- 编译硬化门禁（P1）：危险 libc 调用检查 ----
+# 审计已确认全库无 strcpy/strcat/sprintf/vsprintf/gets；此目标把"人工检查"固化为可执行门禁，
+# 防后续新增代码引入危险函数。范围 src/ 足够（cc500 在 tools/，不扩扫）。
+# lint 记录：
+#   - 用 -w 词边界，避免未来误伤 snprintf（安全）、getsomething 之类标识符子串；
+#   - user_lib.h 里无危险函数，负过滤保留只是防御性写法。
+lint:
+	@echo "[lint] checking banned libc..."
+	@if grep -Rrnw 'src/' -e 'strcpy' -e 'strcat' -e 'sprintf' -e 'vsprintf' -e 'gets' \
+	     --include="*.c" --include="*.h" | grep -v 'user_lib.h'; then \
+	  echo "[lint] ERROR: banned libc function found"; exit 1; fi
+	@echo "[lint] OK"
+
 clean:
 	rm -rf $(BUILD) tests/build
 
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack lint clean
