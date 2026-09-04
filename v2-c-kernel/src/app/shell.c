@@ -536,12 +536,16 @@ static void cmd_ccrun(char *args) {
     uint32_t t_compile = (sys_getticks() - t0) * 10u;   /* B1：compile 耗时(ms)，100Hz */
     /* 2) 运行编译产物 */
     uint32_t t1 = sys_getticks();                   /* B1：run 段起点 */
-    pid = sys_spawn_file(tok[1]);
-    if (pid <= 0) {
+    /* 红队 F1/F2 修复：spawn 失败（返回 -1）必须走有符号路径判败，与 cmd_run 同构。
+     * 若沿用上面的 uint32_t pid，`(uint32_t)-1` 会使 `pid <= 0` 恒假 → 静默落入
+     * sys_wait(-1) → code 保持 0 → 打印假 "PASS (run=0ms)"（run=0ms 即为未运行的铁证）。
+     * 编译段（fork）保持 uint32_t，此处运行段单独用有符号 spid。 */
+    int spid = sys_spawn_file(tok[1]);
+    if (spid <= 0) {
         sys_print("[ccrun] cannot run '"); sys_print(tok[1]); sys_print("'\n"); return;
     }
     code = 0;
-    (void)sys_wait((uint32_t)pid, &code);
+    (void)sys_wait((uint32_t)spid, &code);
     uint32_t t_run = (sys_getticks() - t1) * 10u;   /* B1：run 耗时(ms) */
     /* B4：判据行原子化（单次 sys_print）并附 B1 耗时 */
     char obuf[192];
