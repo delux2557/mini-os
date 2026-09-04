@@ -316,6 +316,108 @@ static uint32_t kern_audit(void) {
 }
 
 /* ---- 系统调用分发（int 0x80 门进入） ---- */
+/* ---- L1（栈预算总账）：把大缓冲 case 下沉为独立函数 ----
+ * syscall_dispatch 是 int 0x80 唯一入口，任何 syscall 都会在其栈帧上运行。若把
+ * exec 的 names[8][64](512B) / sendto 的 pbuf[1400] 直接写进 dispatch 的 switch，
+ * 编译器按最大 case 预留栈帧（实测 2224B），叠加下层 recvfrom/netsock_send 深链后
+ * 逼近甚至越过 4KB 内核栈预算（SEC-07 教训：DHCP 链 5528B 静默写穿）。
+ * 改为独立函数：单个 case 的大缓冲只在自身栈帧出现，dispatch 单帧回落到 <300B，
+ * 各深链（exec/sendto/recvfrom…）互不叠加，都在 check_stack_budget.sh 预算内。 */
+
+/* case 25 sys_exec(name, argc, argv)：argv 快照 names[8][64] 独立成帧。
+ * noinline：若被 -O2 内联回 dispatch，大缓冲又会抬高分发器单帧，拆分失去意义。 */
+static __attribute__((noinline)) void sys_exec_case(registers_t *r, uint32_t a, uint32_t b, uint32_t c) {
+    if (b > 8) { r->eax = (uint32_t)-1; return; }
+    uint32_t argc = b;
+    char *const *argv = (char *const *)c;
+    /* v0.17：name / argv 数组 / 每个 argv[i] 字符串都先校验并拷入内核缓冲。
+     * name 与 argv 内容都位于当前（旧）地址空间，而加载/替换期间会切 CR3，
+     * 故须先在当前地址空间把它们全部拷入内核缓冲（与 spawn_elf 的 namebuf 同因）。 */
+    char namebuf[16];
+    if (copyin_str((const char *)a, namebuf, sizeof(namebuf)) < 0) { r->eax = (uint32_t)-1; return; }
+    if (argc && !user_ptr_valid((const void *)argv, argc * sizeof(char *))) {
+        r->eax = (uint32_t)-1;
+        return;
+    }
+    char names[8][64];
+    for (uint32_t i = 0; i < argc; i++) {
+        if (!argv[i]) { r->eax = (uint32_t)-1; return; }
+        if (copyin_str(argv[i], names[i], sizeof(names[i])) < 0) { r->eax = (uint32_t)-1; return; }
+    }
+    /* 加载 ELF 到新地址空间（与 spawn_elf 同法：建 pd、切 CR3 加载、切回）。
+     * 全程关中断：sched_exec 释放旧地址空间期间不允许抢占。 */
+    uint32_t pd = addr_space_create();
+    if (!pd) { r->eax = (uint32_t)-1; return; }
+    load_pd = pd;
+    uint32_t entry;
+    uint32_t saved_pd = mem_current_pd();
+    __asm__ volatile ("cli");
+    switch_page_dir(pd);
+    int rc = load_elf_file(namebuf, APP_LINK, &entry);
+    switch_page_dir(saved_pd);
+    if (rc != 0) {
+        addr_space_destroy(pd);
+        __asm__ volatile ("sti");
+        serial_printf("[user] exec '%s' load failed\n", namebuf);
+        r->eax = (uint32_t)-1;
+        return;
+    }
+    rc = sched_exec(r, namebuf, pd, entry, load_frames, load_fcount, load_vbase,
+                    names, argc);       /* 成功不返回 */
+    if (rc != 0) {
+        for (uint32_t i = 0; i < load_fcount; i++) frame_free(load_frames[i]);
+        load_frames_free();        /* v0.28 审查修复：归还 load_frames 数组（P0-2） */
+        addr_space_destroy(pd);
+        load_fcount = 0;
+        __asm__ volatile ("sti");
+        serial_printf("[user] exec '%s' failed (no stack)\n", namebuf);
+        r->eax = (uint32_t)-1;
+        return;
+    }
+    /* 成功路径（sched_exec 不返回）里 load_frames 数组已由 sched_exec 复制后释放 */
+    load_fcount = 0;
+    __asm__ volatile ("cli; hlt");   /* 不可达 */
+}
+
+/* case 31 sys_net_sendto(sock, *iov)：发送缓冲 pbuf[1400] 独立成帧（同 sys_exec_case 的 noinline 理由） */
+static __attribute__((noinline)) void sys_sendto_case(registers_t *r, uint32_t a, uint32_t b) {
+    struct net_send_iov iov;
+    if (copyin((const void *)b, &iov, sizeof(iov)) < 0) { r->eax = (uint32_t)-1; return; }
+    if (iov.len > 1400) { r->eax = (uint32_t)-1; return; }
+    uint8_t pbuf[1400];
+    if (iov.len && copyin(iov.buf, pbuf, iov.len) < 0) { r->eax = (uint32_t)-1; return; }
+    int n = netsock_send((int)a, iov.dst_ip, iov.dst_port, pbuf, iov.len);
+    serial_printf("[net] sendto sock=%d %uB -> %x:%u rc=%d\n",
+                  (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
+    r->eax = (uint32_t)n;
+}
+
+/* case 18 sys_fs_ls(path)：目录列表缓冲 ents[64×32=2048B] 是 dispatch 内现存最大
+ * 单帧来源，独立成帧（同 sys_exec_case 的 noinline 理由/栈预算总账）。 */
+static __attribute__((noinline)) void sys_fs_ls_case(registers_t *r, uint32_t a) {
+    char path[64];
+    const char *pp;
+    if (a == 0) { pp = ""; }
+    else if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
+    else { pp = path; }
+    fs_dir_entry_t ents[FS_MAX_INODES];
+    int n = fs_list(fs_device(), pp, ents, FS_MAX_INODES);
+    if (n < 0) { r->eax = (uint32_t)-1; return; }
+    vga_printf("[ls] %s:\n", pp[0] ? pp : "/");
+    serial_printf("[ls] %s:\n", pp[0] ? pp : "/");
+    for (int i = 0; i < n; i++) {
+        uint32_t sz = fs_size(fs_device(), ents[i].inode);
+        const char *mark = ents[i].type == FS_TYPE_DIR ? "/" : "";
+        vga_printf("  %s%s (inode=%u size=%u)\n", ents[i].name, mark,
+                   ents[i].inode, sz);
+        serial_printf("[ls]   %s%s inode=%u size=%u\n", ents[i].name, mark,
+                      ents[i].inode, sz);
+    }
+    vga_printf("[ls] %d entries\n", n);
+    serial_printf("[ls] %d entries\n", n);
+    r->eax = (uint32_t)n;
+}
+
 void syscall_dispatch(registers_t *r) {
     /* 只允许来自用户态（ring3）的触发 */
     if ((r->cs & 3) != 3) {
@@ -550,30 +652,10 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
-    case 18: { /* sys_fs_ls(path)：列出目录内容（v0.14 路径化；path 空/0=根目录） */
-        char path[64];
-        const char *pp;
-        if (a == 0) { pp = ""; }
-        else if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
-        else { pp = path; }
-        fs_dir_entry_t ents[FS_MAX_INODES];
-        int n = fs_list(fs_device(), pp, ents, FS_MAX_INODES);
-        if (n < 0) { r->eax = (uint32_t)-1; return; }
-        vga_printf("[ls] %s:\n", pp[0] ? pp : "/");
-        serial_printf("[ls] %s:\n", pp[0] ? pp : "/");
-        for (int i = 0; i < n; i++) {
-            uint32_t sz = fs_size(fs_device(), ents[i].inode);
-            const char *mark = ents[i].type == FS_TYPE_DIR ? "/" : "";
-            vga_printf("  %s%s (inode=%u size=%u)\n", ents[i].name, mark,
-                       ents[i].inode, sz);
-            serial_printf("[ls]   %s%s inode=%u size=%u\n", ents[i].name, mark,
-                          ents[i].inode, sz);
-        }
-        vga_printf("[ls] %d entries\n", n);
-        serial_printf("[ls] %d entries\n", n);
-        r->eax = (uint32_t)n;
+    case 18:  /* sys_fs_ls(path)：列出目录内容（v0.14 路径化；path 空/0=根目录）。
+                 L1：大缓冲 ents[2048B] 下沉 sys_fs_ls_case（栈预算总账） */
+        sys_fs_ls_case(r, a);
         return;
-    }
     case 19: { /* sys_fs_delete(name)：删除文件（v0.14 支持路径；目录用 sys_fs_rmdir） */
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
@@ -702,60 +784,11 @@ void syscall_dispatch(registers_t *r) {
     case 24:  /* sys_fork()：复制当前进程。父进程返回子 pid；子进程从调用点继续（返回 0） */
         r->eax = (uint32_t)sched_fork(r);
         return;
-    case 25: { /* sys_exec(name, argc, argv)：加载 ELF 替换当前进程（镜像替换）。
-                  argv 为用户空间指针数组（argc 个 char*，最多 8 条）。成功不返回；失败返回 -1 */
-        if (b > 8) { r->eax = (uint32_t)-1; return; }
-        uint32_t argc = b;
-        char *const *argv = (char *const *)c;
-        /* v0.17：name / argv 数组 / 每个 argv[i] 字符串都先校验并拷入内核缓冲。
-         * name 与 argv 内容都位于当前（旧）地址空间，而加载/替换期间会切 CR3，
-         * 故须先在当前地址空间把它们全部拷入内核缓冲（与 spawn_elf 的 namebuf 同因）。 */
-        char namebuf[16];
-        if (copyin_str((const char *)a, namebuf, sizeof(namebuf)) < 0) { r->eax = (uint32_t)-1; return; }
-        if (argc && !user_ptr_valid((const void *)argv, argc * sizeof(char *))) {
-            r->eax = (uint32_t)-1;
-            return;
-        }
-        char names[8][64];
-        for (uint32_t i = 0; i < argc; i++) {
-            if (!argv[i]) { r->eax = (uint32_t)-1; return; }
-            if (copyin_str(argv[i], names[i], sizeof(names[i])) < 0) { r->eax = (uint32_t)-1; return; }
-        }
-        /* 加载 ELF 到新地址空间（与 spawn_elf 同法：建 pd、切 CR3 加载、切回）。
-         * 全程关中断：sched_exec 释放旧地址空间期间不允许抢占。 */
-        uint32_t pd = addr_space_create();
-        if (!pd) { r->eax = (uint32_t)-1; return; }
-        load_pd = pd;
-        uint32_t entry;
-        uint32_t saved_pd = mem_current_pd();
-        __asm__ volatile ("cli");
-        switch_page_dir(pd);
-        int rc = load_elf_file(namebuf, APP_LINK, &entry);
-        switch_page_dir(saved_pd);
-        if (rc != 0) {
-            addr_space_destroy(pd);
-            __asm__ volatile ("sti");
-            serial_printf("[user] exec '%s' load failed\n", namebuf);
-            r->eax = (uint32_t)-1;
-            return;
-        }
-        rc = sched_exec(r, namebuf, pd, entry, load_frames, load_fcount, load_vbase,
-                        names, argc);       /* 成功不返回 */
-        if (rc != 0) {
-            for (uint32_t i = 0; i < load_fcount; i++) frame_free(load_frames[i]);
-            load_frames_free();        /* v0.28 审查修复：归还 load_frames 数组（P0-2） */
-            addr_space_destroy(pd);
-            load_fcount = 0;
-            __asm__ volatile ("sti");
-            serial_printf("[user] exec '%s' failed (no stack)\n", namebuf);
-            r->eax = (uint32_t)-1;
-            return;
-        }
-        /* 成功路径（sched_exec 不返回）里 load_frames 数组已由 sched_exec 复制后释放 */
-        load_fcount = 0;
-        __asm__ volatile ("cli; hlt");   /* 不可达 */
+    case 25:  /* sys_exec(name, argc, argv)：加载 ELF 替换当前进程（镜像替换）。
+                 argv 为用户空间指针数组（argc 个 char*，最多 8 条）。成功不返回；失败返回 -1。
+                 L1：大缓冲下沉 sys_exec_case，避免抬高 dispatch 单帧（栈预算总账） */
+        sys_exec_case(r, a, b, c);
         return;
-    }
     case 26: { /* sys_fs_seek(fd, off)：定位读写位置，返回新位置或 -1 */
         fs_file_t *fdt = cur_fdt();
         if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
@@ -794,18 +827,10 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)s;
         return;
     }
-    case 31: { /* sys_net_sendto(sock, *iov)：发 UDP 数据报，返回实际发送字节数或 -1 */
-        struct net_send_iov iov;
-        if (copyin((const void *)b, &iov, sizeof(iov)) < 0) { r->eax = (uint32_t)-1; return; }
-        if (iov.len > 1400) { r->eax = (uint32_t)-1; return; }
-        uint8_t pbuf[1400];
-        if (iov.len && copyin(iov.buf, pbuf, iov.len) < 0) { r->eax = (uint32_t)-1; return; }
-        int n = netsock_send((int)a, iov.dst_ip, iov.dst_port, pbuf, iov.len);
-        serial_printf("[net] sendto sock=%d %uB -> %x:%u rc=%d\n",
-                      (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
-        r->eax = (uint32_t)n;
+    case 31:  /* sys_net_sendto(sock, *iov)：发 UDP 数据报，返回实际发送字节数或 -1。
+                 L1：发送缓冲 pbuf[1400] 下沉 sys_sendto_case（栈预算总账） */
+        sys_sendto_case(r, a, b);
         return;
-    }
     case 32: { /* sys_net_recvfrom(sock, *iov)：非阻塞收 UDP 数据报（0=无包）；src_* 出参 */
         struct net_recv_iov iov;
         if (copyin((const void *)b, &iov, sizeof(iov)) < 0) { r->eax = (uint32_t)-1; return; }

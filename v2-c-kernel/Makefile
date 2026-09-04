@@ -308,7 +308,9 @@ test-tcp-attack:
 # -fstack-usage 是纯分析（不改代码生成），只对链上几个文件单独开启并产出 .su，
 # 不进全局 CFLAGS；秒级，故并进 make test 主链。
 STACK_SU     = $(BUILD)/stackbudget
-STACK_FILES  = e1000.o netsock.o netif.o e1000_netif.o
+# L1（栈预算总账）：除 SEC-07 网卡链外，新增 syscall 分发器 / 调度 / 键盘 / 串口 /
+# 定时器文件，供 check_stack_budget.sh 对全部"关键根链"做帧预算断言。
+STACK_FILES  = e1000.o netsock.o netif.o e1000_netif.o usermode.o sched.o timer.o kb.o serial.o
 STACK_OBJS   = $(addprefix $(STACK_SU)/, $(STACK_FILES))
 $(STACK_SU)/%.o: %.c
 	@mkdir -p $(STACK_SU)
