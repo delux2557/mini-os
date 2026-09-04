@@ -96,11 +96,25 @@ void isr_handler(registers_t *r) {
         extern void syscall_dispatch(registers_t *);
         syscall_dispatch(r);
     } else {
-        /* CPU 异常：打印现场并停机 */
+        /* CPU 异常：先打印现场。SEC-01 修复：区分来源——
+         * 用户态异常（#DE/#UD/#GP/#BP/#AC…）与 pf_handler 同构，杀进程并调度，
+         * 不让低权限 ring3 程序借一条 ud2/除零/cli 使整机停机（DoS）；
+         * 仅内核态异常说明内核自身缺陷、无法安全继续，才 cli;hlt 停机。 */
         serial_printf("\n[KERNEL] CPU exception #%u err=%u eip=%x\n",
                       r->int_no, r->err_code, r->eip);
         vga_printf("\n[KERNEL] CPU exception #%u err=%u eip=%x\n",
                    r->int_no, r->err_code, r->eip);
+        if ((r->cs & 3) == 3) {
+            extern void sched_kill(registers_t *, uint32_t);
+            extern uint32_t sched_current_pid(void);
+            uint32_t pid = sched_current_pid();
+            serial_printf("[user] CPU EXCEPTION #%u pid=%u eip=%x -> killed\n",
+                          r->int_no, pid, r->eip);
+            vga_printf("[user] CPU EXCEPTION #%u pid=%u eip=%x -> killed\n",
+                       r->int_no, pid, r->eip);
+            sched_kill(r, (uint32_t)-1);
+            __asm__ volatile ("cli; hlt");   /* 不可达：sched_kill 已切换进程 */
+        }
         __asm__ volatile ("cli; hlt");
     }
 }

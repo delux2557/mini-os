@@ -102,6 +102,12 @@ cmd "echo 输入"      "hi
 "      "\[echo\] got 2 bytes: \[hi\]"
 cmd "run crash"      "run crash
 "      "\[crash\] writing kernel memory" "\[shell\] 'crash' exited code="
+# ---- BUG-059 / SEC-01：ring3 非法指令（#UD）必须隔离杀进程，不得整机停机 ----
+cmd "run badinsn(#UD)" "run badinsn
+"      "\[badinsn\] pid=.* ud2 illegal instruction from ring3" "\[user\] CPU EXCEPTION #6" "\[shell\] 'badinsn' exited code="
+# 若 #UD 令整机停机，下面这条必超时——以一条成功命令证明系统仍存活（未冻结）
+cmd "#UD 后系统仍存活" "run hello
+"      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run isol"       "run isol
 "      "\[isol\] pid=.* map ok addr=0x80050000" "\[isol\] pid=.* ISOLATED OK" "\[shell\] 'isol' exited code=0"
 # ---- v0.12 fork / exec ----
@@ -236,6 +242,7 @@ check "initramfs 写入 motd"   "\[ramdisk\] 'motd'"
 check "initramfs 写入 hello"  "\[ramdisk\] 'hello'"
 check "initramfs 写入 echo"   "\[ramdisk\] 'echo'"
 check "initramfs 写入 crash"  "\[ramdisk\] 'crash'"
+check "initramfs 写入 badinsn" "\[ramdisk\] 'badinsn'"
 check "initramfs 写入 shell"  "\[ramdisk\] 'shell'"
 check "内核加载 shell ELF"    "\[elf\] 'shell' loaded"
 check "shell 进程创建"        "spawn_at pid=10 name=shell"

@@ -1362,6 +1362,84 @@
 
 ***
 
+## BUG-059 \[已修复] 用户态 CPU 异常（#UD/#DE/#GP 等）→ 整机停机 DoS（SEC-01）
+
+* **版本**：当前 main（2026-09-04 独立系统安全评估 SEC-01 实测发现）
+
+* **现象/隐患**：`isr_handler` 默认分支对所有非 #PF（异常 14）/非 int 0x80（128）的 CPU 异常
+  一律打印后 `cli;hlt`，且**不区分来源 CPL**。ring3 用户程序执行 `ud2`（#UD=异常 6）、除零（#DE）、
+  `int3`/`cli`/非法段访问（#GP）等，均触发同一分支 → **整机永久停机**。实测：给 app 注入 `ud2` 后
+  QEMU 日志 `[KERNEL] CPU exception #6 err=0 eip=800a0092`，此后调度/串口/网络心跳/键盘全部停止，
+  必须重启 QEMU。低权限、一次触发、无前置条件——破坏"最坏只能杀进程"的隔离铁律。
+
+* **根因**：缺与 `pf_handler`（用户态缺页 → 杀进程，[mem.c](../../v2-c-kernel/src/mm/mem.c#L247)）
+  同构的"非 #PF 用户态异常杀进程"路径。异常入口桩（isr.s）已把用户帧切到内核栈（TSS esp0）、
+  `registers_t` 含完整 cs/eip，分发层只需按 `r->cs & 3` 区分来源即可，无需改汇编。
+
+* **修复**（[idt.c](../../v2-c-kernel/src/arch/idt.c#L98-L119)）：CPU 异常分支先打现场，若
+  `(r->cs & 3) == 3`（来自用户态），打印 `[user] CPU EXCEPTION #n pid=k -> killed` 后
+  `sched_kill(r, -1)`（非返回，内部 terminate_current 重调度）；仅内核态异常保留 `cli;hlt` 停机。
+
+* **回归**：QEMU 实测 `run crash`（注入 ud2）：日志依次 `[KERNEL] CPU exception #6 eip=... ->
+  [user] CPU EXCEPTION #6 pid=3 -> killed -> [sched] kill/reap pid=3 -> [shell] 继续响应 help`，
+  系统存活继续运行（修复前此处冻结）；`make test-host` pass=20/fail=0、`make` -Werror 构建干净。
+
+***
+
+## BUG-060 \[已修复] FS 释放路径数据块号无界校验 → 恶意镜像越界写数据块位图（SEC-03）
+
+* **版本**：当前 main（2026-09-04 独立系统安全评估 SEC-03）
+
+* **现象/隐患**：`free_inode_blocks` 把 inode 的 `blocks[]/indirect/间接指针` 直接当作
+  **数据块位图的位索引**（`bit>>3`）写入，无「块号落在数据区 `[FS_DATA_START, bd->blocks)`」校验。
+  若 inode 表被篡改（挂载恶意 `-hda` 镜像，模拟冷启动外部输入的磁盘）──本内核 syscall 面写不到
+  inode 表块（块 3），正常用户进程不可达，但攻击面=「未校验的冷启动磁盘镜像」──非法块号越界写位图
+  块 2 相邻内存，可能破坏 FS 元数据或邻近内核数据。
+
+* **根因**：分配侧 `alloc_block` 校验了 `bd->blocks` 上限，释放侧未做同构校验。
+
+* **修复**（[fs.c](../../v2-c-kernel/src/fs/fs.c#L297-L319)）：新增 `blk_valid` 判定
+  `blk>=FS_DATA_START && blk<bd->blocks`；`free_inode_blocks` 对直接块、间接指针、间接块本身
+  释放前一律过校验，非法块号跳过（不动位图）。
+
+* **回归**：`make test-host` pass=20/20（含 test_fs 正常释放路径不误伤）。
+
+***
+
+## BUG-061 \[已修复] 超长路径分量静默截断后继续解析（SEC-04）
+
+* **版本**：当前 main（2026-09-04 独立系统安全评估 SEC-04）
+
+* **现象/隐患**：`fs_walk` 分量缓冲 24B、截断到 23 字符后，剩余字符被**误当后续路径分量**继续解析
+  ——「超长名不存在」被错解成「23 字符前缀对象 + 子路径」，`fs_create/fs_delete/fs_lookup` 语义错乱
+  （如删错对象）。无越界写（缓冲有界），属解析语义缺陷。
+
+* **根因**：分量读入循环 `cl < FS_MAX_NAME-1` 截止后未检测「分量未完」（`*p` 仍非 `/`）。
+
+* **修复**（[fs.c](../../v2-c-kernel/src/fs/fs.c#L163-L168)）：分量读满 23 字符且后续仍是非 `/`
+  字符时直接 `return -1`（拒判），不再吞剩余字符续解析。
+
+* **回归**：`make test-host` pass=20/20。
+
+***
+
+## BUG-062 \[已修复] fs_make 忽略父目录只读，目录级 RO 可被绕建（SEC-05）
+
+* **版本**：当前 main（2026-09-04 独立系统安全评估 SEC-05）
+
+* **现象/隐患**：BUG-057 只读保护作用在**文件**层（`fs_delete/fs_rmdir/fs_write` 权威拦截），但
+  `fs_make`/`dir_add` **不检查父目录的 `FS_MODE_RO`**，可在只读目录下新建条目（`fs_create/fs_mkdir`）。
+  当前 initramfs 只 protect 文件不 protect 目录，故现状无实际绕过；若未来把目录设只读预期可被绕。
+
+* **根因**：`dir_add` 与 `fs_make` 只在文件层查 mode，未在父目录维度对齐。
+
+* **修复**（[fs.c](../../v2-c-kernel/src/fs/fs.c#L258)）：`fs_make` 分配 inode 前检查
+  `fs_is_ro(bd, dir)==1` 即 `return -1`，与文件级语义对齐。
+
+* **回归**：`make test-host` pass=20/20。
+
+***
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号      | 场景               | 现象                                                                                                                   | 处置/教训                                                                                                                                             |
@@ -1385,4 +1463,6 @@
 | OBS-008（协议 压测 2026-09-01）     | 宿主层解析器（IP / UDP / ICMP / DHCP / SLIP / 虚拟 TCP 会话头）**ASan+UBSan 150w 轮 fuzz = 1200w 次 parse 调用**，无崩溃/越界/UB（19 项宿主单测 0 fail）                                                                                                   | 解析器加固到位，1200w 调用未暴露新协议漏洞。ASan+UBSan 清洁是业界回归基线；保留 `tests/fuzz_parse.c` + `run_host_tests.sh`，`FUZZ_ITERS=1500000` CI 可直接跑。                                                                                                               |
 | OBS-009（返回状态穷举 2026-09-03）   | 用"枚举每个分配/映射接口返回状态"审计 `frame_alloc`/`map_page_in` 调用点：`usermode.c app_mapfn` 加载 ELF 时 `map_page_in` **页表帧 OOM 后静默丢映射**（后续该 app 跑触该页才缺页崩）；懒分配 [mem.c](../../v2-c-kernel/src/mm/mem.c) `map_page` 丢弃 `-1`（可能 fault 重试循环）；sched/idle 初始化及 e1000 MMIO 映射未校验返回 | 静态推演的 **OOM 边界**（正常内存配置不可达，需帧池耗尽才触发）。`frame_alloc` 各数据帧调用点多已降级（BUG-033 后维护良好）；真缺口在 **usermode app_mapfn 页表帧 OOM → 未置 load_failed**（P2，~3 行：`if(map_page_in(...)!=0){ load_failed=1; return; }`）及 lazy/init/sched 未校验（P3）。建议按 P2 先收口 app_mapfn |
 | OBS-010（ATA 设备残留）             | ATA 超时恢复：`ata_wait_ready` 超时返回 -1 但**未发 SRST 软复位**，设备命令状态可能残留（[ata.c](file:///workspace/mini-os/v2-c-kernel/src/drv/ata.c#L52-L61) 超时路径）——QEMU 下近不可达，仅 fs_sync/save 偶发触发且返回 -1 不崩                                                                                              | 低危观察；建议超时后发 `0x08(SRST)` 软复位恢复（状态机 + 超时计数，勿用 `sleep`）；当前未改，待后续小 PR                                                                                                        |
+| OBS-011（独立安全评估 SEC-06，2026-09-04） | 缓解技术缺口：无 ASLR/PIE（用户程序固定链接 `0x800A0000` 等）；无 NX（用户代码/栈/堆均 `0x7` P|RW|U 含可执行映射）；ELF `e_entry` 不校验落用户可执行区 | **单用户教学模型下可接受的有意取舍（降级"代码注入+ROP"成本，但无提权路径）**；页表 U/S 位隔离是根本防线（实测有效）。建议在 `docs/security.md` 威胁模型声明"未启用 NX/ASLR，功能演示优先"（对应 CWE-693）；不改码 |
+| OBS-012（独立安全评估 SEC-02 交叉引用，2026-09-04） | UDP socket 无进程归属：`netsock_send`（[netsock.c](file:///workspace/mini-os/v2-c-kernel/src/net/netsock.c#L93-L101)）/`netsock_recv`（[:103-116](file:///workspace/mini-os/v2-c-kernel/src/net/netsock.c#L103-L116)）只查 id/used、不校验 pid，任意 ring3 进程可对他人 socket 窃听/伪造/排空；仅 close 有归属检查（`netsock_close_if_owner`） | **= 既有 OBS-003**：作者已裁定为"单用户教学 OS 将 socket 视为进程共享资源"的设计取舍。独立评估接受其为有意设计；建议在 docs 显式写出该威胁模型，注明"未来存在互不信任 guest/agent 时须为 send/recv 增加归属校验"（校验成本低，见 BUG-038 同构写法） |
 

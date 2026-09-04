@@ -227,6 +227,61 @@ int main(void) {
         CHECK_EQ(fs_lookup(&bd, "/big.bin"), -1);
     }
 
+    /* ---- 独立安全评估修复回归（SEC-03/04/05，2026-09-04）----
+     * 置于 8) inode 耗尽之前：三组用例均自行回收占用的 inode/块，
+     * 不扰动其"仍可建满 FS_MAX_INODES-4 个"的预算断言。 */
+
+    /* SEC-03：free_inode_blocks 遇越界块号（恶意镜像篡改 inode）不得越界写数据块位图。
+     * 用原始内存偏移直改 inode 槽（INODE_TABLE_BLK=3，fs_inode_t 64B）模拟被篡改镜像；
+     * 若位图被非法索引污染，其后新建必然异常。 */
+    {
+        int f = fs_create(&bd, "/sec03.txt");
+        CHECK(f >= 0);
+        CHECK_EQ(fs_write(&bd, (uint32_t)f, "abc", 0, 3), 3);
+        fs_inode_t *in = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)f * sizeof(fs_inode_t));
+        in->blocks[1]  = 0xFFFFFFF0u;      /* 越界直接块号：释放时应跳过 */
+        in->indirect   = bd.blocks + 5;    /* 越界间接块号：释放时应跳过 */
+        CHECK_EQ(fs_delete(&bd, "/sec03.txt"), 0);
+        int g = fs_create(&bd, "/sec03b.txt");   /* 位图未被污染则分配正常 */
+        CHECK(g >= 0);
+        CHECK_EQ(fs_delete(&bd, "/sec03b.txt"), 0);
+    }
+
+    /* SEC-04：超长分量（>FS_MAX_NAME-1=23 字符）不得被静默截断续解析。
+     * 先用 23 字符目录 d23 与 d23/ZZ 作"诱饵"（旧码会把超长首分量截成 d23 后级联吃进 ZZ），
+     * 再以 25 字符首分量路径建文件：新码应 -1 拒判，诱饵目录内不得被误建。 */
+    {
+        char d23[FS_MAX_NAME];
+        memset(d23, 'd', FS_MAX_NAME - 1); d23[FS_MAX_NAME - 1] = 0;   /* 恰 23 字符 */
+        int q = fs_mkdir(&bd, d23);
+        CHECK(q >= 0);
+        char sub[48];
+        sprintf(sub, "/%s/ZZ", d23);
+        CHECK(fs_mkdir(&bd, sub) >= 0);          /* 诱饵：23 字分量正常建目录 */
+        char p[80];
+        sprintf(p, "/%sZZ/x.txt", d23);          /* 首分量 = d23+"ZZ" = 25 字（超长） */
+        CHECK_EQ(fs_create(&bd, p), -1);         /* 新码拒判 */
+        CHECK(fs_lookup(&bd, p) < 0);
+        CHECK(fs_lookup(&bd, "/d23/ZZ/x.txt") < 0);  /* 诱饵目录内不得被误建 */
+        CHECK_EQ(fs_rmdir(&bd, sub), 0);
+        CHECK_EQ(fs_rmdir(&bd, d23), 0);
+    }
+
+    /* SEC-05：目录级只读——fs_mkdir/fs_create 不得绕过父目录 FS_MODE_RO。
+     * 测试后手动清 inode.mode 解除只读以回收目录（避免扰动下方 inode 预算）。 */
+    {
+        int r = fs_mkdir(&bd, "/rosec05");
+        CHECK(r >= 0);
+        CHECK_EQ(fs_protect(&bd, "/rosec05"), 0);
+        CHECK_EQ(fs_is_ro(&bd, (uint32_t)r), 1);
+        CHECK_EQ(fs_create(&bd, "/rosec05/f.txt"), -1);   /* 新码拒建 */
+        CHECK_EQ(fs_mkdir(&bd, "/rosec05/sub"), -1);      /* 新码拒建目录 */
+        CHECK(fs_lookup(&bd, "/rosec05/f.txt") < 0);
+        fs_inode_t *roin = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)r * sizeof(fs_inode_t));
+        roin->mode = 0;                                   /* 清只读位后回收 */
+        CHECK_EQ(fs_rmdir(&bd, "/rosec05"), 0);
+    }
+
     /* 8) inode 耗尽：用完剩余 inode 后创建失败（x.txt/y.txt 已占 2 个 + 3a) 的只读
      *   /sys.txt 占 1 个，加上根目录共 4 个已占用，故最多再建 FS_MAX_INODES-4 个） */
     int created = 0;

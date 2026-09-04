@@ -85,6 +85,7 @@ extern char _binary_httpdemo_elf_start[], _binary_httpdemo_elf_end[];  /* v1.1 S
 extern char _binary_dldemo_elf_start[],    _binary_dldemo_elf_end[];    /* v1.2 大文件下载 */
 extern char _binary_cansmash_elf_start[], _binary_cansmash_elf_end[];   /* v1.5 P2 栈金丝雀 */
 extern char _binary_sandboxdemo_elf_start[], _binary_sandboxdemo_elf_end[]; /* v0.34 BUG-058 */
+extern char _binary_badinsn_elf_start[], _binary_badinsn_elf_end[];   /* SEC-01 回归: ring3 ud2 (#UD) */
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
     int ino = fs_create(fs_device(), name);
@@ -187,6 +188,10 @@ static void initramfs_setup(void) {
     initramfs_file("sandboxdemo",
                    _binary_sandboxdemo_elf_start,
                    (uint32_t)(_binary_sandboxdemo_elf_end - _binary_sandboxdemo_elf_start));
+    /* SEC-01 回归：ring3 非法指令探针（shell `run badinsn` 触发 #UD，验系统存活）*/
+    initramfs_file("badinsn",
+                   _binary_badinsn_elf_start,
+                   (uint32_t)(_binary_badinsn_elf_end - _binary_badinsn_elf_start));
 }
 
 /* ---- BUG-057 P3（审计跟进）：持久化老盘的只读补齐 ----
