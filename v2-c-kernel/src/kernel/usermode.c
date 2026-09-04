@@ -506,6 +506,9 @@ void syscall_dispatch(registers_t *r) {
         if (copyin_str((const char *)b, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
         int ino = fs_lookup(fs_device(), path);
         if (ino < 0) { r->eax = (uint32_t)-1; return; }
+        /* BUG-057：请求写/追加（c!=0）但目标为只读系统文件 -> 直接 -1（纵深；
+         * fs_write 层仍有权威拦截兜底，避免"打开只读却到写时才被打回"）。 */
+        if (c != 0 && fs_is_ro(fs_device(), (uint32_t)ino) == 1) { r->eax = (uint32_t)-1; return; }
         fdt[a].used  = 1;
         fdt[a].inode = (uint32_t)ino;
         fdt[a].pos   = (c == 2) ? fs_size(fs_device(), (uint32_t)ino) : 0;
