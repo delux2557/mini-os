@@ -36,8 +36,14 @@ mini-os 的开发文档遵循三条铁律：
 2. **新子系统 / 新架构决策**：`design.md` 增章，带 v0.x/v1.x 版本戳，延续既有风格。
 3. **规划变更**：只有"未开始的计划"进 `roadmap.md`；一旦落地，迁入 changelog 并把 roadmap 对应段删除或标注。
 4. **契约文档（tcp-\*）**：动码前定稿；实现与测试以文件为准，改契约先改文档。
-5. **测试目标增减**：更新测试矩阵说明，README / ci.yml 注释引用之，消灭"五层/九层"式口径漂移。
+5. **测试层清单（唯一事实源）**：层集合只在 `v2-c-kernel/Makefile` 的 `TEST_LAYERS` 维护；`make test` 聚合与 `.github/workflows/layers.yml` 并行矩阵均由它生成（`make test-layers` 逐行输出）。**不得在 `.github/workflows/*.yml` 中手抄层名清单**——它们是生成物/消费方（曾因多处手抄漏加 test-stack）。加层步骤见规则 7。
 6. **docs PR 也是 PR**：走同一门禁；纯文档变更在 PR 描述注明，便于 reviewer 聚焦。
+7. **新增一个测试层（checklist）**：
+   - ① 定义 `test-<name>` 目标（`v2-c-kernel/Makefile`）；
+   - ② 往该文件 `TEST_LAYERS` 加该名字；
+   - ③ 确认是否需进 regression-rr / 特殊 job（`test-tr-stable`/`test-repro`/`test-tcp-attack` 是有意例外、不进主链，Makefile 注释已写明）；
+   - ④ 在 CI 上看 layers 矩阵是否已出现该层。
+   - 若某层被有意排除在并行矩阵或主链之外，必须在 Makefile 注释与本文档同时说明理由。
 
 ## 已知待办（治理）
 

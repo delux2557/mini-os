@@ -318,8 +318,21 @@ $(STACK_SU)/%.o: %.c
 test-stack: $(STACK_OBJS)
 	bash tests/check_stack_budget.sh $(STACK_SU) 3584
 
-# 完整测试
-test: test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-rp test-stack
+# ---- 测试层清单（唯一事实源） ----
+# 同一"层集合"不应多处手抄（此前 Makefile `test:` 与 .github/workflows/layers.yml 矩阵各自维护，
+# 曾漏加 test-stack）。CI 的 make test 聚合 与 layers 并行矩阵均由本清单生成：
+#   - test:        主链聚合（ci.yml 的 test job 消费）
+#   - test-layers: 逐行输出层名（layers.yml 由 load-layers job 消费，勿在 workflow 手抄清单）
+# 新增层三步：① 在此加一个名字 ② 定义 test-<name> 目标 ③ 在 CI（layers 矩阵）看该层是否出现。
+# 有意例外（慢/特殊，不进 TEST_LAYERS，仍由 ci.yml 的 regression-rr job 显式调用）：
+#   test-tr-stable / test-repro / test-tcp-attack —— 见 docs/README.md 维护规则
+TEST_LAYERS = host qemu serial persist net socket cc500 slip tcp det tr rp stack
+
+test: $(addprefix test-,$(TEST_LAYERS))
+
+.PHONY: test-layers
+test-layers:
+	@printf '%s\n' $(TEST_LAYERS)
 
 # ---- 编译硬化门禁（P1）：危险 libc 调用检查 ----
 # 审计已确认全库无 strcpy/strcat/sprintf/vsprintf/gets；此目标把"人工检查"固化为可执行门禁，
@@ -340,4 +353,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack lint clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
