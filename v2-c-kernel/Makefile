@@ -22,6 +22,12 @@ CFLAGS  = -m32 -ffreestanding -fno-pie -fno-stack-protector \
           -Wall -Wextra $(WERROR) -O2 -std=gnu99 -nostdlib \
           -MMD -MP \
           -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -I$(BUILD)
+# ---- P2 编译硬化（教学增强）：用户态 app 栈金丝雀 ----
+#  - 只对 src/app/ 的用户态程序生效，内核 src/ 保持 -fno-stack-protector（CFLAGS 已含）。
+#  - 32 位无 TLS，必须 -mstack-protector-guard=global 走全局变量取金丝雀（否则 gcc 用 GS 段会崩）。
+#  - 该 flag 只是叠加在 CFLAGS 之后，gcc 命令行里最后的 -f*stack-protector 生效。
+#  - __stack_chk_guard / __stack_chk_fail 由 crt.c 提供（每个 app ELF 链 crt.o 均可得）。
+APP_SEC_CFLAGS = -fstack-protector-all -mstack-protector-guard=global
 ASM     = nasm
 LD      = ld
 LDFLAGS = -m elf_i386 -T src/linker.ld -nostdlib -z noexecstack
@@ -126,13 +132,14 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo
+APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
 # 编译（源文件在 src/app/；构建输出仍在 build/apps/）
+# P2：普通 app 追加 canary flags；cc500.o/cc500_crt.o 走下方独立显式规则豁免（见 v0.27 段）。
 $(BUILD)/apps/%.o: src/app/%.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(APP_SEC_CFLAGS) -c $< -o $@
 
 # 链接到固定地址（-e _start 指定 ELF 入口；crt.o 提供 _start：app_main 返回即 sys_exit）
 $(BUILD)/apps/hello.elf: $(BUILD)/apps/hello.o $(BUILD)/apps/crt.o
@@ -148,6 +155,8 @@ $(BUILD)/apps/forkdemo.elf: $(BUILD)/apps/forkdemo.o $(BUILD)/apps/crt.o
 $(BUILD)/apps/args.elf: $(BUILD)/apps/args.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/stackovf.elf: $(BUILD)/apps/stackovf.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/cansmash.elf: $(BUILD)/apps/cansmash.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/deep.elf: $(BUILD)/apps/deep.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
@@ -183,6 +192,11 @@ $(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o $(BUILD)/apps/crt.o
 #    该源本就不能在源码层修复，只能豁免。GCC 8+ 两者均有效、可并存。
 $(BUILD)/apps/cc500.o: tools/cc500/cc500.c
 	$(CC) $(CFLAGS) -Wno-int-conversion -w -c $< -o $@
+# cc500 专用 CRT：与 cc500.o 同属工具链，显式豁免 canary（APP_SEC_CFLAGS）。
+# 关键：cc500.elf 只链接 cc500_crt.o + cc500.o（无 crt.o 的 __stack_chk_* 符号），
+# 若这里也带 canary，会因未定义 __stack_chk_guard 链接失败。显式规则优先于 apps 模式规则。
+$(BUILD)/apps/cc500_crt.o: src/app/cc500_crt.c
+	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/apps/cc500.elf: $(BUILD)/apps/cc500.o $(BUILD)/apps/cc500_crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/cc500_crt.o $<
 
