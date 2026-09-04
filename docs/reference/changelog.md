@@ -3,6 +3,33 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.15] - 2026-09-04 · Red Team 四轮 RD5：块归属账本——关闭"合法范围内重复块"（BUG-071）
+
+> 红队四轮 RD5-V4，属 RD3（BUG-069/070）诚实边界清单中的**内容层矛盾**。RD3 只做块号**范围校验**
+> （`blk_valid`），挡不住恶意镜像把两个 inode 的 `blocks[]`/`indirect` 指向**同一合法范围内的数据块**——
+> 造成跨文件读泄漏 / 写污染，且若该块归受保护（`FS_MODE_RO`）文件所有，可经可写 inode 写改 RO 内容，
+> **击穿 BUG-057**。修复在 fs.c 建立"块 → owner inode"归属账本：新增块（目录扩容/直接/间接/拾取）alloc 后
+> `owner_claim` 登记、返回前 `owner_check` 校验（不符即视为不可用，读截断 / 写按首块 -1 语义）；挂载外部镜像
+> 后 `fs_scan_owners` 全盘扫描重建账本并检出"范围内重复"（`fs_owner_violations` 仅观测、不入 audit bad 和）；
+> 释放即 `owner_clear` 清账。owner 值用 **ino+1 编码**（0=空闲，1..64↔ ino 0..63）避免 root(ino 0) 与空闲歧义。
+> 全链零行为变更（正常镜像账本跟随分配/释放天然一致，引导恒 0 冲突 0 孤儿），纯防御 + 可观测。
+**Changed**
+* [src/fs/fs.c](../../v2-c-kernel/src/fs/fs.c)：`file_block` 增加 `ino` 参数并做块归属登记/校验（直接/间接/拾取块
+  各自 `owner_claim` + `owner_check`）；`fs_init` 格式化重置账本；`free_inode_blocks` 释放即清归属；
+  `dir_add` 目录自扩块登记。新增 `owner[]` 账本 + `fs_scan_owners` + `fs_owner_orphans`。
+* [src/fs/fs.h](../../v2-c-kernel/src/fs/fs.h)：导出 `fs_scan_owners`/`fs_owner_violations_get`/`fs_owner_reset`/
+  `fs_owner_orphans`。
+* [src/fs/storage.c](../../v2-c-kernel/src/fs/storage.c)：持久盘命中 `FS_MAGIC` 挂载即 `fs_scan_owners` 重建账本。
+* [src/kernel/usermode.c](../../v2-c-kernel/src/kernel/usermode.c)：`kern_audit` 打印块归属冲突次数（仅观测）。
+**Tests**
+* [test_fs.c](../../v2-c-kernel/tests/test_fs.c)：新增 V4 四式——① 健康基线（scan 后 0 冲突 / 0 孤儿，无假阳性）；
+  ② 跨文件重复（B 指向 A 合法数据块 → read 截断 / write -1，A 不受影响）；③ V4×RO（可写 W 指向受保护 P 块 →
+  写被首块阻断、P 内容与只读位不变）；④ 间接块重复（Y 的 indirect 指向 X 间接块 → scan 检出、越直接区读写阻断）。
+**自测实录**
+* `make test-host`（-Werror 默认开）：pass=20 fail=0（test_fs 8785 checks 0 fail）。
+* `make`（内核 m32 -Werror）：干净零告警。
+Docs：bugs.md 新增 BUG-071 + 威胁模型注记扩展（RD3 诚实边界 → RD5-V4 已收口 + RD5 新边界声明）。
+
 ## [v1.4.14] - 2026-09-04 · 门禁 flaky 治理：长名断言时序根修 + 等断观测打点（产物随 artifact）+ RR 基线
 > 承接插曲 1/2 + 治理任务 C（三步）。Commit 1（行为变更，ops 已批准）：test_serial.sh 长名用例
 > 两处 `run=[1-9]` 在 10ms tick 边界下把 run=0ms 的合法快执行误判 FAIL（类型 II 断言缺陷）——收敛为

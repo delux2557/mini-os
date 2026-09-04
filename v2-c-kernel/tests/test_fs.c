@@ -365,6 +365,106 @@ int main(void) {
         CHECK_EQ(fs_rmdir(&bd, "/rd3v1_d"), 0);
     }
 
+    /* ---- RD5 红队四轮：块归属账本（BUG-071），挡"合法范围内重复块"跨文件读写/RO 绕过 ----
+     * Tier-1 blk_valid 只校验块号∈[FS_DATA_START, blocks)，挡不住恶意镜像把两个 inode 的
+     * blocks[]/indirect 指向"同一合法数据块"。账本把每数据块登记到唯一 owner inode：
+     * 挂载外部镜像后 fs_scan_owners 重建并检测重复（violations>0）；访问"非本 inode 所有"的块
+     * 在 file_block 被 owner_check 阻断（读截断 0 / 写返 -1），不走位图重复分配、不改他人块。
+     * 镜像损坏态全部在"篡改→scan→读/写断言→恢复→删除"内闭环，块面/位图回到一致，不扰动 8) 预算。 */
+
+    /* ---- 健康基线：干净镜像重建账本应 0 冲突、0 孤儿（无假阳性） ---- */
+    {
+        fs_scan_owners(&bd);
+        CHECK_EQ(fs_owner_violations_get(), 0u);   /* 正常镜像无重复块 */
+        CHECK_EQ(fs_owner_orphans(&bd), 0u);       /* 位图在用块均有主 */
+    }
+
+    /* ---- V4 跨文件重复：B 的 blocks[0] 指向 A 的合法数据块 ----
+     * scan 检出冲突；经 B 读/写该块被 owner_check 阻断；A 自身读写不受影响。
+     * 先建先得 ino，故 A 成为共享块 owner，B 是被阻断方（确定性）。 */
+    {
+        int ra = fs_create(&bd, "/v4_a");
+        int rb = fs_create(&bd, "/v4_b");
+        CHECK(ra >= 0 && rb >= 0 && ra < rb);
+        CHECK_EQ(fs_write(&bd, (uint32_t)ra, "AAA", 0, 3), 3);
+        CHECK_EQ(fs_write(&bd, (uint32_t)rb, "BBB", 0, 3), 3);
+        fs_inode_t *abin = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)ra * sizeof(fs_inode_t));
+        fs_inode_t *bbin = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)rb * sizeof(fs_inode_t));
+        uint32_t ablk = abin->blocks[0];
+        uint32_t bSav = bbin->blocks[0];
+        CHECK(ablk >= FS_DATA_START && ablk < bd.blocks);   /* 合法范围内重复的基础 */
+        bbin->blocks[0] = ablk;                 /* 恶意镜像：B 指向 A 的数据块 */
+        fs_scan_owners(&bd);                    /* 模拟挂载该镜像重建账本 */
+        CHECK(fs_owner_violations_get() > 0);   /* 检出"合法范围内重复块" */
+        memset(buf, 0, sizeof(buf));
+        CHECK_EQ(fs_read(&bd, (uint32_t)rb, buf, 0, 3), 0);      /* 读被阻断（不读回 A 数据） */
+        CHECK_EQ(fs_write(&bd, (uint32_t)rb, "XXX", 0, 3), -1);  /* 写被阻断（首块 owner 不符） */
+        memset(buf, 0, sizeof(buf));
+        CHECK_EQ(fs_read(&bd, (uint32_t)ra, buf, 0, 3), 3);      /* A 自身不受影响 */
+        CHECK(strcmp(buf, "AAA") == 0);
+        bbin->blocks[0] = bSav;                 /* 恢复后正常清理 */
+        CHECK_EQ(fs_delete(&bd, "/v4_b"), 0);
+        CHECK_EQ(fs_delete(&bd, "/v4_a"), 0);
+    }
+
+    /* ---- V4 × RO 权限绕过：可写文件 W 的块指向受保护文件 P 的数据块 ----
+     * BUG-057 只查"写者自身 mode"；账本在数据面按"块 owner"二次拦截——即使写者在别处
+     * 可写，经它写 P 的块也首块即拒，RO 内容与只读位不被击穿。 */
+    {
+        int rp = fs_create(&bd, "/v4_p");
+        int rw = fs_create(&bd, "/v4_w");
+        CHECK(rp >= 0 && rw >= 0 && rp < rw);
+        CHECK_EQ(fs_write(&bd, (uint32_t)rp, "PROT", 0, 4), 4);
+        CHECK_EQ(fs_protect(&bd, "/v4_p"), 0);
+        CHECK_EQ(fs_write(&bd, (uint32_t)rw, "WWW", 0, 3), 3);
+        fs_inode_t *pin = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)rp * sizeof(fs_inode_t));
+        fs_inode_t *win = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)rw * sizeof(fs_inode_t));
+        uint32_t plbk = pin->blocks[0];
+        uint32_t wSav = win->blocks[0];
+        win->blocks[0] = plbk;                  /* W 指向受保护文件的数据块 */
+        fs_scan_owners(&bd);
+        CHECK(fs_owner_violations_get() > 0);
+        CHECK_EQ(fs_write(&bd, (uint32_t)rw, "HACK", 0, 4), -1); /* 可写者也不能写 P 的块 */
+        memset(buf, 0, sizeof(buf));
+        CHECK_EQ(fs_read(&bd, (uint32_t)rw, buf, 0, 3), 0);      /* 经 W 读 P 的块被阻断 */
+        memset(buf, 0, sizeof(buf));
+        CHECK_EQ(fs_read(&bd, (uint32_t)rp, buf, 0, 4), 4);      /* P 内容未变 */
+        CHECK(strcmp(buf, "PROT") == 0);
+        CHECK_EQ(fs_is_ro(&bd, (uint32_t)rp), 1);               /* P 只读位未击穿 */
+        win->blocks[0] = wSav;
+        CHECK_EQ(fs_delete(&bd, "/v4_w"), 0);
+        CHECK_EQ(fs_delete(&bd, "/v4_p"), -1);   /* P 只读不可删，清位后回收 */
+        ((fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)rp * sizeof(fs_inode_t)))->mode = 0;
+        CHECK_EQ(fs_delete(&bd, "/v4_p"), 0);
+    }
+
+    /* ---- V4 间接块重复：Y 的 indirect 指向大文件 X 的间接块（同一合法块）----
+     * scan 经间接块路径检出冲突；经 Y 越直接区读/写被 owner_check 阻断
+     * （间接块本身须归本 inode 所有）。 */
+    {
+        int rx = fs_create(&bd, "/v4_ind_x");
+        int ry = fs_create(&bd, "/v4_ind_y");
+        CHECK(rx >= 0 && ry >= 0 && rx < ry);
+        uint32_t capx = FS_DIRECT_BLOCKS * BLOCK_SIZE;
+        char zz[20]; memset(zz, 'Z', sizeof(zz));
+        CHECK_EQ(fs_write(&bd, (uint32_t)rx, zz, (int)capx, 10), 10); /* X 获得间接块+间接数据 */
+        CHECK_EQ(fs_write(&bd, (uint32_t)ry, "Y", 0, 1), 1);
+        fs_inode_t *xin = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)rx * sizeof(fs_inode_t));
+        fs_inode_t *yin = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)ry * sizeof(fs_inode_t));
+        uint32_t xInd = xin->indirect;
+        uint32_t ySav = yin->indirect;          /* Y 正常无间接块，应为 0 */
+        CHECK_EQ(ySav, 0u);
+        yin->indirect = xInd;                   /* Y 复用 X 的间接块（合法范围内） */
+        fs_scan_owners(&bd);
+        CHECK(fs_owner_violations_get() > 0);
+        memset(buf, 0, sizeof(buf));
+        CHECK_EQ(fs_read(&bd, (uint32_t)ry, buf, (int)capx, 4), 0);   /* 间接区读被阻断 */
+        CHECK_EQ(fs_write(&bd, (uint32_t)ry, "X", (int)capx, 1), -1); /* 写被阻断（间接块 owner 不符） */
+        yin->indirect = ySav;
+        CHECK_EQ(fs_delete(&bd, "/v4_ind_y"), 0);
+        CHECK_EQ(fs_delete(&bd, "/v4_ind_x"), 0);
+    }
+
     /* 8) inode 耗尽：用完剩余 inode 后创建失败（x.txt/y.txt 已占 2 个 + 3a) 的只读
      *   /sys.txt 占 1 个，加上根目录共 4 个已占用，故最多再建 FS_MAX_INODES-4 个） */
     int created = 0;

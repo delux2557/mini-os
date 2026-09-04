@@ -83,6 +83,43 @@ static int alloc_block(blockdev_t *bd) {
     return bitmap_alloc(bd, DATA_BITMAP_BLK, bd->blocks, FS_DATA_START);
 }
 
+/* ---- 块归属账本（RD5 RBT-2026-017，BUG-071）----
+ * Tier-1（BUG-069/070）blk_valid 只做范围校验（∈[FS_DATA_START, bd->blocks)），挡不住
+ * "合法范围内的重复块"：恶意镜像把两个 inode 的 blocks[i] 指向同一合法数据块 → 跨文件
+ * 读泄漏 / 写污染；若该块恰是受保护（FS_MODE_RO）文件的数据块，经可写的另一 inode 写
+ * 会直接改写 RO 文件内容，击穿 BUG-057（RO 只查"写者自身 mode"，不查数据块归属）。
+ * 此处建立"块 → owner inode"归属账本：任何"非本 inode 所有"的数据块访问显式失败。
+ * 账本容量 = 数据块位图单块位容量（BLOCK_SIZE*8=32768），覆盖任意 <=32768 块设备；
+ * 用固定静态数组（64KB BSS），免按实例动态分配/多次挂载生命周期复杂度（RAMDISK=256 远小）。
+ * owner 值 = ino+1 编码（0=空闲无主；1..64 映射 ino 0..63）——因 FS_ROOT_INODE=0，
+ * 裸 ino 会让"root 拥有块"(值 0) 与"空闲/无主"歧义，first-declarer-wins 在 root 上失效。
+ * 登记（owner_claim）先到先得；冲突保留首个声明者并计入 fs_owner_violations（可观测）。
+ * 正常路径 alloc_block 位图保证唯一、登记必首申成功；此处专挡恶意镜像不经过 alloc 的重复声明。 */
+#define FS_OWNER_CAP (BLOCK_SIZE * 8u)
+static uint16_t owner[FS_OWNER_CAP];
+static uint32_t fs_owner_violations;
+
+/* 登记 blk 归 ino 所有。返回 1=首次声明（成为 owner / 同 ino 重复=自引用不冲突），
+ * 0=已被其它 inode 声明（冲突）。越界块拒绝。 */
+static int owner_claim(uint32_t blk, uint32_t ino) {
+    if (blk >= FS_OWNER_CAP) return 0;
+    if (owner[blk] == 0) { owner[blk] = (uint16_t)(ino + 1); return 1; }
+    return owner[blk] == (uint16_t)(ino + 1);
+}
+static void owner_clear(uint32_t blk) {
+    if (blk < FS_OWNER_CAP) owner[blk] = 0;
+}
+static int owner_check(uint32_t blk, uint32_t ino) {
+    return (blk < FS_OWNER_CAP && owner[blk] == (uint16_t)(ino + 1)) ? 1 : 0;
+}
+static void owner_reset(void) {
+    memsetb(owner, 0, sizeof(owner));
+    fs_owner_violations = 0;
+}
+
+uint32_t fs_owner_violations_get(void) { return fs_owner_violations; }
+void fs_owner_reset(void)               { fs_owner_violations = 0; }
+
 /* ---- 目录条目（作用于"指定目录 inode"，v0.14 起不再写死根目录） ---- */
 /* 在目录 inode 中找空条目并写入；目录缺块时自动分配新块（即目录扩容） */
 static int dir_add(blockdev_t *bd, uint32_t dir, const char *name, uint32_t inode) {
@@ -94,6 +131,7 @@ static int dir_add(blockdev_t *bd, uint32_t dir, const char *name, uint32_t inod
             if (blk < 0) return -1;
             memsetb(blockdev_ptr(bd, (uint32_t)blk, 0), 0, BLOCK_SIZE);
             di.blocks[b] = (uint32_t)blk;
+            owner_claim((uint32_t)blk, dir);   /* RD5 BUG-071：目录自扩块归目录所有 */
             di.size += BLOCK_SIZE;
             inode_put(bd, dir, &di);
         }
@@ -214,6 +252,7 @@ static int fs_walk(blockdev_t *bd, const char *path, uint32_t *dirout,
 /* ---- 格式化 ---- */
 int fs_init(blockdev_t *bd) {
     if (bd->blocks <= FS_DATA_START) return -1;
+    owner_reset();   /* RD5 BUG-071：格式化重建归属账本（清空所有权与冲突计数） */
     /* 超级块 */
     uint32_t *super = (uint32_t *)blockdev_ptr(bd, SUPER_BLK, 0);
     super[0] = FS_MAGIC;
@@ -321,19 +360,59 @@ static int blk_valid(blockdev_t *bd, uint32_t blk) {
     return (blk >= FS_DATA_START && blk < bd->blocks) ? 1 : 0;
 }
 
+/* RD5（BUG-071）：挂载后扫描——遍历全部在用 inode，把其直接块 + 间接块 + 间接块内全部
+ * ptrs 登记为 owner=该 inode 号。重复声明（某块已被 A 声明又被 B）记"归属冲突"：冲突块
+ * owner 保留首个声明者，计数 ++。正常路径 alloc 位图保证唯一、无需扫描；此处专挡恶意
+ * 镜像不经 alloc 直接声明的"范围内重复"。挂载加载外部镜像后调用一次（内核 storage 处；
+ * 宿主测试显式调）。 */
+void fs_scan_owners(blockdev_t *bd) {
+    owner_reset();
+    for (uint32_t i = 0; i < FS_MAX_INODES; i++) {
+        if (!bitmap_test(bd, INODE_BITMAP_BLK, i)) continue;   /* 未用 inode 跳过 */
+        fs_inode_t in;
+        inode_get(bd, i, &in);
+        for (uint32_t b = 0; b < FS_DIRECT_BLOCKS; b++) {
+            if (in.blocks[b] && blk_valid(bd, in.blocks[b])
+                && !owner_claim(in.blocks[b], i)) fs_owner_violations++;
+        }
+        if (in.indirect && blk_valid(bd, in.indirect)) {
+            if (!owner_claim(in.indirect, i)) fs_owner_violations++;
+            uint32_t *ptrs = (uint32_t *)blockdev_ptr(bd, in.indirect, 0);
+            if (ptrs)
+                for (uint32_t k = 0; k < FS_INDIRECT_BLOCKS; k++)
+                    if (ptrs[k] && blk_valid(bd, ptrs[k])
+                        && !owner_claim(ptrs[k], i)) fs_owner_violations++;
+        }
+    }
+}
+
+/* RD5（BUG-071）：孤儿块数——数据位图已用但归属账本无主（0=健康）。
+ * 宿主测试断言"账本与位图一致（无孤儿、无重复）"用。 */
+uint32_t fs_owner_orphans(blockdev_t *bd) {
+    uint32_t n = 0;
+    for (uint32_t blk = FS_DATA_START; blk < bd->blocks && blk < FS_OWNER_CAP; blk++)
+        if (bitmap_test(bd, DATA_BITMAP_BLK, blk) && owner[blk] == 0) n++;
+    return n;
+}
+
 /* 释放文件/目录占用的数据块（直接 + 间接 + 间接块本身） */
 static void free_inode_blocks(blockdev_t *bd, fs_inode_t *in) {
     for (uint32_t b = 0; b < FS_DIRECT_BLOCKS; b++) {
         if (in->blocks[b] && blk_valid(bd, in->blocks[b])) {
             bitmap_set(bd, DATA_BITMAP_BLK, in->blocks[b], 0);
+            owner_clear(in->blocks[b]);   /* RD5 BUG-071：释放即清归属，账本随位图回收 */
             in->blocks[b] = 0;
         }
     }
     if (in->indirect && blk_valid(bd, in->indirect)) {
         uint32_t *ptrs = (uint32_t *)blockdev_ptr(bd, in->indirect, 0);
         for (uint32_t k = 0; k < FS_INDIRECT_BLOCKS; k++)
-            if (ptrs[k] && blk_valid(bd, ptrs[k])) bitmap_set(bd, DATA_BITMAP_BLK, ptrs[k], 0);
+            if (ptrs[k] && blk_valid(bd, ptrs[k])) {
+                bitmap_set(bd, DATA_BITMAP_BLK, ptrs[k], 0);
+                owner_clear(ptrs[k]);   /* RD5 BUG-071：释放即清归属 */
+            }
         bitmap_set(bd, DATA_BITMAP_BLK, in->indirect, 0);
+        owner_clear(in->indirect);      /* RD5 BUG-071：释放即清归属 */
         in->indirect = 0;
     }
 }
@@ -383,8 +462,13 @@ uint32_t fs_size(blockdev_t *bd, uint32_t inode) {
  * RD3 BUG-069/070 统一语义：损坏块号（越界 / 指向 inode 表位图）一律返回 0
  * （=不存在/不可用），杜绝把非法块号透传 blockdev_ptr 解引用崩（V1），或别名写 inode
  * 表位图击穿 BUG-057（V2）。对 create=1：损坏块号不可重分配覆盖（该块可能被镜像别处引用），
- * 返回 0 交由 fs_write 既有"首块失败 -1 / 中间块短写"逻辑处理。 */
-static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t b, int create) {
+ * 返回 0 交由 fs_write 既有"首块失败 -1 / 中间块短写"逻辑处理。
+ * RD5 BUG-071：新增块号归属校验——块须归"本 inode 所有"（owner==ino），否则视为不可用
+ * 返回 0（不走位图重复分配、不覆盖他人块），同样落到 fs_write 失败语义 + fs_read 截断，
+ * 关闭 V4：经 B 读/写"合法范围内"却归 A 所有的块 → 拒绝，跨文件读泄漏 / 写污染消除；
+ * 若该块归受保护(RO)文件所有，经可写 inode 写 → 首块即拒（RO 数据面第二道防线）。
+ * ino 亦用于新块登记：每处 alloc_block 后 owner_claim，保证账本随分配同步、无孤儿。 */
+static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t ino, uint32_t b, int create) {
     if (b < FS_DIRECT_BLOCKS) {
         if (in->blocks[b] == 0) {
             if (!create) return 0;
@@ -392,8 +476,10 @@ static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t b, int creat
             if (blk < 0) return 0;
             memsetb(blockdev_ptr(bd, (uint32_t)blk, 0), 0, BLOCK_SIZE);
             in->blocks[b] = (uint32_t)blk;
+            owner_claim((uint32_t)blk, ino);   /* RD5 BUG-071 */
         }
         if (!blk_valid(bd, in->blocks[b])) return 0;   /* RD3 BUG-069/070：损坏直接块号不可用 */
+        if (!owner_check(in->blocks[b], ino)) { fs_owner_violations++; return 0; } /* RD5 BUG-071 */
         return in->blocks[b];
     }
     uint32_t ib = b - FS_DIRECT_BLOCKS;
@@ -404,8 +490,10 @@ static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t b, int creat
         if (blk < 0) return 0;
         memsetb(blockdev_ptr(bd, (uint32_t)blk, 0), 0, BLOCK_SIZE);
         in->indirect = (uint32_t)blk;
+        owner_claim((uint32_t)blk, ino);   /* RD5 BUG-071 */
     }
     if (!blk_valid(bd, in->indirect)) return 0;        /* RD3 BUG-069/070：损坏间接块号不可用 */
+    if (!owner_check(in->indirect, ino)) { fs_owner_violations++; return 0; } /* RD5 BUG-071：间接块须归本 inode */
     uint32_t *ptrs = (uint32_t *)blockdev_ptr(bd, in->indirect, 0);
     if (!ptrs) return 0;                               /* 纵深：blockdev_ptr 返 0 */
     if (ptrs[ib] == 0) {
@@ -414,8 +502,10 @@ static uint32_t file_block(blockdev_t *bd, fs_inode_t *in, uint32_t b, int creat
         if (blk < 0) return 0;
         memsetb(blockdev_ptr(bd, (uint32_t)blk, 0), 0, BLOCK_SIZE);
         ptrs[ib] = (uint32_t)blk;
+        owner_claim((uint32_t)blk, ino);   /* RD5 BUG-071 */
     }
     if (!blk_valid(bd, ptrs[ib])) return 0;            /* RD3 BUG-069/070：损坏拾取块号不可用 */
+    if (!owner_check(ptrs[ib], ino)) { fs_owner_violations++; return 0; } /* RD5 BUG-071 */
     return ptrs[ib];
 }
 
@@ -430,7 +520,7 @@ int fs_read(blockdev_t *bd, uint32_t inode, void *buf, uint32_t off, uint32_t le
     while (done < len) {
         uint32_t bytepos = off + done;
         uint32_t b = bytepos / BLOCK_SIZE;
-        uint32_t blk = file_block(bd, &in, b, 0);
+        uint32_t blk = file_block(bd, &in, inode, b, 0);
         if (blk == 0) break;
         uint32_t boff = bytepos % BLOCK_SIZE;
         uint32_t n = len - done;
@@ -454,7 +544,7 @@ int fs_write(blockdev_t *bd, uint32_t inode, const void *buf, uint32_t off, uint
     uint32_t first_b = off / BLOCK_SIZE;
     uint32_t last_b  = (off + len - 1) / BLOCK_SIZE;
     for (uint32_t b = first_b; b <= last_b; b++) {
-        if (file_block(bd, &in, b, 1) == 0) {
+        if (file_block(bd, &in, inode, b, 1) == 0) {
             if (b == first_b) { inode_put(bd, inode, &in); return -1; }
             len = b * BLOCK_SIZE - off;   /* 只写能写进去的部分 */
             /* 短写语义：中间块分配失败时，已写入的部分不可回滚——已持久化到文件，
@@ -471,7 +561,7 @@ int fs_write(blockdev_t *bd, uint32_t inode, const void *buf, uint32_t off, uint
         uint32_t boff = bytepos % BLOCK_SIZE;
         uint32_t n = len - done;
         if (n > BLOCK_SIZE - boff) n = BLOCK_SIZE - boff;
-        blockdev_write(bd, file_block(bd, &in, b, 0), boff, src + done, n);
+        blockdev_write(bd, file_block(bd, &in, inode, b, 0), boff, src + done, n);
         done += n;
     }
     if (off + done > in.size) in.size = off + done;

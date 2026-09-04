@@ -72,4 +72,10 @@ int  fs_list_dir(blockdev_t *bd, uint32_t dir, fs_dir_entry_t *out, uint32_t max
 int  fs_protect(blockdev_t *bd, const char *path);  /* 置目标为只读（返回 0/-1） */
 int  fs_is_ro(blockdev_t *bd, uint32_t inode);      /* 只读=1，可写=0，inode 非法=-1 */
 
+/* RD5（BUG-071）块归属账本：块 → owner inode，挡"合法范围内重复块"跨文件读写/RO 绕过 */
+void     fs_scan_owners(blockdev_t *bd);        /* 挂载外部镜像后重建归属账本（扫描在用 inode 全部块） */
+uint32_t fs_owner_violations_get(void);         /* 归属冲突/违约累计次数（仅观测，不入 audit bad 和） */
+void     fs_owner_reset(void);                  /* 清计数（宿主测试用） */
+uint32_t fs_owner_orphans(blockdev_t *bd);      /* 孤儿块数：位图在用但账本无主（0=健康） */
+
 #endif
