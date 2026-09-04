@@ -63,6 +63,7 @@ static void cmd_help(void) {
     sys_print("  writefile <p> <c> write file (content = rest of line, v0.27b)\n");
     sys_print("  writefile <<D <p> multi-line write until lone D line (heredoc, v1.4)\n");
     sys_print("  ccrun <src> <out> cc500 compile then run (write-compile-run, v0.27b)\n");
+    sys_print("  micc <src> <out>  minicc compile then run (V1 int-only self-host)\n");
     sys_print("  selftest        run all demos, print one-line PASS/FAIL (agent-verifiable)\n");
     sys_print("  exit            quit shell\n");
 }
@@ -508,41 +509,41 @@ static int cc_append_u32(char *buf, int k, uint32_t v) {
     return k;
 }
 
-/* v0.27b: ccrun <src> <out> —— fork+exec cc500 编译 <src> 为 <out>，随后运行 <out>。
- * 端到端"写-编-跑"一键：writefile 写源 → ccrun 编译并运行 → 观察程序输出与退出码。
+/* v0.27b: ccrun/micc —— fork+exec 编译器编译 <src> 为 <out>，随后运行 <out>。
+ * 端到端"写-编-跑"一键：writefile 写源 → ccrun/micc 编译并运行 → 观察程序输出与退出码。
  * B1（排查打点）：compile/run 段各自耗时（100Hz tick → ms），供 F-0a/ccrun flake 归因；
- * B4：退出判据行单缓冲一次 sys_print，原子输出防撕裂。 */
-static void cmd_ccrun(char *args) {
+ * B4：退出判据行单缓冲一次 sys_print，原子输出防撕裂。
+ * V1：新增 micc 命令，驱动自研 minicc 编译器（int-only 子集，MIT），共用本实现。 */
+static void ccrun_compiler(const char *comp, const char *tag, char *args) {
     char *tok[4];
     int n = tokenize(args, tok, 4);
-    if (n < 2) { sys_print("usage: ccrun <src> <out>\n"); return; }
+    if (n < 2) { sys_print("usage: ccrun/micc <src> <out>\n"); return; }
     uint32_t t0 = sys_getticks();                   /* B1：compile 段起点 */
-    /* 1) fork 子进程 exec cc500 <src> <out> 编译 */
+    /* 1) fork 子进程 exec <comp> <src> <out> 编译 */
     uint32_t pid = sys_fork();
     if (pid == 0) {
         char *av[4];
-        av[0] = "cc500"; av[1] = tok[0]; av[2] = tok[1]; av[3] = 0;
-        (void)sys_exec("cc500", 3, (const char **)av);
-        sys_print("[ccrun] exec cc500 FAIL\n");
+        av[0] = (char *)comp; av[1] = tok[0]; av[2] = tok[1]; av[3] = 0;
+        (void)sys_exec(comp, 3, (const char **)av);
+        sys_print("[ccrun] exec "); sys_print(comp); sys_print(" FAIL\n");
         sys_exit(1);
     }
     int code = 0;
     (void)sys_wait((uint32_t)pid, &code);
     if (code != 0) {
-        sys_print("[ccrun] compile FAIL code="); user_putdec((uint32_t)code);
+        sys_print("["); sys_print(tag); sys_print("] compile FAIL code=");
+        user_putdec((uint32_t)code);
         sys_print(" compile="); user_putdec((sys_getticks() - t0) * 10u); sys_print("ms\n");
         return;
     }
     uint32_t t_compile = (sys_getticks() - t0) * 10u;   /* B1：compile 耗时(ms)，100Hz */
     /* 2) 运行编译产物 */
     uint32_t t1 = sys_getticks();                   /* B1：run 段起点 */
-    /* 红队 F1/F2 修复：spawn 失败（返回 -1）必须走有符号路径判败，与 cmd_run 同构。
-     * 若沿用上面的 uint32_t pid，`(uint32_t)-1` 会使 `pid <= 0` 恒假 → 静默落入
-     * sys_wait(-1) → code 保持 0 → 打印假 "PASS (run=0ms)"（run=0ms 即为未运行的铁证）。
-     * 编译段（fork）保持 uint32_t，此处运行段单独用有符号 spid。 */
+    /* 红队 F1/F2 修复：spawn 失败（返回 -1）必须走有符号路径判败，与 cmd_run 同构。 */
     int spid = sys_spawn_file(tok[1]);
     if (spid <= 0) {
-        sys_print("[ccrun] cannot run '"); sys_print(tok[1]); sys_print("'\n"); return;
+        sys_print("["); sys_print(tag); sys_print("] cannot run '"); sys_print(tok[1]);
+        sys_print("'\n"); return;
     }
     code = 0;
     (void)sys_wait((uint32_t)spid, &code);
@@ -550,14 +551,18 @@ static void cmd_ccrun(char *args) {
     /* B4：判据行原子化（单次 sys_print）并附 B1 耗时 */
     char obuf[192];
     int o = 0;
-    o = cc_append(obuf, o, "[ccrun] '");        o = cc_append(obuf, o, tok[1]);
-    o = cc_append(obuf, o, "' exited code=");   o = cc_append_u32(obuf, o, (uint32_t)code);
+    o = cc_append(obuf, o, "["); o = cc_append(obuf, o, tag);
+    o = cc_append(obuf, o, "] '"); o = cc_append(obuf, o, tok[1]);
+    o = cc_append(obuf, o, "' exited code="); o = cc_append_u32(obuf, o, (uint32_t)code);
     o = cc_append(obuf, o, code == 0 ? " PASS (compile=" : " FAIL (compile=");
     o = cc_append_u32(obuf, o, t_compile); o = cc_append(obuf, o, "ms run=");
     o = cc_append_u32(obuf, o, t_run);       o = cc_append(obuf, o, "ms)\n");
     obuf[o] = 0;
     sys_print(obuf);
 }
+
+static void cmd_ccrun(char *args) { ccrun_compiler("cc500", "ccrun", args); }
+static void cmd_minicc(char *args) { ccrun_compiler("minicc", "micc", args); }
 
 void app_main(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -590,6 +595,7 @@ void app_main(int argc, char **argv) {
         else if (user_strcmp(cmd, "ccboot") == 0)  cmd_ccboot();
         else if (user_strcmp(cmd, "writefile") == 0) cmd_writefile(arg);
         else if (user_strcmp(cmd, "ccrun") == 0)  cmd_ccrun(arg);
+        else if (user_strcmp(cmd, "micc") == 0)   cmd_minicc(arg);
         else if (user_strcmp(cmd, "selftest") == 0) cmd_selftest();
         else if (user_strcmp(cmd, "exit") == 0) {
             sys_print("bye\n");
