@@ -69,6 +69,15 @@ hrun t_badaddr 'int main(){int* p;p=&(1+2);return 0;}' 1 'cannot take address' '
 # 指针/整型赋值不匹配 -> 必须 FAIL + type mismatch
 hrun t_ptrmism 'int main(){int x;int* p;p=5;return 0;}' 1 'type mismatch' 'compiled OK'
 hrun t_ptrmism2 'int main(){int x;int* p;x=p;return 0;}' 1 'type mismatch' 'compiled OK'
+echo "== [2a2] 宿主字符串/char 错误路径（V2c） =="
+# 未闭合字符串（EOF/\n 守卫，cc500 F-3 教训）-> 必须 FAIL + unterminated string
+hrun t_unstr 'int main(){char* s;s="abc;}' 1 'unterminated string' 'compiled OK'
+# 非法转义 -> 必须 FAIL + bad escape
+hrun t_badesc 'int main(){char* s;s="\q";return 0;}' 1 'bad escape' 'compiled OK'
+# 指针基类型不匹配（int* 收 char*）-> 必须 FAIL + type mismatch
+hrun t_badpbase 'int main(){int* p;p="hi";return 0;}' 1 'type mismatch' 'compiled OK'
+# 字符串字面量超长（>254 字节）-> 必须 FAIL + string too long
+hrun t_strlng "int main(){char* s;s=\"$(printf 'A%.0s' $(seq 1 255))\";return 0;}" 1 'string too long' 'compiled OK'
 echo "== [2b] 宿主成功路径 =="
 # 成功：变量/四则/if/else/while/递归/全局/逻辑，编译层全过
 hrun t_arith 'int main(){int a;a=1+2*3-4;return 0;}' 0 'compiled OK' ''
@@ -80,6 +89,13 @@ hrun t_ptr 'int main(){int x;x=5;int* p;p=&x;if(*p==5)return 0;return 1;}' 0 'co
 hrun t_ptrwrite 'int main(){int a;int* p;p=&a;*p=7;if(a==7)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_ptrarg 'int f(int* p){return *p;}int main(){int a;a=3;if(f(&a)==3)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_ptrarith 'int main(){int a;a=10;int* p;p=&a;if(*(p+0)==10)return 0;return 1;}' 0 'compiled OK' ''
+# 字符串/char（V2c）：字面量、转义、char 变量/字面量、char* 指针算术/解引用、syscall3 stub
+hrun t_str 'int main(){char* s;s="hello";if(*s==104)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_esc 'int main(){char* s;s="a\nb\x41";if(*(s+1)==10&&*(s+3)==65)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_char 'int main(){char c;c='\''A'\'';if(c==65)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_charptr 'int main(){char c;char* p;p=&c;*p=88;if(c==88)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_gchar 'char g='\''B'\'';int main(){if(g==66)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_sys3 'int main(){syscall3(1,"hi",0,0);return 0;}' 0 'compiled OK' ''
 
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
@@ -94,6 +110,10 @@ else echo "[FAIL] 宿主 idiv 编码未检出 f7 fb"; HOST_FAIL=$((HOST_FAIL+1))
 if od -A n -t x1 -j 0x54 -N 11 "$VD/codegen.elf" | grep -q '89 c3 31 c0 cd 80'; then
     HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主入口 stub mov ebx; xor eax; int \$0x80"
 else echo "[FAIL] 宿主入口 stub 未检出 89 c3 31 c0 cd 80"; HOST_FAIL=$((HOST_FAIL+1)); fi
+# syscall3 stub（V2c）：产物含 int $0x80 包装（入口 stub 之外的第二处 cd 80）
+if [ "$(od -A n -t x1 "$VD/t_sys3.elf" | tr -d ' \n' | grep -o 'cd80' | wc -l)" -ge 2 ]; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 syscall3 stub cd 80 ×2"
+else echo "[FAIL] 宿主 syscall3 stub 未检出两处 cd 80"; HOST_FAIL=$((HOST_FAIL+1)); fi
 
 echo "== [3/4] guest：micc 编译并运行（return code 语义） =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
@@ -149,6 +169,19 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "writefile /pe.c int main(){int* p;int** q;return 0;}"
     gsend "micc /pe.c /pe.elf"
     gwait "多级指针编译拒绝" "\[micc\] compile FAIL" 40
+    # 字符串/char（V2c）：char 变量、字符串字面量解引用
+    gsend "writefile /s1.c int main(){char c;c=65;if(c==65)return 0;return 1;}"
+    gsend "micc /s1.c /s1.elf"
+    gwait "char 变量" "\[micc\] '/s1.elf' exited code=0 PASS" 40
+    gsend "writefile /s2.c int main(){char* s;s=\"hi\";if(*s==104)return 0;return 1;}"
+    gsend "micc /s2.c /s2.elf"
+    gwait "字符串解引用" "\[micc\] '/s2.elf' exited code=0 PASS" 40
+    # 可观察 I/O（V2c）：产物经 syscall3 stub 调 SYS_PRINT 输出 "ZY"（源码用 \x 转义，
+    # 源码回显/minicc 自身输出均不含 "ZY"，该串只来自产物运行期输出 -> 证明写-编-跑闭环）
+    gsend "writefile /s3.c int main(){syscall3(1,\"\\x5a\\x59\",0,0);return 0;}"
+    gsend "micc /s3.c /s3.elf"
+    gwait "产物输出 ZY（I/O）" "ZY" 40
+    gwait "sys_print I/O 运行" "\[micc\] '/s3.elf' exited code=0 PASS" 40
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest micc 端到端通过"
 else
