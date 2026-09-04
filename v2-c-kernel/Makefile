@@ -315,6 +315,11 @@ STACK_OBJS   = $(addprefix $(STACK_SU)/, $(STACK_FILES))
 $(STACK_SU)/%.o: %.c
 	@mkdir -p $(STACK_SU)
 	$(CC) $(CFLAGS) -fstack-usage -c $< -o $@
+# test-stack 自包含：sched.c 含 userprog_offsets.h（$(USERPROG_OFFS)，由 USERPROG_ELF 经 nm 生成）。
+# 孤立跑 `make test-stack` 时该头须先构建，故加显式依赖（沿用 $(BUILD)/sched.o 的既有规则写法）。
+# 此问题此前被掩盖：矩阵不含 stack，且同一次 `make test` 里 test-host 先建了内核生成该头。
+# 本规则无 recipe，沿用上方 pattern 规则构建，仅补充依赖边。
+$(STACK_SU)/sched.o: $(USERPROG_OFFS)
 test-stack: $(STACK_OBJS)
 	bash tests/check_stack_budget.sh $(STACK_SU) 3584
 
