@@ -93,6 +93,9 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
         return;
     }
     int n = fs_write(fs_device(), (uint32_t)ino, data, 0, len);
+    /* BUG-057：initramfs 系统文件只读——先 write 后 protect（避免自锁）；退出前已落盘。
+     * 无盘（每次重建）与有盘首启格式化共用本函数，两级权限自动覆盖两条路径。 */
+    if (n > 0) fs_protect(fs_device(), name);
     serial_printf("[ramdisk] '%s' %u bytes inode=%d write=%d\n", name, len, ino, n);
 }
 

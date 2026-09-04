@@ -30,8 +30,14 @@ typedef struct {
     uint16_t links;
     uint32_t blocks[FS_DIRECT_BLOCKS];  /* 直接数据块号，0=未分配 */
     uint32_t indirect;                  /* v0.14 间接块号（指向存块号的块），0=无 */
-    uint32_t pad;                       /* 补齐到 64B，保持每块 64 个 inode */
+    uint16_t pad;                       /* 补齐（老镜像 pad 恒 0，见 BUG-057 兼容注记） */
+    uint16_t mode;                      /* v0.34 BUG-057 权限位；0=可写，见 FS_MODE_RO */
 } fs_inode_t;
+
+/* BUG-057 两级权限：系统文件只读 / 用户文件可写。
+ * mode 复用原 pad 的低 16 位（磁盘布局字节数不变，稳定 64B）；
+ * 老镜像 pad 由创建时 memsetb 清零保证为 0 --> mode==0（可写），升级无缝。 */
+#define FS_MODE_RO  0x0001u   /* 受保护/只读：不可 delete/rmdir/write */
 
 typedef struct {
     char     name[FS_MAX_NAME];
@@ -61,5 +67,9 @@ int  fs_mkdir(blockdev_t *bd, const char *path);    /* 建目录（父目录须�
 int  fs_rmdir(blockdev_t *bd, const char *path);    /* 删空目录（非空/非目录返回 -1） */
 int  fs_lookup_in(blockdev_t *bd, uint32_t dir, const char *name);  /* 在指定目录查条目 */
 int  fs_list_dir(blockdev_t *bd, uint32_t dir, fs_dir_entry_t *out, uint32_t max);
+
+/* BUG-057 两级权限：系统文件只读 / 用户文件可写 */
+int  fs_protect(blockdev_t *bd, const char *path);  /* 置目标为只读（返回 0/-1） */
+int  fs_is_ro(blockdev_t *bd, uint32_t inode);      /* 只读=1，可写=0，inode 非法=-1 */
 
 #endif

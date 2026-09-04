@@ -274,6 +274,26 @@ int fs_mkdir(blockdev_t *bd, const char *path) {
     return fs_make(bd, path, FS_TYPE_DIR);
 }
 
+/* ---- BUG-057 两级权限：系统文件只读 / 用户文件可写 ----
+ * 权威判定集中在 fs 层（不依赖 syscall 调用者），fs_delete/fs_rmdir/fs_write 均据此拦截，
+ * 用户无从绕过。仅需位运算，不引入 strcpy/sprintf。 */
+int fs_protect(blockdev_t *bd, const char *path) {
+    int ino = fs_lookup(bd, path);
+    if (ino < 0) return -1;
+    fs_inode_t in;
+    inode_get(bd, (uint32_t)ino, &in);
+    in.mode |= FS_MODE_RO;                 /* 幂等：多次 protect 无副作用 */
+    inode_put(bd, (uint32_t)ino, &in);
+    return 0;
+}
+
+int fs_is_ro(blockdev_t *bd, uint32_t inode) {
+    if (inode >= FS_MAX_INODES) return -1; /* 非法 inode */
+    fs_inode_t in;
+    inode_get(bd, inode, &in);
+    return (in.mode & FS_MODE_RO) ? 1 : 0;
+}
+
 /* 释放文件/目录占用的数据块（直接 + 间接 + 间接块本身） */
 static void free_inode_blocks(blockdev_t *bd, fs_inode_t *in) {
     for (uint32_t b = 0; b < FS_DIRECT_BLOCKS; b++) {
@@ -299,6 +319,7 @@ int fs_delete(blockdev_t *bd, const char *path) {
     fs_inode_t in;
     inode_get(bd, (uint32_t)ino, &in);
     if (in.type != FS_TYPE_FILE) return -1;   /* 目录用 fs_rmdir */
+    if (in.mode & FS_MODE_RO) return -1;      /* BUG-057：只读系统文件不可删 */
     free_inode_blocks(bd, &in);
     memsetb(&in, 0, sizeof(in));
     inode_put(bd, (uint32_t)ino, &in);
@@ -315,6 +336,7 @@ int fs_rmdir(blockdev_t *bd, const char *path) {
     fs_inode_t in;
     inode_get(bd, (uint32_t)ino, &in);
     if (in.type != FS_TYPE_DIR) return -1;    /* 非目录 */
+    if (in.mode & FS_MODE_RO) return -1;      /* BUG-057：只读目录不可删 */
     if (!dir_empty(bd, (uint32_t)ino)) return -1;  /* 非空目录 */
     free_inode_blocks(bd, &in);
     memsetb(&in, 0, sizeof(in));
@@ -389,6 +411,7 @@ int fs_write(blockdev_t *bd, uint32_t inode, const void *buf, uint32_t off, uint
     fs_inode_t in;
     inode_get(bd, inode, &in);
     if (in.type != FS_TYPE_FILE) return -1;
+    if (in.mode & FS_MODE_RO) return -1;      /* BUG-057：只读系统文件不可写 */
     if (off >= FS_MAX_FILE_SIZE) return -1;
     if (len > FS_MAX_FILE_SIZE - off) len = FS_MAX_FILE_SIZE - off;
 
