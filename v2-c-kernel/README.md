@@ -62,6 +62,8 @@ shell 内置 `selftest` 命令：逐跑 hello/isol/forkdemo/fsdemo/waitdemo 五�
 
 gcc(-m32) / nasm / ld / objcopy / qemu-system-i386 / python3 / socat
 
+`qemu-user`（`qemu-i386`）测试可选：宿主无 ia32 exec 时 `make test-cc500` 的 hostcc 用它运行 32 位二进制。
+
 ## 文档
 
 架构与开发思路、演进路线、Bug 记录、版本日志见项目根目录 [docs/](../docs/)。

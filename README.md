@@ -79,6 +79,7 @@ mini-os/
 ## 快速开始
 
 依赖：`gcc`(m32 支持)、`nasm`、`ld`、`objcopy`、`qemu-system-i386`、`python3`、`socat`。
+`qemu-user`（提供 `qemu-i386`）为**测试可选**：宿主内核无 ia32 exec 时，`make test-cc500` 的宿主层 hostcc 需用其运行 32 位二进制。
 
 ```bash
 cd v2-c-kernel
