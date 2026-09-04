@@ -438,6 +438,23 @@ void syscall_dispatch(registers_t *r) {
     uint32_t num = r->eax;
     uint32_t a = r->ebx, b = r->ecx, c = r->edx;
 
+    /* ---- A-2 ② 参数语义表（BUG-067 延续，逐类处理原则）----
+     * syscall 入参全是 uint32（ebx/ecx/edx）。分五类，原则如下：
+     * ① id/slot/fd 类：一律先 `a==0 || a>=N` 下界(0 保留为守护/未用)+上界检查，越界 -1
+     *   （如 sem/msg=1..SEM_MAX_OBJ-1、fs fd=1..FS_FDS_PER_PROC-1、net id<NET_SOCK_MAX）。
+     *   负 fd 经符号回绕成巨大 uint32，被同一条 `a>=N` 上界检查挡住，无需单列。
+     * ② 指针/缓冲类：user_ptr_valid 验**整区**、copyin/copyin_str 拷入内核缓冲后才用；
+     *   输出参数 copyout 回写前同样先验目标区（v0.17 起全链路）。越界/非法一律 -1。
+     * ③ 长度/容量类：统一按无符号 uint32 接收，**使用前必须钳位**到真实内核缓冲/表容量
+     *   （如 recvfrom max→1400、IP 载荷 plen→NET_RXMAX、readline max→KB_LINE_MAX）——
+     *   防"负长回绕成巨大 uint32"打穿 memcpy/循环；负长即被钳位吞掉，不会越界。
+     * ④ 有符号语义类（负值无合法含义者）：显式按 int32 解释并拒绝，如 sem_create init<0
+     *   → -1（SEM-1 审计误报根因，本轮修复）；不静默截断/clamp，fail-closed。
+     * ⑤ 地址/偏移类：brk 由 brk_in_range 钳上界(USER_HEAP_MAX)与下界(heap_base)；
+     *   fs_seek 按无符号原生存 pos，越界由后续 read/write 的越界哨兵 fail-closed（见 case 26）。
+     * 维护规则：**新增 syscall 时按①②③④⑤对照自查**——无符号化收参给 ③，若要无符号化而
+     * 语义需拒绝负值走 ④；凡"长度/容量"入参必须 clamp，凡指针必须整区校验。 */
+
     /* BUG-058 per-process syscall 掩码（最小权限）：num>=64 直接拒（防 1ull<<num 移位 UB）；
      * 被禁用则 -1。置于任何 copyin/参数解析之前，尽早拦截（被掩码的 syscall 不解析参数）。
      * 注意：只判断"是否被本进程禁用"，不拦截 SYS_LIMIT 本身（除非该进程连 36 都禁了）。 */
@@ -484,6 +501,13 @@ void syscall_dispatch(registers_t *r) {
         return;
     case 6:   /* sys_sem_create(id, init)：在固定 id 槽创建/获取信号量 */
         if (a == 0 || a >= SEM_MAX_OBJ) { r->eax = (uint32_t)-1; return; }
+        /* A-2 ② SEM-1：init 按 int32 解释，负数（含"误传 -1"这类哨兵）会令 sem 计数为负，
+         * 触发 sem_invariant_ok 审计误报且无合法语义——显式拒绝（fail-closed，打日志）。 */
+        if ((int32_t)b < 0) {
+            serial_printf("[sem] create id=%u DENIED negative init=%d\n", a, (int32_t)b);
+            r->eax = (uint32_t)-1;
+            return;
+        }
         if (!sem_objects[a].used) {
             sem_objects[a].used = 1;
             sem_init(&sem_objects[a].sem, (int32_t)b);
@@ -814,7 +838,11 @@ void syscall_dispatch(registers_t *r) {
                  L1：大缓冲下沉 sys_exec_case，避免抬高 dispatch 单帧（栈预算总账） */
         sys_exec_case(r, a, b, c);
         return;
-    case 26: { /* sys_fs_seek(fd, off)：定位读写位置，返回新位置或 -1 */
+    case 26: { /* sys_fs_seek(fd, off)：定位读写位置，返回新位置或 -1。
+        * A-2 ② 参数语义：off 按**无符号 uint32 原生**处理（fs pos 即 uint32）。
+        * 负偏移经符号位回绕成巨大 uint32 后照存 pos；其"风险"是后续 read/write 落在文件
+        * 尾部之外返回失败/0——已由 read/write 的长度/越界哨兵 fail-closed，非内存不安全，
+        * 故不 clamp（要验"在文件内"须查 fs_size，超出本 syscall 职责，留注释备忘）。 */
         fs_file_t *fdt = cur_fdt();
         if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
         fdt[a].pos = b;
