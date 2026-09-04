@@ -162,6 +162,9 @@ static int fs_walk(blockdev_t *bd, const char *path, uint32_t *dirout,
         }
         uint32_t cl = 0;
         while (*p && *p != '/' && cl < FS_MAX_NAME - 1) comp[cl++] = *p++;
+        /* SEC-04：分量超长（>FS_MAX_NAME-1=23 字符）——剩余字符会被误当后续分量
+         * 续解析，语义错乱（"x" 不存在被解成 "23字符前缀 + 子路径"）。直接拒判。 */
+        if (*p && *p != '/' && cl >= FS_MAX_NAME - 1) { leaf[0] = 0; *dirout = dir; return -1; }
         comp[cl] = 0;
         if (cl == 0) continue;         /* 不可能（上面已跳过 '/'） */
         if (str_eq(comp, ".")) continue;
@@ -252,6 +255,7 @@ static int fs_make(blockdev_t *bd, const char *path, uint16_t type) {
     if (ino >= 0) return -1;            /* 已存在 */
     uint32_t nl = str_len(leaf);
     if (nl == 0 || nl >= FS_MAX_NAME) return -1;
+    if (fs_is_ro(bd, dir) == 1) return -1;   /* SEC-05：父目录只读则禁止新增条目 */
     int ni = alloc_inode(bd);
     if (ni < 0) return -1;
     fs_inode_t in;
@@ -294,18 +298,25 @@ int fs_is_ro(blockdev_t *bd, uint32_t inode) {
     return (in.mode & FS_MODE_RO) ? 1 : 0;
 }
 
+/* 数据块号合法性检查（SEC-03）：块号必须落在数据区 [FS_DATA_START, bd->blocks)。
+ * 防御 inode 表被恶意镜像篡改时 free_inode_blocks 用非法块号越界写数据块位图
+ * （bit>>3 越过位图块 2 进入相邻内存）。正常路径 alloc_block 已保证合法。 */
+static int blk_valid(blockdev_t *bd, uint32_t blk) {
+    return (blk >= FS_DATA_START && blk < bd->blocks) ? 1 : 0;
+}
+
 /* 释放文件/目录占用的数据块（直接 + 间接 + 间接块本身） */
 static void free_inode_blocks(blockdev_t *bd, fs_inode_t *in) {
     for (uint32_t b = 0; b < FS_DIRECT_BLOCKS; b++) {
-        if (in->blocks[b]) {
+        if (in->blocks[b] && blk_valid(bd, in->blocks[b])) {
             bitmap_set(bd, DATA_BITMAP_BLK, in->blocks[b], 0);
             in->blocks[b] = 0;
         }
     }
-    if (in->indirect) {
+    if (in->indirect && blk_valid(bd, in->indirect)) {
         uint32_t *ptrs = (uint32_t *)blockdev_ptr(bd, in->indirect, 0);
         for (uint32_t k = 0; k < FS_INDIRECT_BLOCKS; k++)
-            if (ptrs[k]) bitmap_set(bd, DATA_BITMAP_BLK, ptrs[k], 0);
+            if (ptrs[k] && blk_valid(bd, ptrs[k])) bitmap_set(bd, DATA_BITMAP_BLK, ptrs[k], 0);
         bitmap_set(bd, DATA_BITMAP_BLK, in->indirect, 0);
         in->indirect = 0;
     }
