@@ -3,6 +3,43 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.11] - 2026-09-04 · Red Team F1/F2：按名/按路径加载缓冲契约对齐 + ccrun 假成功判败（BUG-065/066）
+
+> 红队审计两项收口：① 内核按名/按路径加载的 16B 缓冲与 FS 契约（FS_MAX_NAME=24）不一致，
+> 16~23 字符合法程序名被静默截断撞前名前缀、可能误加载错误程序——缓冲统一 64B（path 约定）
+> 并引入 `copyin_str_full` 对超长**显式失败**不再静默截断；② shell `cmd_ccrun` 用 uint32_t 收
+> `sys_spawn_file` 失败返回值，-1 化 4294967295 使判败恒假、把"根本没运行"伪装成假 `PASS (run=0ms)`——
+> 改有符号判败并显式报 `cannot run`。
+
+**Fixed**
+
+* [usermode.c](../../v2-c-kernel/src/kernel/usermode.c)：三处按名/按路径加载缓冲
+  `char namebuf[16]` → `char namebuf[64]`（`usermode_spawn_elf` name 缓冲、`sys_exec_case` namebuf、
+  `case 21 sys_spawn_file` namebuf），与 `case 13/14/18` 的 `char path[64]` 及 FS 路径契约一致；
+  `sys_exec_case`/`case 21` 改用 `copyin_str_full`，超长显式返回 -1（日志
+  `spawn_file name too long/invalid`），不再静默截断撞前缀加载错误程序。
+* [userptr.c](../../v2-c-kernel/src/kernel/userptr.c)：新增 `copyin_str_full`——同 `copyin_str`
+  但不静默截断，max 内未遇 NUL 返回 -2（超长），dest 已安全终止；供"按名/按路径加载"边界使用。
+* [sched.h](../../v2-c-kernel/src/kernel/sched.h)：进程名显示缓冲 `pcb.name_buf` 16→64B，
+  与加载缓冲契约一致化，消除进程名显示被早截断的隐性契约。
+* [shell.c](../../v2-c-kernel/src/app/shell.c)：`cmd_ccrun` 运行段改 `int spid` 接收
+  `sys_spawn_file` 返回值，`spid<=0` 正确判败并打印 `[ccrun] cannot run '<out>'`，消除假 PASS。
+
+**Tests**
+
+* [test_userptr.c](../../v2-c-kernel/tests/test_userptr.c)：mmap 出"假页表已映射低区"后，
+  真读覆盖 `copyin_str_full` 三态（成功 0 / 无效或未映射 -1 / 超长 -2），36 断言全绿。
+* [test_serial.sh](../../v2-c-kernel/tests/test_serial.sh)：新增双向回归——正向"20 字符源名 +
+  18 字符加载名"真实加载运行（`[elf] '...' loaded` + 运行输出 + `PASS (run>0)`）；负向"不存在的源"
+  必须显式 `compile FAIL`，且命令窗口切片内不得再出现 `exited code=0 PASS`（防 run=0ms 假阳性归来）。
+
+**自测实录**
+
+* `make` -Werror 干净；`make test-host` 全绿（test_userptr 36 断言）。
+* `make test-serial` 通过（长名加载运行 PASS + 失败显式无假 PASS 两向断言通过）。
+
+Docs：bugs.md 新增 BUG-065/066。
+
 ## [v1.4.10] - 2026-09-03 · ELF 段尺寸钳制 + mapfn 失败中止 + heap 页整倍缺陷（BUG-056）
 
 > DoS 审计落地：堵"单条 guest 命令整机宕机"的第 5 类向量（ELF 段 p_memsz 无上限叠加 mm 低

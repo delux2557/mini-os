@@ -151,8 +151,13 @@ static int load_elf_file(const char *name, uint32_t vbase, uint32_t *entry) {
 int usermode_spawn_elf(const char *name, uint32_t vbase, int resident) {
     /* v0.11: 父进程传入的 name 可能位于其用户地址空间，而加载期间 CR3 会切到
      * 新进程页目录（克隆内核半区，不含父进程用户映射），故先拷到内核栈缓冲，
-     * 之后所有日志/拷贝都用这份内核内存中的名字。 */
-    char namebuf[16];
+     * 之后所有日志/拷贝都用这份内核内存中的名字。
+     * v0.35（红队 F1 修复）：按名/按路径加载缓冲统一 64B（path 约定），覆盖
+     * "最深层级路径"且与其它 fs 接口（case 13/14/18 的 char path[64]）一致；
+     * FS_MAX_NAME=24（单分量，含 NUL）。加载接口接受可含 '/' 的路径，故缓冲须 ≥ 路径
+     * 上限而不只是单分量上限。**不允许再出现小于该上限的按名缓冲**（曾 16B 致
+     * 16~23 字符合法程序名被静默截断撞名前缀、加载错误程序）。 */
+    char namebuf[64];
     int ni = 0;
     if (name)
         while (name[ni] && ni < (int)sizeof(namebuf) - 1) { namebuf[ni] = name[ni]; ni++; }
@@ -332,9 +337,11 @@ static __attribute__((noinline)) void sys_exec_case(registers_t *r, uint32_t a, 
     char *const *argv = (char *const *)c;
     /* v0.17：name / argv 数组 / 每个 argv[i] 字符串都先校验并拷入内核缓冲。
      * name 与 argv 内容都位于当前（旧）地址空间，而加载/替换期间会切 CR3，
-     * 故须先在当前地址空间把它们全部拷入内核缓冲（与 spawn_elf 的 namebuf 同因）。 */
-    char namebuf[16];
-    if (copyin_str((const char *)a, namebuf, sizeof(namebuf)) < 0) { r->eax = (uint32_t)-1; return; }
+     * 故须先在当前地址空间把它们全部拷入内核缓冲（与 spawn_elf 的 namebuf 同因）。
+     * v0.35（红队 F1 修复）：name 缓冲 64B（path 约定，见 spawn_elf 注释），
+     * 用 copyin_str_full 在超长时显式失败而非静默截断（防撞名前缀误加载）。 */
+    char namebuf[64];
+    if (copyin_str_full((const char *)a, namebuf, sizeof(namebuf)) < 0) { r->eax = (uint32_t)-1; return; }
     if (argc && !user_ptr_valid((const void *)argv, argc * sizeof(char *))) {
         r->eax = (uint32_t)-1;
         return;
@@ -682,8 +689,14 @@ void syscall_dispatch(registers_t *r) {
         return;
     }
     case 21: { /* sys_spawn_file(name)：从文件系统加载 ELF 应用到 app 槽，返回 pid */
-        char namebuf[16];
-        if (copyin_str((const char *)a, namebuf, sizeof(namebuf)) < 0) { r->eax = (uint32_t)-1; return; }
+        /* v0.35（红队 F1 修复）：name 缓冲 64B（path 约定）；copyin_str_full 使
+         * 超长名字显式失败（返回 -2 → 本次 -1），不静默截断撞前名前缀误加载。 */
+        char namebuf[64];
+        if (copyin_str_full((const char *)a, namebuf, sizeof(namebuf)) < 0) {
+            serial_printf("[user] spawn_file name too long/invalid\n");
+            r->eax = (uint32_t)-1;
+            return;
+        }
         int pid = usermode_spawn_elf(namebuf, APP_LINK, 0);
         serial_printf("[user] spawn_file '%s' -> pid=%d\n", namebuf, pid);
         r->eax = (uint32_t)pid;

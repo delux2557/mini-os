@@ -1518,6 +1518,49 @@
 
 ***
 
+## BUG-065 \[已修复] 内核按名/按路径加载缓冲(16B)与 FS 契约(FS_MAX_NAME=24)不一致 → 长合法程序名被静默截断撞前名前缀、误加载错误程序（Red Team F1）
+
+* **版本**：当前 main（2026-09-04，红队审计 F1）
+* **危险度**：高 —— 被截断的名字在前 16B 处斩断，`/hello` 与 `/hello_evil.bin` 之类会"共享前缀"；
+  调用方本意加载 `/hello_evil.bin`，内核却静默以截断值 `/hello_evi` 去 FS 解析。
+  若存在同前缀合法程序即**加载错误程序**；即便不存在也会报"找不到"而非"名字非法"，
+  属静默截断型缺陷（CWE-130/Arm: 缓冲区截断后继续处理）。
+* **根因**：`usermode.c` 三处按名/按路径加载入口（`usermode_spawn_elf` 内部 name 缓冲、
+  `sys_exec_case` 的 `namebuf`、`case 21 sys_spawn_file` 的 `namebuf`）都用了 `char namebuf[16]`；
+  而 FS 契约为 `FS_MAX_NAME=24`（单分量含 NUL，[fs.h](../../v2-c-kernel/src/fs/fs.h)）。
+  于是 16~23 字节的合法程序名落入缓冲即被 `copyin_str`（静默截断）斩到 15B，随后以错误名解析。
+* **修复**：
+  * 三处缓冲统一扩至 `char namebuf[64]`（=path 约定，与 `case 13/14/18` 的 `char path[64]`
+    一致；[usermode.c](../../v2-c-kernel/src/kernel/usermode.c)）。FS_MAX_NAME 只约束**单分量**，
+    加载接口接受可含 `/` 的路径，故缓冲须 ≥ 路径上限而非仅单分量上限。
+  * 新增 [copyin_str_full](../../v2-c-kernel/src/kernel/userptr.c)：与 `copyin_str` 相同但不静默
+    截断——在 max 字节内未读到 NUL 即 `return -2`（超长），dest 已安全终止 `kern_dst[max-1]=0`。
+    `sys_exec_case` / `case 21` 改用它，超长时显式 `-1` 并日志 `spawn_file name too long/invalid`，
+    **不再静默截断撞前缀**。
+  * [sched.h](../../v2-c-kernel/src/kernel/sched.h) 进程名显示缓冲 `pcb.name_buf` 同步 16→64B，
+    消除"进程名显示被早截断"的隐性契约（仅观测用，与加载/FS 语义一致化）。
+* **回归**：
+  * host：test_userptr 新增 `copyin_str_full` 三态（成功 0 / 无效或未映射 -1 / 超长 -2）断言，
+    并 mmap 出"假页表已映射低区"以真读成功/超长/跨页路径，36 断言全绿。
+  * serial：新增"20 字符源名 + 18 字符加载名"正向用例（真实 `[elf] '...' loaded` + 运行输出 +
+    `PASS (run>0)`），以及"超长/不存在"失败必须**显式报错、绝不输出假 PASS"负向用例。
+
+## BUG-066 \[已修复] cmd_ccrun 用 uint32_t 收 sys_spawn_file 失败返回值 → -1 伪装成"PASS (run=0ms)"假成功（Red Team F2）
+
+* **版本**：当前 main（2026-09-04，红队审计 F2）
+* **危险度**：中 —— 打编译产物失败（spawn 返回 -1）时，shell 不报错、反而打印
+  `[ccrun] '<out>' exited code=0 PASS (compile=…ms run=0ms)` 的假成功；`run=0ms` 即"根本没运行"
+  的铁证被当成功吞掉，功能/教学语义失真（CWE-253: 返回状态作废）。
+* **根因**：[shell.c](../../v2-c-kernel/src/app/shell.c) `cmd_ccrun` 用 `uint32_t pid = sys_spawn_file(tok[1])`
+  接收返回值。`sys_spawn_file` 失败返回 `(uint32_t)-1`，赋值给无符号后 `pid<=0` 判断**恒假**，
+  于是静默落入 `sys_wait(4294967295,...)` → 没等到子进程、`code` 保持 0 → 打印假 PASS。
+* **修复**：运行段改用有符号 `int spid = sys_spawn_file(tok[1])`，`if (spid <= 0)` 正确判败并
+  打印 `[ccrun] cannot run '<out>'` 返回；与 `cmd_run` 判败同构。编译段（fork）保持 uint32_t 不动。
+* **回归**：test_serial 负向用例——对不存在的源码 `ccrun` 必须显式 `compile FAIL`，且"命令窗口内"不得
+  再出现 `exited code=0 PASS` 行（按日志行号切片断言），杜绝 `run=0ms` 假阳性归来。
+
+***
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号      | 场景               | 现象                                                                                                                   | 处置/教训                                                                                                                                             |
