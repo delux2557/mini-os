@@ -196,6 +196,78 @@ if tail -n "+$((SN1+1))" "$LOG" | grep -aqE "exited code=0 PASS"; then
 else
     echo "[ok]   失败命令未出现 PASS（F2 判败修复确认）"
 fi
+# ---- 红队二轮（ERRATA-R2）G1 / D4 回归：BUG-067 / BUG-068 ----
+# 载荷 cc500 方言合规：纯 ASCII、无数组/for/break/cast、无 unary 负号（-1 用 0-1 表达式，
+# 否则 "-" 在字面量位报 error）；指针经 uint32_t 形参隐式转换。⚠ 字符串字面量
+# （如 "G1ret-NEG"、"D4EVIL"）会先被串口回显进日志，故断言一律取 ccrun/程序运行段
+# （SN 行号切片：SN 在 writefile 回显完成后、发 ccrun 前落片），排除回显假阳性（沿用 F1 切片模式）。
+#
+# G1（RBT-2026-013，BUG-067）：sys_readline(max=0) 须立即返 -1、绝不阻塞。
+#     传合法指针 + max=0 且不注入任何键盘输入：若旧实现仍阻塞/越界写，程序永远到不了
+#     打印段，切片断言超时判败（同时覆盖"返 -1"与"不阻塞"两个性质）。
+send 'writefile <<EOF /g1_rb.c'
+send 'int syscall3(int n,int a,int b,int c);'
+send 'int main(){'
+send 'int ret=syscall3(20,"x",0,0);'
+send 'if(ret==0-1){ syscall3(1,"G1ret-NEG\x0a",0,0);}'
+send 'if(ret!=0-1){ syscall3(1,"G1ret-OTHER\x0a",0,0);}'
+send 'return 0;'
+send '}'
+send 'EOF'
+wait_for "G1 源码入账"  "\[writefile\] '/g1_rb.c' wrote .* (heredoc)"
+SN_G1=$(wc -l < "$LOG")
+send 'ccrun /g1_rb.c /g1_rb.elf'
+G1SLICE=""
+for _ in $(seq 1 16); do G1SLICE=$(tail -n "+$((SN_G1+1))" "$LOG"); \
+    [ -n "$(printf '%s\n' "$G1SLICE" | grep -aF "G1ret-NEG")" ] && break; sleep 0.5; done
+printf '%s\n' "$G1SLICE" | grep -aF "G1ret-NEG" >/dev/null \
+  && echo "[ok]   G1 readline(max=0) 立即返 -1、不阻塞" \
+  || { echo "[FAIL] G1 readline(max=0) 未返 -1 或阻塞"; FAIL=$((FAIL+1)); }
+# D4（RBT-2026-014，BUG-068）：删除仍被打开的 fd 须回收；旧 fd 写落新文件必须失败。
+#     流程：create A -> open fd=1(A,wr) -> write OLD -> rm A（触发 revoke fd=1）
+#           -> create B -> open fd=2(B,wr) -> write BOK -> 经悬垂 fd1 写 D4EVIL。
+#     断言：a) 出现 [fs] revoke 日志；b) fd1 写返 -1（D4fd1-NEG）；c) cat /dB 仅含 BOK、绝无 D4EVIL。
+send 'writefile <<EOF /d4_rb.c'
+send 'int syscall3(int n,int a,int b,int c);'
+send 'int main(){'
+send 'int r;'
+send 'syscall3(13,"/dA",0,0);'
+send 'r=syscall3(14,1,"/dA",1);'
+send 'syscall3(15,1,"OLD",3);'
+send 'syscall3(19,"/dA",0,0);'
+send 'syscall3(13,"/dB",0,0);'
+send 'r=syscall3(14,2,"/dB",1);'
+send 'syscall3(15,2,"BOK",3);'
+send 'r=syscall3(15,1,"D4EVIL",6);'
+send 'if(r==0-1){ syscall3(1,"D4fd1-NEG\x0a",0,0);}'
+send 'if(r!=0-1){ syscall3(1,"D4fd1-OKbad\x0a",0,0);}'
+send 'return 0;'
+send '}'
+send 'EOF'
+wait_for "D4 源码入账"  "\[writefile\] '/d4_rb.c' wrote .* (heredoc)"
+SN_D4=$(wc -l < "$LOG")
+send 'ccrun /d4_rb.c /d4_rb.elf'
+D4SLICE=""
+for _ in $(seq 1 16); do D4SLICE=$(tail -n "+$((SN_D4+1))" "$LOG"); \
+    [ -n "$(printf '%s\n' "$D4SLICE" | grep -aF "D4fd1-NEG")" ] && \
+    [ -n "$(printf '%s\n' "$D4SLICE" | grep -aF "[fs] revoke fd=")" ] && break; sleep 0.5; done
+printf '%s\n' "$D4SLICE" | grep -aF "[fs] revoke fd=" >/dev/null \
+  && echo "[ok]   D4 revoke 日志出现" || { echo "[FAIL] D4 无 revoke 日志"; FAIL=$((FAIL+1)); }
+printf '%s\n' "$D4SLICE" | grep -aF "D4fd1-NEG" >/dev/null \
+  && echo "[ok]   D4 悬垂 fd 写返 -1" || { echo "[FAIL] D4 悬垂 fd 写未返 -1"; FAIL=$((FAIL+1)); }
+# c) cat /dB 复核：内容应为 BOK，绝不含 D4EVIL（若旧 fd 写落新文件则 /dB 会含 D4EVIL）。
+SN_CAT=$(wc -l < "$LOG")
+send 'cat /dB'
+CATSLICE=""
+for _ in $(seq 1 10); do CATSLICE=$(tail -n "+$((SN_CAT+1))" "$LOG"); \
+    [ -n "$(printf '%s\n' "$CATSLICE" | grep -aF "BOK")" ] && break; sleep 0.4; done
+printf '%s\n' "$CATSLICE" | grep -aF "BOK" >/dev/null \
+  && echo "[ok]   /dB 内容为 BOK" || { echo "[FAIL] /dB 未含 BOK"; FAIL=$((FAIL+1)); }
+if printf '%s\n' "$CATSLICE" | grep -aq "D4EVIL"; then
+    echo "[FAIL] 悬垂 fd 字节落入新文件 /dB（D4 未修复）"; FAIL=$((FAIL+1))
+else
+    echo "[ok]   /dB 不含悬垂 fd 写入（无 D4EVIL）"
+fi
 # ---- v1.4 heredoc 多行写入：writefile <<EOF /multi.c（逐行拼接，绕开单行 128B 截断） ----
 send 'writefile <<EOF /multi.c'
 send 'int syscall3(int n,int a,int b,int c);'
