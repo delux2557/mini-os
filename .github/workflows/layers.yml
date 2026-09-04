@@ -6,13 +6,27 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # 读取唯一事实源：v2-c-kernel/Makefile 的 TEST_LAYERS（经 test-layers 逐行输出）→ JSON 数组供矩阵展开。
+  # 层清单只维护在 Makefile，勿在本 workflow 手抄（曾漏加 test-stack）；加层见 docs/README.md 维护规则。
+  load-layers:
+    runs-on: ubuntu-24.04
+    outputs:
+      layers: ${{ steps.list.outputs.layers }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          L=$(make -s -C v2-c-kernel test-layers)
+          echo "layers=$(printf '%s' "$L" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read().splitlines()))')" >> "$GITHUB_OUTPUT"
+
   # 分步定位：每层独立 job 并行，主门禁（CI/test）失败时快速定位是哪一层
   layer:
-    runs-on: ubuntu-latest
+    needs: load-layers
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        layer: [host, qemu, serial, persist, net, socket, cc500, slip, tcp]
+        layer: ${{ fromJson(needs.load-layers.outputs.layers) }}
     steps:
       - uses: actions/checkout@v4
 
