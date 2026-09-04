@@ -13,18 +13,28 @@
 #   * transcripts.contract_hash —— 功能契约指纹：把函数契约行(exited code/ISOLATED OK/PASS/
 #                      verify/…，先按 norm() 去掉后台 demo tick 噪声行) 归一化排序后整段 sha256。
 #                      新跑一轮哈希不等 = 基线告警（静默功能回归的强信号）。
+# v3 新增（门禁 flaky 治理 · 观测打点总成 Commit 3，纯观测）：
+#   * assert_timing —— 断言时序表（插曲 1 类等待断言的观测台账）。
+#                      来源：三个测试脚本（serial/socket/qemu）各自落盘的
+#                      `$BUILD/assert_timing_<script>.tsv`（本目录），字段=
+#                      `断言名 \t 耗时ms \t ok|timeout`。导入支持 glob 多文件、
+#                      幂等按 runid DELETE+INSERT；断言名既作 RR key（改名即新基线）。
 #
 # 字段（schema）：
 #   transcripts  —— 归档元数据/血统 + 产出基线(contract_hash/out_bytes/out_lines)
 #   in_events    —— 输入事件（.in.tr）：seq / rel_ms / cmd(首词)/ payload
 #   out_rows     —— 输出逐行（.out.tr）：line_no / content（可 LIKE 检索）
 #   stage_timing —— 阶段耗时：runid / stage / wall_ms
+#   assert_timing—— 断言时序：runid / script / assert / elapsed_ms / ok / seq
+#                    （同一 (runid,script,assert) 可多行：qemu cmd 重试会再多录一遍命中/超时现场）
 #
 # 用法：
 #   python3 tests/tr2sqlite.py DB path/to/runid [runid...]   # 导入指定 transcript
 #   python3 tests/tr2sqlite.py --dirs DB transcript_base     # 扫描目录下所有 runid
 #   python3 tests/tr2sqlite.py -q DB "SELECT ..."            # 便捷查询
 #   python3 tests/tr2sqlite.py --demo DB                     # 打印示例查询结果
+#   python3 tests/tr2sqlite.py DB --assert-timing --runid <id> $BUILD/assert_timing_*.tsv
+#     # 导入断言时序（glob 多文件，脚本名取自文件名尾部 _serial/_socket/_qemu）
 import argparse
 import hashlib
 import re
@@ -92,9 +102,19 @@ CREATE TABLE IF NOT EXISTS stage_timing(
   wall_ms INTEGER,
   PRIMARY KEY(runid, stage)
 );
+CREATE TABLE IF NOT EXISTS assert_timing(
+  runid     TEXT NOT NULL,
+  script    TEXT NOT NULL,
+  assert    TEXT NOT NULL,
+  elapsed_ms INTEGER,
+  ok        TEXT NOT NULL,
+  seq       INTEGER,
+  PRIMARY KEY(runid, script, assert, seq)
+);
 CREATE INDEX IF NOT EXISTS ix_in_events_cmd ON in_events(runid, cmd);
 CREATE INDEX IF NOT EXISTS ix_out_rows_line ON out_rows(runid, line_no);
 CREATE INDEX IF NOT EXISTS ix_stage_stage ON stage_timing(stage, wall_ms);
+CREATE INDEX IF NOT EXISTS ix_assert_timing_key ON assert_timing(script, assert);
 """
 
 
@@ -197,6 +217,55 @@ def import_runid(conn: sqlite3.Connection, d: Path) -> dict:
                 out_bytes=out_bytes, contract_hash=chash[:8])
 
 
+def script_from_tsv(name: str) -> str:
+    """从文件名取脚本名：assert_timing_serial.tsv -> serial。"""
+    base = Path(name).name
+    if base.startswith("assert_timing_") and base.endswith(".tsv"):
+        return base[len("assert_timing_"):-len(".tsv")]
+    return base
+
+
+def import_assert_timing(conn: sqlite3.Connection, runid: str, files) -> dict:
+    """导入断言时序 TSV（glob 多文件）到 assert_timing 表。
+
+    每文件按脚本名归属（文件名尾部 _serial/_socket/_qemu）；行式
+      `断言名 \\t 耗时ms \\t ok|timeout`
+    （断言名已由脚本 sed 转义 tab/换行）。幂等：按 runid 先 DELETE 再 INSERT；
+    同一 (runid,script,assert) 可多行（qemu cmd 重试会再录一遍命中/超时），用 seq 区分。
+    断言名即 RR 基线 key——改名即新基线（见 docs 维护规则）。
+    """
+    conn.execute("DELETE FROM assert_timing WHERE runid=?", (runid,))
+    total = 0
+    per = {}
+    for f in files:
+        script = script_from_tsv(f)
+        rows, seq, n = [], 0, 0
+        with open(f, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.rstrip("\n").rstrip("\r")
+                # 注意：TSV 只有数据行、无注释行；断言名可能以 '#' 开头
+                #（如 qemu 的 "#UD 后系统仍存活"，x86 异常名），故不能按行首 '#' 判注释。
+                if not line:
+                    continue
+                p = line.split("\t")
+                if len(p) < 3:
+                    continue
+                assert_name, el, ok = p[0], p[1], p[2]
+                try:
+                    el = int(el)
+                except ValueError:
+                    el = 0
+                rows.append((runid, script, assert_name, el, ok, seq))
+                seq += 1
+        if rows:
+            conn.executemany("INSERT INTO assert_timing VALUES(?,?,?,?,?,?)", rows)
+            n = len(rows)
+        total += n
+        per[script] = n
+    conn.commit()
+    return dict(runid=runid, total=total, per_script=per)
+
+
 def demo(conn: sqlite3.Connection) -> None:
     print("== transcripts ==")
     for r in conn.execute("SELECT runid,created_at,result,in_count,out_lines,substr(contract_hash,1,8) "
@@ -212,6 +281,9 @@ def demo(conn: sqlite3.Connection) -> None:
     print("== 输出里 mini-os 提示符出现次数（发行版诊断） ==")
     for r in conn.execute("SELECT runid,count(*) FROM out_rows WHERE content LIKE '%mini-os$ %' GROUP BY runid"):
         print("  %-24s prompts=%d" % r)
+    print("== 断言时序（assert_timing） ==")
+    for r in conn.execute("SELECT runid,script,count(*) FROM assert_timing GROUP BY runid,script ORDER BY runid,script"):
+        print("  %-24s %-8s rows=%d" % r)
 
 
 def main() -> int:
@@ -219,6 +291,9 @@ def main() -> int:
     p.add_argument("db", help="sqlite 文件路径")
     p.add_argument("targets", nargs="*", help="transcript 目录 或 --dirs 参数指定的根")
     p.add_argument("--dirs", metavar="BASE", help="扫描该目录下所有 transcript（每个子目录 = 一个 runid）")
+    p.add_argument("--assert-timing", action="store_true",
+                   help="导入断言时序 TSV（targets=assert_timing_*.tsv 的 glob 展开）")
+    p.add_argument("--runid", metavar="ID", help="断言时序归属的 runid（--assert-timing 必填）")
     p.add_argument("-q", "--query", help="便捷查询：SELECT ...")
     p.add_argument("--demo", action="store_true", help="打印示例查询结果")
     p.add_argument("--schema", action="store_true", help="只建表/清 schema 后退出")
@@ -235,6 +310,23 @@ def main() -> int:
     if args.schema is False and args.query:
         for row in conn.execute(args.query):
             print(row if len(row) > 1 else row[0])
+        conn.close()
+        return 0
+
+    if args.assert_timing:
+        if not args.runid:
+            print("--assert-timing 需指定 --runid。", file=sys.stderr)
+            conn.close()
+            return 2
+        if not args.targets:
+            print("未指定 assert_timing_*.tsv（shell glob 展开后传入）。", file=sys.stderr)
+            conn.close()
+            return 2
+        s = import_assert_timing(conn, args.runid, args.targets)
+        detail = " ".join(f"{k}={v}" for k, v in s["per_script"].items())
+        print(f"[ok] assert_timing<{s['runid']}> total={s['total']} ({detail})")
+        if args.demo:
+            demo(conn)
         conn.close()
         return 0
 
