@@ -3,6 +3,46 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.13] - 2026-09-04 · Red Team 三轮 RD3：fs 读路径块号信任——块号损坏统一拒堵（BUG-069/070）
+
+> 红队三轮 RD3 两项修复（共享同一根因 `blk_valid` 仅用于释放路径）：恶意镜像把磁盘 inode 的
+> `blocks[]`/`indirect` 当块号直接寻址且读/写/遍历不校验，造成两类链路——**V2（高）** 块号指向 inode
+> 表（如 `blocks[0]=3`）→ 文件读写别名作用于 inode 表，清掉受保护文件的 `FS_MODE_RO`，**击穿 BUG-057
+> 系统文件只读**（`fs_is_ro 1→0`、内容被改、静默无崩）；**V1（中）** 块号越界 → `blockdev_ptr` 返 NULL
+> 被解引用（`fs_lookup_in`/`file_block`，宿主 ASan SEGV；guest 低 16MB 恒等映射使 NULL 写不触发 #PF →
+> 静默破坏）。修复将 `blk_valid` 前置到一切 inode 块号寻址路径（目录增删空查列视同损坏跳过；`file_block`
+> 统一"损坏块号==0"：直接/间接/拾取块号损坏返回 0，读截断、写依既有首块 -1/短写），并加判空纵深。
+> fs 层纯逻辑，宿主单测直接复现 V1/V2、断言读写拒绝、只读不击穿、ASan 清洁 + 正常性对照。诚实边界
+> 注记 bugs.md：本修复断"元数据区被当数据读写"；两文件 inode 直指同一合法数据块这类内容层矛盾需镜像
+> 校验工具承担，不属本修复范围。
+
+**Fixed**
+
+* [fs.c](../../v2-c-kernel/src/fs/fs.c)：`blk_valid`（`blk∈[FS_DATA_START, bd->blocks)`）推广到一切 inode 块号
+  寻址路径，区块 0-3（位图/inode 表）永不作为数据块寻址：
+  * `dir_add` / `dir_remove` / `dir_empty` / `fs_lookup_in` / `fs_list_dir`：`if (!di.blocks[b])` 后加
+    `if (!blk_valid(bd, di.blocks[b])) continue;`——损坏块视同跳过，不解引用、不参与找槽（V1 防崩 + V2 防别名）。
+  * `file_block`：直接块非 0 但 `!blk_valid` → return 0；indirect 非 0 但 `!blk_valid` → return 0；
+    拾取块号非 0 但 `!blk_valid` → return 0；`create=1` 时损坏块号不可重分配覆盖（可能被镜像别处引用），
+    返回 0 走 `fs_write` 既有"首块失败 -1 / 中间块短写"、`fs_read` 既有 `blk==0 break` 截断。
+  * 判空纵深：上述 5 处 `blockdev_ptr` 返回后、解引用 `e` / `ptrs` 前加 `if (!e) …`（正常不可达，纯纵深）。
+  * `blk_valid` 定义处注释由"SEC-03 释放路径"更新为"RD3：一切 inode 块号寻址路径统一前置校验"。
+
+**Tests**
+
+* [test_fs.c](../../v2-c-kernel/tests/test_fs.c)（宿主，并入 `make test-host`，ASan 清洁）：
+  * V2（BUG-069）：建 A + protect P → 篡改 blockdev inode 表令 A.blocks[0]=3（inode 表）→ `fs_read/write(A)`
+    拒绝（-1/0），P 仍含 `FS_MODE_RO`、内容未变。
+  * V1a（文件直接块=0xFFFFFFF0）：read 截断为 0、write 首块 -1、不崩；V1b（indirect=越界）：间接区 read
+    截断、write -1、不崩；V1c（目录块=越界）：`fs_lookup_in`/`fs_list_dir` 安全返回、不崩。
+  * 正常性对照：恢复合法块号后读写/遍历结果不变（校验不误伤）。
+
+**自测实录**
+
+* `make` -Werror 干净；`make test-host` pass=20 fail=0（含新增 RD3 断言）；`make test-qemu` 全绿。
+
+Docs：bugs.md 新增 BUG-069（RD3-V2）/ BUG-070（RD3-V1），附威胁模型注记（诚实边界：内容层一致性交镜像校验工具）。
+
 ## [v1.4.12] - 2026-09-04 · Red Team 二轮：readline max=0 早退 + 悬垂 fd 回收（BUG-067/068）+ 观察记录入账
 
 > 红队二轮两项修复 + 四条观察入账：① `sys_readline(max=0)` 旧实现把 0 当"未指定"替换成
