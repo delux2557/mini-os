@@ -25,15 +25,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 工具链包集合单源：v2-c-kernel/Makefile 的 CI_RUNNER_PKGS（经 ci-pkgs 单行输出）。
+      # 依赖构建/跑测试的 job 一律消费此清单，勿手抄包名（曾因 layers 缺 qemu-user 靠环境侥幸）。
+      # lint 是纯静态 job 白名单例外，无需工具链。
       - name: 安装工具链
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            gcc-multilib \
-            nasm \
-            qemu-system-x86 \
-            qemu-user \
-            socat
+          sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
 
       # make test 聚合 = v2-c-kernel/Makefile 的 TEST_LAYERS（唯一事实源）；
       # 新增/减少层见 docs/README.md 维护规则，勿在此手抄层名清单。
@@ -57,12 +55,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 工具链包集合单源：消费 Makefile ci-pkgs（含 qemu-user，见 CI_RUNNER_PKGS）。
       - name: 安装工具链
         run: |
           sudo apt-get update
-          # qemu-user 提供 qemu-i386：宿主无 ia32 exec 时 test-cc500 的 hostcc 用其运行
-          sudo apt-get install -y \
-            gcc-multilib nasm qemu-system-x86 qemu-user socat
+          sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
 
       - name: 录制/回放复现回归（BUG-A/BUG-B + argv 硬断言）
         run: make test-repro

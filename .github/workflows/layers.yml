@@ -6,8 +6,9 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  # 读取唯一事实源：v2-c-kernel/Makefile 的 TEST_LAYERS（经 test-layers 逐行输出）→ JSON 数组供矩阵展开。
-  # 层清单只维护在 Makefile，勿在本 workflow 手抄（曾漏加 test-stack）；加层见 docs/README.md 维护规则。
+  # 读取唯一事实源：v2-c-kernel/Makefile 的 TEST_LAYERS_HEAVY（经 test-layers-heavy 逐行输出）→ JSON 数组供矩阵展开。
+  # 层清单只维护在 Makefile，勿在本 workflow 手抄（曾漏加 test-stack）；加层/轻-重划分见 docs/README.md 维护规则。
+  # 秒级层（host/stack）由下方 fast job 顺序跑，不占并行矩阵的 runner。
   load-layers:
     runs-on: ubuntu-24.04
     outputs:
@@ -16,10 +17,30 @@ jobs:
       - uses: actions/checkout@v4
       - id: list
         run: |
-          L=$(make -s -C v2-c-kernel test-layers)
+          L=$(make -s -C v2-c-kernel test-layers-heavy)
           echo "layers=$(printf '%s' "$L" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read().splitlines()))')" >> "$GITHUB_OUTPUT"
 
-  # 分步定位：每层独立 job 并行，主门禁（CI/test）失败时快速定位是哪一层
+  # 工具链包集合单源：消费 Makefile ci-pkgs（含 qemu-user，见 CI_RUNNER_PKGS）。
+  # 秒级层同一 runner 顺序跑（host→stack），避免为它们各开一个 runner 现装一次工具链。
+  fast:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
+      - name: make test-fast（host stack 顺序跑）
+        run: make test-fast
+        working-directory: v2-c-kernel
+      - name: 失败上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-fast
+          path: v2-c-kernel/build/*.log
+
+  # 分步定位：每层独立 job 并行（重层），主门禁（CI/test）失败时快速定位是哪一层
   layer:
     needs: load-layers
     runs-on: ubuntu-24.04
@@ -30,14 +51,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 工具链包集合单源：消费 Makefile ci-pkgs（含 qemu-user——test-cc500 宿主 hostcc 在无 ia32 exec 的 runner 上需 qemu-i386）。
       - name: 安装工具链
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            gcc-multilib \
-            nasm \
-            qemu-system-x86 \
-            socat
+          sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
 
       # cc500 层脚本内部会自行构建（勿先 clean 再让它构建）
       - name: make test-${{ matrix.layer }}
