@@ -26,9 +26,46 @@
 #define USER_CODE_BASE   0x80000000u   /* 所有进程共享的代码页虚拟基址 */
 #define KSTACK_SIZE      4096u
 
+/* ---- L0（栈预算总账）：内核栈底部 canary 哨兵 ----
+ * 4KB 内核栈（TSS esp0 = kstack_top，esp 向下生长）。越界写穿时，栈顶方向最后被
+ * 触及的是页底（kstack_frame 处）16B——把它写成固定 magic，在下一次中断入口
+ * 校验。单链独占栈（中断门进即关 IF、无嵌套），任何深链写穿必然踩到页底 canary，
+ * 从"静默内存破坏"变为"可诊断停机"，兜住未来新增深链（SEC-07/L2 补充防线）。 */
+#define KSTK_CANARY       0x0C51E4Du   /* "L0" + 魔数，写满页底 16B（4×u32） */
+#define KSTK_CANARY_WORDS 4
+
 static pcb_t procs[MAX_PROCS];
 static uint32_t current_pid = PID_KERNEL_IDLE;
 static policy_readyq_t readyq;
+
+/* 在内核栈页底写入 canary（全部 4 处进程创建点调用）。kstack_frame 落在低 16MB
+ * 恒等映射区（frame_alloc），任何地址空间都能直接读写，无需切页目录。 */
+static void kstack_arm(pcb_t *p) {
+    uint32_t *w = (uint32_t *)(uintptr_t)p->kstack_frame;
+    for (int i = 0; i < KSTK_CANARY_WORDS; i++) w[i] = KSTK_CANARY;
+}
+
+/* 中断入口每 tick 校验：当前进程内核栈页底 canary 被踩 = 栈写穿。打印
+ * pid/esp/esp0 后明确停机——宁要可诊断的崩溃，不要静默的内存破坏。 */
+void kstack_check(void) {
+    pcb_t *p = &procs[current_pid];
+    /* 引导早期（sched_init 之前）定时器已开始 tick，但进程内核栈尚未分配/装填
+     * canary（kstack_frame=0）。此时跳过校验，避免把未初始化的零页误判成踩穿。 */
+    if (!p->kstack_frame) return;
+    const uint32_t *w = (const uint32_t *)(uintptr_t)p->kstack_frame;
+    for (int i = 0; i < KSTK_CANARY_WORDS; i++) {
+        if (w[i] != KSTK_CANARY) {
+            uint32_t esp;
+            __asm__ volatile ("mov %%esp, %0" : "=r"(esp));
+            serial_printf("\n[STACK-GUARD] canary stomped: pid=%u esp=%x esp0=%x\n"
+                          "  => 4KB 内核栈写穿，内核无法安全继续，停机（SEC-07/L0）\n",
+                          p->pid, esp, p->kstack_top);
+            vga_printf("\n[STACK-GUARD] canary stomped: pid=%u esp=%x esp0=%x\n",
+                       p->pid, esp, p->kstack_top);
+            __asm__ volatile ("cli; hlt");
+        }
+    }
+}
 
 /* v0.12: 定义在文件后部；sched_exec 需在定义前调用它 */
 static void schedule(registers_t *r);
@@ -167,6 +204,7 @@ void sched_init(void) {
     idle->state = PROC_RUNNING;
     idle->kstack_frame = frame_alloc();
     idle->kstack_top = idle->kstack_frame + KSTACK_SIZE;
+    kstack_arm(idle);                 /* L0：页底 canary */
     idle->entry_off = 0;
     idle->user_esp_top = user_stack_vbase(0) + KSTACK_SIZE;
     idle->page_dir = 0;                              /* 内核页目录 */
@@ -206,6 +244,7 @@ int sched_spawn(uint32_t entry_off, const char *name) {
     }
 
     p->kstack_top = p->kstack_frame + KSTACK_SIZE;
+    kstack_arm(p);                 /* L0：页底 canary */
     /* v0.26: 栈初始页在槽顶下方一页（槽底守卫页为硬底，永不映射） */
     uint32_t stk = stack_init(p, pid, p->stack_frames[0]);
     /* v0.11: 共享代码页映射；守卫页不映射（栈溢出陷阱），栈页按需生长（v0.26） */
@@ -259,6 +298,7 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
     }
 
     p->kstack_top = p->kstack_frame + KSTACK_SIZE;
+    kstack_arm(p);                 /* L0：页底 canary */
     uint32_t stk = stack_init(p, pid, p->stack_frames[0]); /* v0.26: 槽顶下方一页 */
     map_page_in(pd, stk, p->stack_frames[0], 0x7);    /* 独立用户栈页（守卫页不映射） */
 
@@ -382,6 +422,7 @@ int sched_fork(registers_t *r) {
      * 用户 esp 指向父进程用户栈——子进程已深拷贝该栈，同一虚拟地址内容一致，
      * 子进程从 fork 调用点继续执行（局部变量/调用链与原样）。 */
     c->kstack_top = c->kstack_frame + KSTACK_SIZE;
+    kstack_arm(c);                 /* L0：页底 canary */
     uint32_t faddr = c->kstack_top - sizeof(registers_t);
     memcpy8((void *)faddr, (const void *)r, sizeof(registers_t));
     ((registers_t *)faddr)->eax = 0;

@@ -1476,6 +1476,46 @@
   并进了 `make test` 主链，秒级。`test-net` / `test-tcp`（e1000 UDP + 串口 SLIP）均 PASS，
   `test-host` pass=20/20。
 
+## BUG-064 \[已修复] 内核栈预算总账（L0 页底 canary + L1 多根链门禁）SEC-07 延伸
+
+* **版本**：当前 main（2026-09-04，承接 SEC-07/PR#70）
+* **危险度**：中 —— SEC-07 只人工登记了 DHCP 一条链，其余 IRQ/syscall 入口无栈预算守护，
+  未来任何新增深链（新网卡驱动、新轮询、深 syscall）都可能再次静默写穿 4KB 内核栈。
+* **前提（单链独占栈）**：mini-os 所有中断/异常/syscall 均走中断门（进入即关 IF），故 4KB
+  内核栈（`KSTACK_SIZE`，TSS `esp0`=每进程 `kstack_top`）同一时刻只承载单条处理链（IRQ 链 或
+  syscall 链），**无嵌套叠加**。据此，"链栈帧总和 ≤ 预算"是贴切且安全的建模口径。
+* **修复（双层防线）**：
+
+  **L0 运行期兜底——内核栈页底 canary**（[sched.c](../../v2-c-kernel/src/kernel/sched.c)、
+  [idt.c](../../v2-c-kernel/src/arch/idt.c)）：每个进程创建 kstack 后在页底
+  `kstack_frame` 起 16B 写固定 magic `0x0C51E4D`（`kstack_arm`，覆盖 idle/spawn/spawn_at/fork
+  全部 4 处创建点）；`isr_handler` 入口先 `kstack_check()` 校验当前进程页底 canary，被踩即打印
+  `pid/esp/esp0` 并 `cli;hlt` 明确停机——把 SEC-07 的"静默内存破坏"变为"可诊断崩溃"。引导早期
+  （`sched_init` 前定时器已 tick、栈未装填）`kstack_frame==0` 时跳过校验，避免误判。
+  验收：临时注入 5KB 栈上缓冲探针，QEMU 运行日志出现 `[STACK-GUARD] canary stomped:
+  pid=1 esp=29dbf0 esp0=29f000` 并停机；还原后回归全绿、无误报。
+
+  **L1 静态防线——`test-stack` 扩展为关键根链清单**
+  （[check_stack_budget.sh](../../v2-c-kernel/tests/check_stack_budget.sh)、
+  [Makefile](../../v2-c-kernel/Makefile)）：把 SEC-07 的单链模型推广为多根独立断言（沿用
+  聚合 constprop 取最大帧 + 单帧上限 3072B + 链总和 ≤3584B 模式），现守护 9 条根链：
+  `IRQ0/timer·DHCP续约`(2472B)、`IRQ0/timer·调度`(80B)、`IRQ1/键盘`(80B)、`IRQ4/串口`(32B)、
+  `syscall/recvfrom`(2072B)、`syscall/sendto`(3456B)、`syscall/exec`(1216B)、`syscall/fork`(448B)、
+  `syscall/ls`(2528B)。
+* **同批实现的栈帧收敛**（[usermode.c](../../v2-c-kernel/src/kernel/usermode.c)）：`test-stack`
+  扩展后暴露出 `syscall_dispatch` 单帧达 **2224B**——`switch` 按最大 case 预留帧，`ls` 的
+  `ents[FS_MAX_INODES]`(64×32=2048B)、sendto 的 `pbuf[1400]`、exec 的 `names[8][64](512B)`
+  全挤在一帧；叠加 `netsock_send`(1648B)/`netsock_drain`(1632B) 深链会逼近乃至越过 3584B。
+  把 3 个大缓冲 case 下沉为 `__attribute__((noinline))` 辅助函数 `sys_fs_ls_case` /
+  `sys_exec_case` / `sys_sendto_case`（防 `-O2` 内联回 switch），`syscall_dispatch` 单帧
+  降至 336B，各深链互不叠加。**预算口径不放松**（仍 3584B）——是先削中间层、不是放宽。
+* **回归**：`make test-stack`（9 根链）绿；`make test-host` 20/20；`make test-qemu` 全绿；
+  `make` -Werror 干净。L0 canary 探针验证检出并停机，还原后无告警/无误报。
+* **后续（L2，本文档记录不作现版本实现）**：自动调用图栈预算工具——Python 读 `-fstack-usage`
+  产出 + `-fdump-ipa-cgraph` 调用图，从全部 isr/irq/syscall 入口 DFS 求最长栈路径并断言 ≤ 预算；
+  需登记函数指针边的白名单（`irq_handlers[]`/netif_ops/kb、serial hook），并对递归/环（sched
+  不返回路径、idle 循环、cc500 递归）剪枝；为过渡期人工清单兜底，不追求"数学证明"。
+
 ***
 
 ## 工程踩坑（非代码缺陷）
