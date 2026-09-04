@@ -3,6 +3,30 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.14] - 2026-09-04 · 门禁 flaky 治理：长名断言时序根修 + 等断观测打点（产物随 artifact）+ RR 基线
+> 承接插曲 1/2 + 治理任务 C（三步）。Commit 1（行为变更，ops 已批准）：test_serial.sh 长名用例
+> 两处 `run=[1-9]` 在 10ms tick 边界下把 run=0ms 的合法快执行误判 FAIL（类型 II 断言缺陷）——收敛为
+> `run=[0-9]+`，真实性交由 `[elf] loaded` + 程序自打印承担，BUG-066 防回归由 F2 负向断言独立覆盖。
+> Commit 2（纯观测）：三脚本 wait_for/wait_after 每断言恰打一行
+> `$BUILD/assert_timing_<script>.tsv`（断言名\t耗时ms\tok|timeout，断言名 sed 转义防列错位，
+> `make clean` stash→放回保台账），FAIL/超时分支打印 LOG 尾 ~20 行现场（区分类型 I 整行缺=时序 vs
+> 类型 II 行在格式不符=断言）。Commit 3（纯观测）：tr2sqlite.py 新增 assert_timing 表（幂等导入）、
+> baseline_check.py 新增 --asserts 跨轮 P50/P95 + 变慢预警。Commit 4（纯文档）：bugs.md 观察表
+> OBS-013、README 维护规则、本文档。全链不新增 CI job、不改 job 名、不动 B2 20s 阈值。
+**Tests**
+* [test_serial.sh](../../v2-c-kernel/tests/test_serial.sh)：长名断言 `run=[1-9]`→`run=[0-9]+`；
+  新增 wait_for 打点 + FAIL 现场 dump（`$BUILD/assert_timing_serial.tsv`）。
+* [test_socket.sh](../../v2-c-kernel/tests/test_socket.sh) / [qemu_regression.sh](../../v2-c-kernel/tests/qemu_regression.sh)：
+  同构打点（`_socket.tsv`/`_qemu.tsv`），分文件防 `make test` 串行互覆盖。
+* [Makefile](../../v2-c-kernel/Makefile)：`clean` 对 `assert_timing_*.tsv` stash→放回，保三者并存。
+* [tr2sqlite.py](../../v2-c-kernel/tests/tr2sqlite.py)：新增 assert_timing 表 + `--assert-timing` 导入（幂等）。
+* [baseline_check.py](../../v2-c-kernel/tests/baseline_check.py)：`--asserts` 对 (script,assert) 跨轮 P50/P95 + 变慢预警。
+**自测实录**
+* 三脚本串行 `make test` 后 `assert_timing_{serial,socket,qemu}.tsv` 并存（serial=94/socket=14/qemu=97 行）。
+* `make`（-Werror 默认开）干净；`make test-host` pass=20 fail=0。
+* tr2sqlite 对同 runid 重复导入幂等（total 不翻倍）；`baseline_check --asserts` 输出 P50/P95/timeout/变慢预警。
+Docs：bugs.md 观察表追加 OBS-013（门禁 flake 台账，类型 I/II 治理口径）；docs/README.md 追加规则 9（观测产物/断言名稳定性/GNU date/MD047）。
+
 ## [v1.4.13] - 2026-09-04 · Red Team 三轮 RD3：fs 读路径块号信任——块号损坏统一拒堵（BUG-069/070）
 
 > 红队三轮 RD3 两项修复（共享同一根因 `blk_valid` 仅用于释放路径）：恶意镜像把磁盘 inode 的

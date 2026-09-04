@@ -95,16 +95,66 @@ def check(conn, kind, show_stages, gate_alarm):
     return 1 if (alarms and gate_alarm) else 0
 
 
+def check_asserts(conn, kind, gate_alarm):
+    """断言时序基线（assert_timing；Commit 3）：按 (script,assert) 跨轮 P50/P95。
+
+    同 (runid,script,assert) 多行时（qemu cmd 重试），P50/P95 取 ok 命中行的耗时（成功现场），
+    timeout 记录单列计数提示。最新 run 的 ok 耗时超 P95*1.05 -> "变慢预警"。
+    断言名即 RR key，稳定是基线可比的前提（改名即新基线）。
+    """
+    try:
+        # DISTINCT+ORDER BY 已由 DB 排序；Row 不可 `<`，勿再用 sorted()
+        keys = list(conn.execute(
+            "SELECT DISTINCT script,assert FROM assert_timing WHERE runid LIKE ? "
+            "ORDER BY script,assert", (kind,)))
+    except sqlite3.OperationalError:
+        print("[info] assert_timing 表不存在——先跑 `tr2sqlite.py DB --assert-timing ...` 导入。")
+        return 0
+    if not keys:
+        print("[info] assert_timing 暂无该 kind 数据——先由测试脚本生成 TSV 并导入。")
+        return 0
+    print("== C] 断言时序基线（assert_timing; 跨轮 P50/P95; timeout 记录单列）==")
+    alarms = []
+    for script, assert_name in keys:
+        rows = list(conn.execute(
+            "SELECT runid,elapsed_ms,ok FROM assert_timing "
+            "WHERE runid LIKE ? AND script=? AND assert=? ORDER BY runid",
+            (kind, script, assert_name)))
+        vals = [e for _, e, ok in rows if ok == "ok"]
+        p50, p95 = round(percentile(vals, 50)), round(percentile(vals, 95))
+        # 最新 run（按 runid 取末个）的 ok 命中耗时最大值作代表；无 ok 则取该 run 最大耗时
+        runs = {}
+        for rid, e, ok in rows:
+            runs.setdefault(rid, []).append((e, ok))
+        latest_rid = max(runs)
+        ok_times = [e for e, ok in runs[latest_rid] if ok == "ok"]
+        latest_rep = max(ok_times) if ok_times else max((e for e, _ in runs[latest_rid]))
+        n_timeout = sum(1 for _, _, ok in rows if ok == "timeout")
+        flag = ""
+        if p95 and latest_rep > p95 * 1.05:
+            flag = "  <- 超 P95，变慢预警"
+            alarms.append(f"{script}/{assert_name} 最新 {latest_rep}ms 超 P95={p95}ms")
+        print(f"  [{script}] {assert_name:<30} P50={p50:>6}ms  P95={p95:>6}ms  "
+              f"最新[{latest_rid[-15:]}]={latest_rep}ms  timeout={n_timeout}{flag}")
+    return 1 if (alarms and gate_alarm) else 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="跨轮基线巡检：契约指纹/输出量 + 阶段耗时趋势")
     p.add_argument("db", help="sqlite 文件路径（tr2sqlite 灌入）")
     p.add_argument("--kind", default="%", help="runid LIKE 过滤（默认 %% 全量）")
     p.add_argument("--alarm", action="store_true", help="存在告警时 exit 1")
     p.add_argument("--stages", action="store_true", help="同时输出阶段耗时跨轮趋势")
+    p.add_argument("--asserts", action="store_true",
+                   help="同时输出断言时序跨轮趋势（assert_timing: P50/P95 + 变慢预警 + timeout）")
     args = p.parse_args()
     conn = sqlite3.connect(args.db)
     conn.row_factory = sqlite3.Row
     rc = check(conn, args.kind, args.stages, args.alarm)
+    if args.asserts:
+        # assert 的告警单独累计再 OR 进 exit 码（各自按 --alarm 才置 1）
+        rc_assert = check_asserts(conn, args.kind, args.alarm)
+        rc = rc or rc_assert
     conn.close()
     return rc
 
