@@ -36,14 +36,19 @@ mini-os 的开发文档遵循三条铁律：
 2. **新子系统 / 新架构决策**：`design.md` 增章，带 v0.x/v1.x 版本戳，延续既有风格。
 3. **规划变更**：只有"未开始的计划"进 `roadmap.md`；一旦落地，迁入 changelog 并把 roadmap 对应段删除或标注。
 4. **契约文档（tcp-\*）**：动码前定稿；实现与测试以文件为准，改契约先改文档。
-5. **测试层清单（唯一事实源）**：层集合只在 `v2-c-kernel/Makefile` 的 `TEST_LAYERS` 维护；`make test` 聚合与 `.github/workflows/layers.yml` 并行矩阵均由它生成（`make test-layers` 逐行输出）。**不得在 `.github/workflows/*.yml` 中手抄层名清单**——它们是生成物/消费方（曾因多处手抄漏加 test-stack）。加层步骤见规则 7。
+5. **测试层清单（唯一事实源）**：层集合只在 `v2-c-kernel/Makefile` 的 `TEST_LAYERS` 维护，并划分为 `TEST_LAYERS_FAST`（秒级层，同一 runner 顺序跑）与 `TEST_LAYERS_HEAVY`（其余慢层，进并行矩阵），二者相离并入覆盖全集（FAST ∪ HEAVY == TEST_LAYERS）。`make test` 聚合、`.github/workflows/layers.yml` 的 fast job（消费 `test-fast`）与 layer 矩阵（消费 `test-layers-heavy`）均由它生成。**不得在 `.github/workflows/*.yml` 中手抄层名清单**——它们是生成物/消费方（曾因多处手抄漏加 test-stack）。加层/划层步骤见规则 7。
 6. **docs PR 也是 PR**：走同一门禁；纯文档变更在 PR 描述注明，便于 reviewer 聚焦。
 7. **新增一个测试层（checklist）**：
    - ① 定义 `test-<name>` 目标（`v2-c-kernel/Makefile`）；
-   - ② 往该文件 `TEST_LAYERS` 加该名字；
+   - ② 往该文件 `TEST_LAYERS` 加该名字，并归入 `TEST_LAYERS_FAST`（整层 <10s，同一 runner 顺序跑）或 `TEST_LAYERS_HEAVY`（进并行矩阵）——二者必须相离并入覆盖全集；
    - ③ 确认是否需进 regression-rr / 特殊 job（`test-tr-stable`/`test-repro`/`test-tcp-attack` 是有意例外、不进主链，Makefile 注释已写明）；
-   - ④ 在 CI 上看 layers 矩阵是否已出现该层。
+   - ④ 在 CI 上看它出现在 fast job（FAST）还是 layer 矩阵（HEAVY）。
+   - **移动标准**：某层从秒级变慢（或反之）时，只改 `TEST_LAYERS_FAST`/`TEST_LAYERS_HEAVY` 里的名字归属，CI 自动跟着走；以"整层 <10s"为 FAST 划分依据。
    - 若某层被有意排除在并行矩阵或主链之外，必须在 Makefile 注释与本文档同时说明理由。
+8. **CI 工具链清单（唯一事实源）**：依赖构建/跑测试的 job 所需 apt 包只在 `v2-c-kernel/Makefile` 的 `CI_RUNNER_PKGS` / `CI_RUNNER_PKGS_EXTRA` 维护，安装步骤一律写 `sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)`（`ci-pkgs` 输出 = 基础 ⊕ EXTRA）。**不得在 `.github/workflows/*.yml` 中手抄包名**（曾因 layers 手抄缺 `qemu-user` 靠环境侥幸，更换 runner 镜像即炸）。加包步骤：
+   - ① 多数 job 需要的包 → 追加到 `CI_RUNNER_PKGS`；
+   - ② 个别 job 特有的包 → 追加到 `CI_RUNNER_PKGS_EXTRA`，并在旁边注释写明用途；
+   - ③ 确属"无需工具链"的纯静态 job（如 ci.yml 的 lint：只跑 grep/脚本）在 workflow 注释中显式声明为白名单例外，不消费该清单；**禁止散落的 `apt-get install` 追加行**。
 
 ## 已知待办（治理）
 

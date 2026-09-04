@@ -326,18 +326,42 @@ test-stack: $(STACK_OBJS)
 # ---- 测试层清单（唯一事实源） ----
 # 同一"层集合"不应多处手抄（此前 Makefile `test:` 与 .github/workflows/layers.yml 矩阵各自维护，
 # 曾漏加 test-stack）。CI 的 make test 聚合 与 layers 并行矩阵均由本清单生成：
-#   - test:        主链聚合（ci.yml 的 test job 消费）
-#   - test-layers: 逐行输出层名（layers.yml 由 load-layers job 消费，勿在 workflow 手抄清单）
-# 新增层三步：① 在此加一个名字 ② 定义 test-<name> 目标 ③ 在 CI（layers 矩阵）看该层是否出现。
-# 有意例外（慢/特殊，不进 TEST_LAYERS，仍由 ci.yml 的 regression-rr job 显式调用）：
-#   test-tr-stable / test-repro / test-tcp-attack —— 见 docs/README.md 维护规则
-TEST_LAYERS = host qemu serial persist net socket cc500 slip tcp det tr rp stack
+#   - test:              主链聚合（ci.yml 的 test job 消费）
+#   - test-layers:       逐行输出全部层名（信息用）
+#   - test-layers-heavy: 输出重层 = TEST_LAYERS_HEAVY（layers.yml 的 layer 矩阵消费，勿手抄）
+#   - test-fast:         顺序跑秒级层 = TEST_LAYERS_FAST（layers.yml 的 fast job 消费）
+# 新增层三步：① 在此加一个名字（FAST 或 HEAVY）② 定义 test-<name> 目标
+#             ③ 在 CI 看它出现在 fast 还是 layer 矩阵。
+# FAST = 秒级层（整层 <10s），同一 runner 顺序跑，避免为它们各开一个 runner 现装工具链。
+# HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
+# 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
+#         划分标准见 docs/README.md 维护规则。
+TEST_LAYERS       = host qemu serial persist net socket cc500 slip tcp det tr rp stack
+TEST_LAYERS_FAST  = host stack
+TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 slip tcp det tr rp
 
 test: $(addprefix test-,$(TEST_LAYERS))
+test-fast: $(addprefix test-,$(TEST_LAYERS_FAST))
 
-.PHONY: test-layers
+.PHONY: test-layers test-layers-heavy
 test-layers:
 	@printf '%s\n' $(TEST_LAYERS)
+test-layers-heavy:
+	@printf '%s\n' $(TEST_LAYERS_HEAVY)
+
+# ---- CI 工具链包集合（唯一事实源） ----
+# 依赖构建/跑测试的 CI job 一律 `sudo apt-get install -y $(make -s ci-pkgs)`，不得手抄包名
+# （曾因 layers 装工具链缺 qemu-user 仅靠环境侥幸，见 PR#74 复审观察）。
+# qemu-user 必装：test-cc500 的宿主 hostcc 在无 ia32 exec 的 runner 上需 qemu-i386。
+# 纯静态 job（ci.yml 的 lint：只跑 grep/脚本）不需工具链，作为白名单例外勿装。
+# 个别 job 需基础包之外 → 追加到 CI_RUNNER_PKGS_EXTRA（仍单源），并在旁注释写明用途；
+# ci-pkgs 输出 = 基础 ⊕ EXTRA，消费方无需改动。
+CI_RUNNER_PKGS       = gcc-multilib nasm qemu-system-x86 qemu-user socat
+CI_RUNNER_PKGS_EXTRA =
+
+.PHONY: ci-pkgs
+ci-pkgs:
+	@printf '%s\n' $(CI_RUNNER_PKGS) $(CI_RUNNER_PKGS_EXTRA)
 
 # ---- 编译硬化门禁（P1）：危险 libc 调用检查 ----
 # 审计已确认全库无 strcpy/strcat/sprintf/vsprintf/gets；此目标把"人工检查"固化为可执行门禁，
