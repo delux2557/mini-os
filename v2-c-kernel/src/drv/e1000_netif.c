@@ -28,8 +28,8 @@ static int e1000_if_ready(void) { return e1000_ready(); }
 static int e1000_if_tx(const uint8_t *ip, uint32_t len) {
     const uint8_t *gw = e1000_gw_mac();
     if (!gw) return -1;
-    if (14u + len > 1600u) return -1;
-    uint8_t eth[1600];
+    if (14u + len > NET_ETH_FRAME_MAX) return -1;
+    uint8_t eth[NET_ETH_FRAME_MAX];
     for (int i = 0; i < 6; i++) { eth[i] = gw[i]; eth[6 + i] = e1000_mac()[i]; }
     eth[12] = (uint8_t)(NET_ETH_TYPE_IPV4 >> 8);
     eth[13] = (uint8_t)NET_ETH_TYPE_IPV4;
@@ -43,21 +43,25 @@ static int e1000_if_tx(const uint8_t *ip, uint32_t len) {
 }
 
 /* rx：取一帧，剥以太网头把 IP 数据报交给上层。
+ * SEC-07：原实现先拷到局部 eth[1600] 再拷出，IRQ0 DHCP 续约链（dhcp_poll_once
+ * 的 bootp + netsock_drain 的 f + 本 eth）会在 4KB 中断栈上同时挂 3 段 ~1.5KB
+ * 缓冲叠加溢出。改为直接把整帧读入调用方 buf（要求 buf 容量 >= NET_ETH_FRAME_MAX），
+ * 校验 ethertype 后原位下移剥头，去掉本地中转缓冲。
  * 返回 1=收到 IP 数据报 / 0=网卡排空 / -1=消费一帧但非 IPv4（调用方继续排空）。 */
 static int e1000_if_rx(uint8_t *buf, uint32_t max, uint32_t *len) {
-    uint8_t eth[1600];
+    if (max < NET_ETH_FRAME_MAX) return -1;     /* buf 须能放下整帧（1518） */
     uint32_t elen = 0;
     uint32_t saved;
     enter_kernel_pd(&saved);               /* 排空网卡（e1000_rx 访问 MMIO） */
-    int rc = e1000_rx(eth, sizeof eth, &elen);
+    int rc = e1000_rx(buf, max, &elen);
     exit_kernel_pd(saved);
     if (rc != 1) return rc;                /* 0=无帧  负=失败 */
-    if (elen < 14 || eth[12] != (uint8_t)(NET_ETH_TYPE_IPV4 >> 8) ||
-        eth[13] != (uint8_t)NET_ETH_TYPE_IPV4)
+    if (elen < 14 || buf[12] != (uint8_t)(NET_ETH_TYPE_IPV4 >> 8) ||
+        buf[13] != (uint8_t)NET_ETH_TYPE_IPV4)
         return -1;                         /* 非 IPv4（如 ARP），消费并丢弃 */
     uint32_t n = elen - 14;
     if (n > max) return -1;
-    for (uint32_t i = 0; i < n; i++) buf[i] = eth[14 + i];
+    for (uint32_t i = 0; i < n; i++) buf[i] = buf[14 + i];   /* 原位下移剥链路头 */
     *len = n;
     return 1;
 }
