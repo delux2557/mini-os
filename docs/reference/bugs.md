@@ -1663,6 +1663,34 @@
 
 ***
 
+## 加固 A-1（BUG-072+）\[已修复，2026-09-05] 内核 SSP + panic 现场回溯 + ring3 chaos 探针（可观测性加固）
+
+> 承接 #69（异常族单点已清）后的补位：非"某个崩点"缺陷，而是**编译期兜底 + 故障可观测性**两层加固，
+> 降低"内核被改坏/栈被写穿时静默继续"的运维黑洞。
+
+* **版本**：当前 main（2026-09-05，加固 A-1）
+* **动机**：此前内核编译用 `-fno-stack-protector`，且 CPU 异常/panic 只有一行 `int_no`，无法定位调用栈；
+  ring3 坏指令虽能被 SEC-01 隔离杀掉，但缺少系统性"随机指令流"探针来检验隔离不退化。
+* **修复**：
+  1. **① 内核 SSP**：CFLAGS 开 `-fstack-protector-strong -mstack-protector-guard=global -fno-omit-frame-pointer`；
+     [ssp.c](../../v2-c-kernel/src/kernel/ssp.c) 用 RDTSC 混合随机化 `__stack_chk_guard`（区别于 app 层固定值，
+     防针对性绕过），`ssp_seed()` 在 `kernel_main` 早期（serial_init 后）执行；[ssp.c#__stack_chk_fail](../../v2-c-kernel/src/kernel/ssp.c)
+     金丝雀被改写时打印 `[PANIC] kernel stack canary mismatch pid/eip/esp` 后 `cli;hlt` 停机——宁要可诊断停机，
+     不要静默内存破坏。
+  2. **② panic 现场增强**：[ksym.c](../../v2-c-kernel/src/kernel/ksym.c) 提供符号表（`tools/gen_kernsym.sh` 经 `nm`
+     提取 + 两阶段链接嵌入）`ksym_name` 二分 + `dump_backtrace`（EBP 链）+ `panic_dump`（寄存器 + eip 符号化 +
+     内核态回溯 / ring3 注明）；接入 [idt.c](../../v2-c-kernel/src/arch/idt.c) `isr_handler`——用户态异常隔离杀该进程，
+     内核态异常才停机。
+  3. **④ ring3 chaos 探针**：[apps/chaos.c](../../v2-c-kernel/src/app/chaos.c) 每轮 fork 子进程随机执行
+     ud2/int3/cli/hlt/div0/lgdt 一条，必触发 #UD/#BP/#GP/#DE，内核须隔离杀该子进程（panic_dump 现场 +
+     sched_kill），父进程连跑 6 轮后自审计 0 存活；`run chaos` 接入 `test_serial.sh`（断言 survived 0 + 无 NOT_TRAPPED）。
+* **回归**：`make`(-Werror)、`test-host`(pass=20 fail=0)、`test-stack`、`test-serial`、`test-qemu` 全绿；
+  手动验证——内核态临时栈溢出触发 `[PANIC] kernel stack canary mismatch` 停机（非静默），
+  chaos 各轮 #GP/#UD/#DE dump 寄存器 + ring3 隔离，6 轮后系统存活。
+* **非目标**：不引入 PAE/NX、不做 ASLR、不变中断模型、不扩 KSTACK（按 A-1 非目标声明）。
+
+***
+
 ## 威胁模型注记（RD3 诚实边界，及 RD5-V4 收口）
 
 **RD3 断掉的链路**是**"元数据区被当数据读写"**：块号被篡改成指向位图 / inode 表 / 越界地址时，文件读写不再
