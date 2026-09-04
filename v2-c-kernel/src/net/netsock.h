@@ -50,6 +50,9 @@ uint32_t netsock_audit(void);
  * 让分发路径把 DHCP 应答入其队列，续约 tick 经 netsock_dhcp_recv 读取（与用户
  * socket 共享同一分发路径）。 */
 void netsock_dhcp_open(void);   /* 打开 DHCP 客户端 socket（幂等；引导期 DHCP 前调用） */
-int  netsock_dhcp_recv(uint8_t *buf, uint32_t max);  /* 排空网卡并取一条 DHCP 应答载荷 */
+/* 排空网卡并取一条 DHCP 应答载荷（BOOTP 内容）；src_ip/src_port 出参返回该数据报的
+ * UDP 源信息（供 A-2 ① 源校验：RFC 2131 §4.1——验源端口==67、已绑定则验源 IP）。 */
+int  netsock_dhcp_recv(uint8_t *buf, uint32_t max,
+                       uint32_t *src_ip, uint16_t *src_port);
 
 #endif /* NET_NETSOCK_H */
