@@ -55,7 +55,7 @@ static void dispatch_frame(const uint8_t *frame, uint32_t len) {
  * 改为"单帧泵取"（跳过非 IP 帧），把突发缓冲交还给 NIC 环（e1000 256 槽），
  * socket 环深度恒 ≤1，永不因全量排空丢尾。 */
 static void netsock_drain(void) {
-    uint8_t f[1600];
+    uint8_t f[NET_ETH_FRAME_MAX];   /* SEC-07：恰容一帧（1518），勿再放大 */
     uint32_t l;
     for (;;) {
         int r = netif_rx(f, sizeof(f), &l);
