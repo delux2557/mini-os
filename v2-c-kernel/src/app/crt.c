@@ -7,6 +7,20 @@
  */
 #include "user_lib.h"
 
+/* ---- v1.5 P2 编译硬化：用户态栈金丝雀运行时（教学增强）----
+ * -fstack-protector-all 在 app 函数序言插入金丝雀，返回前校验；写爆时交给这里处理。
+ * 两个符号必须由每个用户态 ELF 提供（经 crt.o 链入）。仅 host gcc 编的 app 生效；
+ * guest 内 cc500 自编译程序是 C 子集、无此机制——属预期不对称。
+ * 守卫固定值便于教学演示；若想真加固可换成每进程随机化（师生可扩展点）。
+ */
+uintptr_t __stack_chk_guard = 0xdeadbeef;
+
+void __attribute__((noreturn)) __stack_chk_fail(void) {
+    sys_print("[CRIT] stack smashing detected\n");
+    sys_exit(1);
+    for (;;);   /* gcc 依 noreturn 不再返回；此循环兜底防优化器告警 */
+}
+
 void _start(int argc, char **argv) {
     app_main(argc, argv);
     sys_exit(0);
