@@ -9,6 +9,8 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 source tests/_build_env.sh
 # v0.33 harness 约定：exit 0=全绿 / 1=断言失败 / 2=环境或依赖缺失
+# ⚠ 备注：本脚本观测打点用 GNU date 的 `+%s%3N`（毫秒时间戳）。CI=ubuntu（GNU date）无碍；
+#   本地 mac 的 BSD date 不支持 %3N，打点处已做 `|| echo 0` 兜底（耗时记 0，不崩、不误判）。
 for c in qemu-system-i386; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
@@ -16,6 +18,12 @@ done
 LOG="$BUILD/serial_term.log"
 TIN="$BUILD/term_in.fifo"
 TOUT="$BUILD/term_out.fifo"
+# ---- 观测打点（Commit 2，纯观测→RR 基线）：assert_timing_serial.tsv ----
+# 每个等断断言(含 wait_for)恰打一行 TSV：`断言名 \t 耗时ms \t ok|timeout`。
+# 断言名=RR 基线 key，写前 sed 转义空白/tab/换行防列错位；改名即新基线（见 docs 维护规则）。
+# 文件按脚本分名（_serial/_socket/_qemu），防 test job 串行 make test 同 BUILD 目录互相覆盖。
+TSV="$BUILD/assert_timing_serial.tsv"
+rm -f "$TSV"
 QPID=""; CAT_PID=""
 
 cleanup() {
@@ -41,13 +49,30 @@ QPID=$!
 exec 9>"$TIN"                            # 保持写端打开，向串口发命令（固定 fd 9）
 
 FAIL=0
+# 观测打点：每断言恰打一行 TSV（断言名已 sed 转义 tab/换行，防列错位）。
+# 耗时 ~ 250ms 轮询粒度（0.25s sleep），非真毫秒；P50/P95 与 timeout 判定不受影响。
+pop_ts() {  # pop_ts <tsv> <断言名> <耗时ms> <ok|timeout>
+    local pdesc
+    pdesc=$(printf '%s' "$2" | sed 's/[\t\n]/_/g')   # 断言名转义 tab/换行
+    printf '%s\t%s\t%s\n' "$pdesc" "$3" "$4" >> "$1"
+}
 wait_for() {   # wait_for <说明> <正则> [超时秒]
-    local desc="$1" re="$2" tmo="${3:-8}" i
+    local desc="$1" re="$2" tmo="${3:-8}" i t0 t1
+    t0=$(date +%s%3N 2>/dev/null || echo 0)          # GNU date；mac 兜底 0
     for ((i = 0; i < tmo * 4; i++)); do
-        grep -aq "$re" "$LOG" 2>/dev/null && { echo "[ok]   $desc"; return 0; }
+        grep -aq "$re" "$LOG" 2>/dev/null && break
         sleep 0.25
     done
+    t1=$(date +%s%3N 2>/dev/null || echo 0)
+    if [ "$i" -lt $((tmo * 4)) ]; then
+        pop_ts "$TSV" "$desc" "$((t1 - t0))" ok
+        echo "[ok]   $desc"
+        return 0
+    fi
+    pop_ts "$TSV" "$desc" "$((t1 - t0))" timeout
     echo "[FAIL] $desc (缺: $re)"
+    echo "  >> 现场（LOG 尾 ~20 行）："
+    tail -n 20 "$LOG" 2>/dev/null | sed 's/^/      /'
     FAIL=$((FAIL + 1)); return 1
 }
 send() { printf '%s\n' "$1" >&9; sleep 0.3; }
