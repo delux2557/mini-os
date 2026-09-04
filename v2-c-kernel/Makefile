@@ -130,9 +130,11 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #  - shell 链接到 SHELL_ADDR（0x80090000），内核启动时加载常驻
 #  - 注意：嵌入的是 ELF 文件本身（用 ld -r -b binary），不能用 objcopy -O binary
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
+#   - 普通应用链接到 APP_ADDR（0x800A0000，app 槽），退出即回收
+# SEC-01 回归：badinsn 以 ring3 执行 ud2（#UD），验证用户态 CPU 异常被隔离杀进程而非整机停机
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash sandboxdemo
+APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash sandboxdemo badinsn
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -147,6 +149,8 @@ $(BUILD)/apps/hello.elf: $(BUILD)/apps/hello.o $(BUILD)/apps/crt.o
 $(BUILD)/apps/echo.elf: $(BUILD)/apps/echo.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/crash.elf: $(BUILD)/apps/crash.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/badinsn.elf: $(BUILD)/apps/badinsn.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/isol.elf: $(BUILD)/apps/isol.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
