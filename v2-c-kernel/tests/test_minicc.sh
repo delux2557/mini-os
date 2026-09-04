@@ -59,12 +59,27 @@ hrun t_comment 'int main(){/* x' 1 'unterminated comment' 'compiled OK'
 hrun t_nolval 'int main(){int a;a=5;a+1=2;return a;}' 1 'assign to non-lvalue' 'compiled OK'
 # 全局初始化非常量 -> 必须 FAIL（V1 仅字面量）
 hrun t_ginit 'int g=1+2;int main(){return 0;}' 1 'expected token' 'compiled OK'
+echo "== [2a] 宿主指针错误路径（V2b） =="
+# 多级指针 -> 必须 FAIL + unsupported multi-level pointer
+hrun t_ptrptr 'int main(){int* p;int** q;return 0;}' 1 'multi-level pointer' 'compiled OK'
+# 解引用非指针 -> 必须 FAIL + dereference of non-pointer
+hrun t_derefni 'int main(){int x;x=5;int y;y=*x;return y;}' 1 'dereference of non-pointer' 'compiled OK'
+# 对非左值取地址 -> 必须 FAIL + cannot take address
+hrun t_badaddr 'int main(){int* p;p=&(1+2);return 0;}' 1 'cannot take address' 'compiled OK'
+# 指针/整型赋值不匹配 -> 必须 FAIL + type mismatch
+hrun t_ptrmism 'int main(){int x;int* p;p=5;return 0;}' 1 'type mismatch' 'compiled OK'
+hrun t_ptrmism2 'int main(){int x;int* p;x=p;return 0;}' 1 'type mismatch' 'compiled OK'
 echo "== [2b] 宿主成功路径 =="
 # 成功：变量/四则/if/else/while/递归/全局/逻辑，编译层全过
 hrun t_arith 'int main(){int a;a=1+2*3-4;return 0;}' 0 'compiled OK' ''
 hrun t_rec 'int fact(int n){if(n<=1)return 1;return n*fact(n-1);}int main(){return 0;}' 0 'compiled OK' ''
 hrun t_logic 'int main(){int a;a=1;if(a==1&&!(a==0)||0==1)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_global 'int g=7;int main(){int x;x=g;return 0;}' 0 'compiled OK' ''
+# 指针（V2b）：取地址/解引用/指针参数/指针算术
+hrun t_ptr 'int main(){int x;x=5;int* p;p=&x;if(*p==5)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_ptrwrite 'int main(){int a;int* p;p=&a;*p=7;if(a==7)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_ptrarg 'int f(int* p){return *p;}int main(){int a;a=3;if(f(&a)==3)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_ptrarith 'int main(){int a;a=10;int* p;p=&a;if(*(p+0)==10)return 0;return 1;}' 0 'compiled OK' ''
 
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
@@ -118,6 +133,22 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "writefile /me.c int main(){return g();}"
     gsend "micc /me.c /me.elf"
     gwait "undefined 编译报错" "\[micc\] compile FAIL" 40
+    # 指针（V2b）：取地址/解引用读写/指针参数/指针算术/多级指针拒绝
+    gsend "writefile /pa.c int main(){int x;x=5;int* p;p=&x;if(*p==5)return 0;return 1;}"
+    gsend "micc /pa.c /pa.elf"
+    gwait "指针取地址解引用" "\[micc\] '/pa.elf' exited code=0 PASS" 40
+    gsend "writefile /pb.c int main(){int a;int* p;p=&a;*p=7;if(a==7)return 0;return 1;}"
+    gsend "micc /pb.c /pb.elf"
+    gwait "指针解引用写" "\[micc\] '/pb.elf' exited code=0 PASS" 40
+    gsend "writefile /pc.c int f(int* p){return *p;}int main(){int a;a=3;if(f(&a)==3)return 0;return 1;}"
+    gsend "micc /pc.c /pc.elf"
+    gwait "指针参数 f(&a)" "\[micc\] '/pc.elf' exited code=0 PASS" 40
+    gsend "writefile /pd.c int main(){int a;a=10;int* p;p=&a;if(*(p+0)==10)return 0;return 1;}"
+    gsend "micc /pd.c /pd.elf"
+    gwait "指针算术 p+0" "\[micc\] '/pd.elf' exited code=0 PASS" 40
+    gsend "writefile /pe.c int main(){int* p;int** q;return 0;}"
+    gsend "micc /pe.c /pe.elf"
+    gwait "多级指针编译拒绝" "\[micc\] compile FAIL" 40
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest micc 端到端通过"
 else
