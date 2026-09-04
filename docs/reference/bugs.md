@@ -1561,6 +1561,38 @@
 
 ***
 
+## BUG-067 \[已修复] sys_readline(max=0) 被当"未指定"替换为默认容量 → 向零容量缓冲写整行（Red Team 二轮 G1）
+
+* **版本**：当前 main（2026-09-04，红队二轮审计 G1，RBT-2026-013）
+* **危险度**：中 —— `sys_readline(buf, max)` 的 max=0 契约是"零容量"，但 [usermode.c](../../v2-c-kernel/src/kernel/usermode.c) case 20
+  旧写 `uint32_t max = b ? b : KB_LINE_MAX+1` 把 0 吞成 129，会向"只给了 0 容量"的调用方缓冲整行写入
+  （≤128B），违反调用方契约、成越界写引信（CWE-787 前兆）。
+* **根因**：0 被误当作"未指定"哨兵。调用方必须给真实缓冲容量；0 本身是非法参数，而非"让我猜个容量"。
+* **修复**：在 `user_ptr_valid` 之前加 `if (b == 0) { r->eax = (uint32_t)-1; return; }`——max=0 直接显式失败
+  （返回 -1），尽早暴露非法调用方，而不是静默越界写。既有调用方（shell/echo 等 readline 均传 max≥1）无行为回归。
+* **回归**：test_serial 新增用例——`sys_readline(合法指针, 0)` 不发任何键盘输入即返 -1 且不阻塞；旧实现会阻塞在
+  `kb_line_ready` 等输入而永不返回，断言超时判败。载荷 cc500 方言合规（`0-1` 表达式规避 unary 负号、无数组/for/break/cast）。
+
+***
+
+## BUG-068 \[已修复] 删除文件后仍打开的 fd 持 inode 号，inode 最低位复用 → 旧 fd 写落入新文件（Red Team 二轮 D4）
+
+* **版本**：当前 main（2026-09-04，红队二轮审计 D4，RBT-2026-014）
+* **危险度**：高 —— 删除文件后旧 fd 仍持该 inode 号；`alloc_inode` 最低位复用该 inode 给新对象后，旧 fd 的写会
+  **静默落入"新文件"**（跨文件写、无告警、数据混淆）。fs 层是纯逻辑（宿主单测直接编译），回收不得引入 sched 依赖。
+* **根因**：[usermode.c](../../v2-c-kernel/src/kernel/usermode.c) case 19/28 删除成功即释放 inode，但未回收仍指向它的
+  进程 fd 槽；调度层 [sched.c](../../v2-c-kernel/src/kernel/sched.c) 无"按 inode 回收 fd"的接口。
+* **修复（方案 A，回收走进程面/调度层，fs 层零改动）**：
+  * [sched.c](../../v2-c-kernel/src/kernel/sched.c) 新增 `sched_fd_revoke(uint32_t inode)`：遍历 `procs[1..MAX_PROCS)`，
+    对非 FREE 进程 fd_table 中 `used && fd.inode==inode` 的槽置 used=0，记日志 `[fs] revoke fd=%u inode=%u (pid=%u)`；
+    [sched.h](../../v2-c-kernel/src/kernel/sched.h) 声明。
+  * [usermode.c](../../v2-c-kernel/src/kernel/usermode.c) case 19（fs_delete）与 case 28（fs_rmdir）：fs 返回成功（0）后，
+    以解析得到的实际 inode 调用 `sched_fd_revoke(ino)`。回收后旧 fd 读写立即 -1，杜绝跨文件写。
+* **回归**：test_serial 新增用例——create A→open fd=1(A,wr)→write OLD→rm A→create B→open fd=2(B,wr)→write BOK→
+  经悬垂 fd1 写：断言出现 `[fs] revoke` 日志、fd1 写返 -1、且 `cat /dB` 仅含 BOK 绝无悬垂 fd 字节。
+
+***
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号      | 场景               | 现象                                                                                                                   | 处置/教训                                                                                                                                             |
@@ -1586,4 +1618,8 @@
 | OBS-010（ATA 设备残留）             | ATA 超时恢复：`ata_wait_ready` 超时返回 -1 但**未发 SRST 软复位**，设备命令状态可能残留（[ata.c](file:///workspace/mini-os/v2-c-kernel/src/drv/ata.c#L52-L61) 超时路径）——QEMU 下近不可达，仅 fs_sync/save 偶发触发且返回 -1 不崩                                                                                              | 低危观察；建议超时后发 `0x08(SRST)` 软复位恢复（状态机 + 超时计数，勿用 `sleep`）；当前未改，待后续小 PR                                                                                                        |
 | OBS-011（独立安全评估 SEC-06，2026-09-04） | 缓解技术缺口：无 ASLR/PIE（用户程序固定链接 `0x800A0000` 等）；无 NX（用户代码/栈/堆均 `0x7` P|RW|U 含可执行映射）；ELF `e_entry` 不校验落用户可执行区 | **单用户教学模型下可接受的有意取舍（降级"代码注入+ROP"成本，但无提权路径）**；页表 U/S 位隔离是根本防线（实测有效）。建议在 `docs/security.md` 威胁模型声明"未启用 NX/ASLR，功能演示优先"（对应 CWE-693）；不改码 |
 | OBS-012（独立安全评估 SEC-02 交叉引用，2026-09-04） | UDP socket 无进程归属：`netsock_send`（[netsock.c](file:///workspace/mini-os/v2-c-kernel/src/net/netsock.c#L93-L101)）/`netsock_recv`（[:103-116](file:///workspace/mini-os/v2-c-kernel/src/net/netsock.c#L103-L116)）只查 id/used、不校验 pid，任意 ring3 进程可对他人 socket 窃听/伪造/排空；仅 close 有归属检查（`netsock_close_if_owner`） | **= 既有 OBS-003**：作者已裁定为"单用户教学 OS 将 socket 视为进程共享资源"的设计取舍。独立评估接受其为有意设计；建议在 docs 显式写出该威胁模型，注明"未来存在互不信任 guest/agent 时须为 send/recv 增加归属校验"（校验成本低，见 BUG-038 同构写法） |
+| OBS-R1（红队二轮，2026-09-04，RBT-2026-013 相关） | 串口键盘通道丢 ≥0x80 字节：kb 通道对单字节 ≥0x80 的输入长期/复用路径可能丢失或改写，未做过滤即入行缓冲 | 仅记录、不修，归 P1：当前 agent/命令均为纯 ASCII（≤0x7F），无功能影响；如需通道过滤改造或转义支持另立项 |
+| OBS-R2（红队二轮，2026-09-04） | cc500 无数组/for/break/cast 文法，而 README/文档有"用局部数组"等表述，与编译器实际能力不符 | 仅记录、归 P1：文档表述与编译器能力需对齐（改文档或扩文法二选一），本轮不改；测试载荷一律写"无数组"方言 |
+| A4（红队二轮，2026-09-04） | 存活父进程若迟迟不 start/复收，已退出子进程的僵尸会钉死 pid 槽，导致 MAX_PROCS 内新 spawn 取不到该 pid | 设计权衡，接受：单用户模型下父进程相位短、僵尸无 double-free；待父进程 sys_wait 复收即释放，无需改（P3 记录） |
+| A5（红队二轮，2026-09-04） | sleep 传巨值时 ticks 判定回绕 → 被当作"已到点"立即唤醒，而非长眠 | 仅记录、不修：单用户无真实长时等待需求，回绕语义即"错误即醒"是安全侧的有利方向；若需真实延时另设计（P3 记录） |
 

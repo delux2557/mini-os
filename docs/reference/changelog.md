@@ -3,6 +3,41 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.12] - 2026-09-04 · Red Team 二轮：readline max=0 早退 + 悬垂 fd 回收（BUG-067/068）+ 观察记录入账
+
+> 红队二轮两项修复 + 四条观察入账：① `sys_readline(max=0)` 旧实现把 0 当"未指定"替换成
+> KB_LINE_MAX+1(129)，向零容量调用方缓冲写整行（契约违反）——max=0 直接显式失败返 -1；② 删除文件后
+> 仍打开的 fd 持 inode 号，inode 最低位被新文件复用时旧 fd 写会静默落入新文件（跨文件写）——删除成功
+> 即经调度层 `sched_fd_revoke` 回收指向该 inode 的悬垂 fd。观察记录（不改码、仅入账）：OBS-R1（串口 kb
+> 通道丢 ≥0x80 字节）、OBS-R2（cc500 无数组文法 vs README"用局部数组"表述）、A4（存活父进程僵尸钉死
+> pid 槽=设计权衡）、A5（sleep 巨值回绕=立即唤醒）。
+
+**Fixed**
+
+* [usermode.c](../../v2-c-kernel/src/kernel/usermode.c)：`case 20 sys_readline` 在 `user_ptr_valid`
+  之前加 `if (b == 0) { r->eax = (uint32_t)-1; return; }`——max=0 不是"未指定"哨兵，调用方必须给真实
+  容量，0 直接显式失败以尽早暴露非法调用方（防向零容量缓冲静默写整行，RBT-2026-013，BUG-067）。
+* [sched.c](../../v2-c-kernel/src/kernel/sched.c) 新增 `sched_fd_revoke(uint32_t inode)`：遍历
+  `procs[1..MAX_PROCS)`，对非 FREE 进程 fd_table 中 `used && fd.inode==inode` 的槽置 used=0，记日志
+  `[fs] revoke fd=%u inode=%u (pid=%u)`；相应 [sched.h](../../v2-c-kernel/src/kernel/sched.h) 声明。
+* [usermode.c](../../v2-c-kernel/src/kernel/usermode.c)：`case 19 fs_delete` / `case 28 fs_rmdir` 在 fs
+  返回成功（0）后以解析得到的实际 inode 调用 `sched_fd_revoke(ino)`——防 inode 复用后被旧 fd 写落到
+  新文件（跨文件写、无告警，RBT-2026-014，BUG-068）。fs 层（纯逻辑、宿主单测直接编译）零改动。
+
+**Tests**
+
+* [test_serial.sh](../../v2-c-kernel/tests/test_serial.sh)：新增双向回归（载荷 cc500 方言合规，
+  `0-1` 规避 unary 负号、无数组/for/break/cast；断言按 SN 行号切片取 ccrun 运行段排除回显假阳性）——
+  G1：`sys_readline(合法指针, 0)` 返 -1 且不阻塞；D4：create A→open fd1(A)→write→rm A→create B→open
+  fd2(B)→write BOK→经悬垂 fd1 写：断言 `[fs] revoke` 日志、fd1 写返 -1、`cat /dB` 仅含 BOK 绝无旧 fd 字节。
+
+**自测实录**
+
+* `make` -Werror 干净；`make test-host` pass=20 fail=0。
+* `make test-serial` / `make test-qemu` 全绿（含 G1/D4 新断言）。
+
+Docs：bugs.md 新增 BUG-067/068，观察记录表追加 OBS-R1/OBS-R2/A4/A5。
+
 ## [v1.4.11] - 2026-09-04 · Red Team F1/F2：按名/按路径加载缓冲契约对齐 + ccrun 假成功判败（BUG-065/066）
 
 > 红队审计两项收口：① 内核按名/按路径加载的 16B 缓冲与 FS 契约（FS_MAX_NAME=24）不一致，
