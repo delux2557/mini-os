@@ -1,3 +1,19 @@
+# ============================================================================
+# 分支保护绑定清单（ops 侧单一事实源，2026-09-04 复核）——改 workflow 必先对照
+# ----------------------------------------------------------------------------
+# main 分支保护 required_status_checks：仅 context `test`（strict=True）。
+#   - ⚠️ 绑定的是【裸名】`test`：会匹配【任何】workflow 里名为 test 的 job。
+#   - ⚠️ 红线：任何 workflow 禁止生成名为 `test` 的 job（动态矩阵尤其注意），
+#     否则会意外满足 required 门禁。
+# 非 required（PR 阶段并行定位用）：
+#   - ci.yml:        lint / regression-rr
+#   - arena.yml:     selftest
+#   - layers.yml:    load-layers / fast / layer(<层名>) 动态矩阵
+# 规则（ops 专属职责，不下放 dev）：
+#   1. job 名与 required 的绑定关系由 ops 独占管理；任何新增 job 若要 required，
+#      由 ops 在分支保护里显式添加；
+#   2. 改任何 workflow 的 job 名后，必须复查分支保护 required checks 并同步本清单。
+# ============================================================================
 name: CI
 
 on:
@@ -25,15 +41,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 工具链包集合单源：v2-c-kernel/Makefile 的 CI_RUNNER_PKGS（经 ci-pkgs 单行输出）。
+      # 依赖构建/跑测试的 job 一律消费此清单，勿手抄包名（曾因 layers 缺 qemu-user 靠环境侥幸）。
+      # lint 是纯静态 job 白名单例外，无需工具链。
       - name: 安装工具链
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            gcc-multilib \
-            nasm \
-            qemu-system-x86 \
-            qemu-user \
-            socat
+          sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
 
       # make test 聚合 = v2-c-kernel/Makefile 的 TEST_LAYERS（唯一事实源）；
       # 新增/减少层见 docs/README.md 维护规则，勿在此手抄层名清单。
@@ -57,12 +71,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 工具链包集合单源：消费 Makefile ci-pkgs（含 qemu-user，见 CI_RUNNER_PKGS）。
       - name: 安装工具链
         run: |
           sudo apt-get update
-          # qemu-user 提供 qemu-i386：宿主无 ia32 exec 时 test-cc500 的 hostcc 用其运行
-          sudo apt-get install -y \
-            gcc-multilib nasm qemu-system-x86 qemu-user socat
+          sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
 
       - name: 录制/回放复现回归（BUG-A/BUG-B + argv 硬断言）
         run: make test-repro
