@@ -68,6 +68,9 @@ OBJS = $(addprefix $(BUILD)/, \
 # 不会包含它，导致 make 不先构建 cc500_csrc.o（recipe 因延迟展开却会引用它）。
 CC500_CSRC = $(BUILD)/apps/cc500_csrc.o
 OBJS += $(CC500_CSRC)
+# minicc 编译器 ELF blob（嵌入 initramfs 作 /minicc，V1 int-only 自研编译器）
+MINICC_ELFOBJ = $(BUILD)/apps/minicc_elf.o
+OBJS += $(MINICC_ELFOBJ)
 
 # ---- 加固 A-1 ③：panic 调用栈回溯符号表（两阶段链接） ----
 # phase-1 先链出无符号表内核，经 nm 抽函数符号生成 ksym_tab.c，编成 ksym_tab.o，
@@ -232,6 +235,19 @@ $(BUILD)/apps/cc500_crt.o: src/app/cc500_crt.c
 $(BUILD)/apps/cc500.elf: $(BUILD)/apps/cc500.o $(BUILD)/apps/cc500_crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/cc500_crt.o $<
 
+# ---- V1 自研工具链：minicc 编译器（MIT，替代 cc500 的路线） ----
+#  - 源码在 tools/minicc/minicc.c（全新实现，非 cc500 派生，SPDX: MIT）
+#  - 用专用 minicc_crt.o（_start 以 minicc_main 返回值 sys_exit），普通 crt 吞退出码
+#  - 源码为严格 C（不依赖 libc，仅 syscall3），无需 -w 豁免；-fno-stack-protector
+#    因无 __stack_chk_guard 符号（同 cc500）。ELF 以原始字节嵌入 initramfs 作 /minicc。
+$(BUILD)/apps/minicc.o: tools/minicc/minicc.c
+	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
+$(BUILD)/apps/minicc_crt.o: src/app/minicc_crt.c
+	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
+$(BUILD)/apps/minicc.elf: $(BUILD)/apps/minicc.o $(BUILD)/apps/minicc_crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/minicc_crt.o $<
+# ELF 原始字节内嵌走既有 %_elf.o 模式规则（符号 _binary_minicc_elf_start/end）
+
 # ---- netif Step 4：httpdemo（虚拟 TCP 薄包装演示）。薄包装 lib（src/app/tcp.c）
 # 与演示共享同一套 CFLAGS（-Isrc/net 已含 tcp_proto.h），链接进 httpdemo.elf ----
 $(BUILD)/apps/httpdemo.elf: $(BUILD)/apps/httpdemo.o $(BUILD)/apps/tcp.o $(BUILD)/apps/crt.o
@@ -289,6 +305,10 @@ test-socket:
 # v0.32 cc500 编译器回归：F-1 关系运算残缺 / F-2 未定义符号静默 / F-3 未闭合字符串自噬
 test-cc500:
 	bash tests/test_cc500.sh
+
+# V1 minicc 自研编译器回归：宿主错误路径/编码断言 + guest micc 编译运行语义（return code）
+test-minicc:
+	bash tests/test_minicc.sh
 
 # v1.1 Step 2 串口网卡回归：COM2 + SLIP（RFC 1055）UDP 数据报与宿主对端往返一致
 test-slip:
@@ -362,9 +382,9 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host qemu serial persist net socket cc500 slip tcp det tr rp stack
+TEST_LAYERS       = host qemu serial persist net socket cc500 minicc slip tcp det tr rp stack
 TEST_LAYERS_FAST  = host stack
-TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 slip tcp det tr rp
+TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc slip tcp det tr rp
 
 test: $(addprefix test-,$(TEST_LAYERS))
 test-fast: $(addprefix test-,$(TEST_LAYERS_FAST))
@@ -421,4 +441,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean

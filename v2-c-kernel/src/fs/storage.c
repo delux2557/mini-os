@@ -80,6 +80,7 @@ extern char _binary_sockdemo_elf_start[], _binary_sockdemo_elf_end[];
 extern char _binary_bigdemo_elf_start[], _binary_bigdemo_elf_end[];
 extern char _binary_cc500_elf_start[],  _binary_cc500_elf_end[];     /* v0.27 编译器 ELF */
 extern char _binary_cc500_c_start[],    _binary_cc500_c_end[];       /* v0.27 编译器源码 */
+extern char _binary_minicc_elf_start[], _binary_minicc_elf_end[];    /* V1 自研编译器 ELF */
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 extern char _binary_httpdemo_elf_start[], _binary_httpdemo_elf_end[];  /* v1.1 Step 4 虚拟 TCP */
 extern char _binary_dldemo_elf_start[],    _binary_dldemo_elf_end[];    /* v1.2 大文件下载 */
@@ -169,6 +170,10 @@ static void initramfs_setup(void) {
     initramfs_file("cc500.c",
                    _binary_cc500_c_start,
                    (uint32_t)(_binary_cc500_c_end - _binary_cc500_c_start));
+    /* V1 自研编译器（MIT）：guest 内经 shell `micc <src> <out>` 编译运行（int-only 子集） */
+    initramfs_file("minicc",
+                   _binary_minicc_elf_start,
+                   (uint32_t)(_binary_minicc_elf_end - _binary_minicc_elf_start));
     initramfs_file("shell",
                    _binary_shell_elf_start,
                    (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));
