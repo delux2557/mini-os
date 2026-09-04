@@ -94,6 +94,13 @@ send "run stackovf"
 wait_for "stackovf 启动"       "\[stackovf\] pid=.* starting"
 wait_for "栈溢出被检测"        "\[user\] STACK OVERFLOW pid="
 wait_for "stackovf 被终止"    "'stackovf' exited code="
+# ---- v1.5 P2 编译硬化：栈金丝雀（与守卫页互补的"函数返回前"拦截）----
+# 该 demo 走 canary 路径：进程打印 [CRIT] 后 sys_exit(1)，内核存活、无 [FATAL]。
+# 随后的 deep/... 命令继续可执行，即为"整机心跳持续 / 未停整机"的隐式断言。
+send "run cansmash"
+wait_for "cansmash 启动"       "\[cansmash\] starting stack smash"
+wait_for "cansmash 触发金丝雀"  "\[CRIT\] stack smashing detected"
+wait_for "cansmash 退出"       "'cansmash' exited code="
 # ---- v0.26 用户栈按需生长 ----
 send "run deep"
 wait_for "deep 开始递归"       "\[deep\] pid=.* recursing 12\*1KB on a 4KB start stack"

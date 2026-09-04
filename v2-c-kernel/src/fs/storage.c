@@ -83,6 +83,7 @@ extern char _binary_cc500_c_start[],    _binary_cc500_c_end[];       /* v0.27 �
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 extern char _binary_httpdemo_elf_start[], _binary_httpdemo_elf_end[];  /* v1.1 Step 4 虚拟 TCP */
 extern char _binary_dldemo_elf_start[],    _binary_dldemo_elf_end[];    /* v1.2 大文件下载 */
+extern char _binary_cansmash_elf_start[], _binary_cansmash_elf_end[];   /* v1.5 P2 栈金丝雀 */
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
     int ino = fs_create(fs_device(), name);
@@ -174,6 +175,10 @@ static void initramfs_setup(void) {
     initramfs_file("dldemo",
                    _binary_dldemo_elf_start,
                    (uint32_t)(_binary_dldemo_elf_end - _binary_dldemo_elf_start));
+    /* v1.5 P2 编译硬化：栈金丝雀演示（shell `run cansmash`）*/
+    initramfs_file("cansmash",
+                   _binary_cansmash_elf_start,
+                   (uint32_t)(_binary_cansmash_elf_end - _binary_cansmash_elf_start));
 }
 
 void storage_init(void) {
