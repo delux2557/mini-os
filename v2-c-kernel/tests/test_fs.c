@@ -42,6 +42,26 @@ int main(void) {
     CHECK(strcmp(buf, "hello fs") == 0);
     CHECK_EQ(fs_read(&bd, (uint32_t)i1, buf, 8, 100), 0);  /* 越界读返回 0 */
 
+    /* 3a) BUG-057 两级权限：系统文件只读不可删/不可写；用户文件可写可删 */
+    {
+        int s = fs_create(&bd, "/sys.txt");
+        CHECK(s >= 0);
+        CHECK_EQ(fs_protect(&bd, "/sys.txt"), 0);
+        CHECK_EQ(fs_is_ro(&bd, (uint32_t)s), 1);
+        CHECK_EQ(fs_write(&bd, (uint32_t)s, "x", 0, 1), -1);   /* 只读不可写 */
+        CHECK_EQ(fs_delete(&bd, "/sys.txt"), -1);              /* 只读不可删 */
+        CHECK_EQ(fs_lookup(&bd, "/sys.txt"), s);               /* 仍在 */
+        CHECK_EQ(fs_protect(&bd, "/sys.txt"), 0);              /* protect 幂等 */
+        /* 用户文件不受影响 */
+        int u = fs_create(&bd, "/user.txt");
+        CHECK(u >= 0);
+        CHECK_EQ(fs_is_ro(&bd, (uint32_t)u), 0);
+        CHECK_EQ(fs_write(&bd, (uint32_t)u, "y", 0, 1), 1);
+        CHECK_EQ(fs_delete(&bd, "/user.txt"), 0);
+        CHECK_EQ(fs_is_ro(&bd, 9999u), -1);                    /* 非法 inode */
+        /* 注：sys.txt 因只读无法删除，保留占用 1 个 inode，见 8) 阈值调整。 */
+    }
+
     /* 4) 跨块写入/读出（3 块 = 12KB），随机偏移抽查 + 跨块界覆写 */
     {
         char chunk[100];
@@ -207,8 +227,8 @@ int main(void) {
         CHECK_EQ(fs_lookup(&bd, "/big.bin"), -1);
     }
 
-    /* 8) inode 耗尽：用完剩余 inode 后创建失败（x.txt/y.txt 已占 2 个，
-     *    加上根目录共 3 个已占用，故最多再建 FS_MAX_INODES-3 个） */
+    /* 8) inode 耗尽：用完剩余 inode 后创建失败（x.txt/y.txt 已占 2 个 + 3a) 的只读
+     *   /sys.txt 占 1 个，加上根目录共 4 个已占用，故最多再建 FS_MAX_INODES-4 个） */
     int created = 0;
     while (created < 200) {
         char nm[32];
@@ -216,7 +236,7 @@ int main(void) {
         if (fs_create(&bd, nm) < 0) break;
         created++;
     }
-    CHECK(created >= FS_MAX_INODES - 3);                 /* 至少用满 61 个 */
+    CHECK(created >= FS_MAX_INODES - 4);                 /* 至少用满剩余 */
     CHECK(created < 200);
     CHECK_EQ(fs_create(&bd, "one-more.txt"), -1);
 

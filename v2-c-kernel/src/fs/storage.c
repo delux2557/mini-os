@@ -93,6 +93,9 @@ static void initramfs_file(const char *name, const void *data, uint32_t len) {
         return;
     }
     int n = fs_write(fs_device(), (uint32_t)ino, data, 0, len);
+    /* BUG-057：initramfs 系统文件只读——先 write 后 protect（避免自锁）；退出前已落盘。
+     * 无盘（每次重建）与有盘首启格式化共用本函数，两级权限自动覆盖两条路径。 */
+    if (n > 0) fs_protect(fs_device(), name);
     serial_printf("[ramdisk] '%s' %u bytes inode=%d write=%d\n", name, len, ino, n);
 }
 
@@ -186,6 +189,26 @@ static void initramfs_setup(void) {
                    (uint32_t)(_binary_sandboxdemo_elf_end - _binary_sandboxdemo_elf_start));
 }
 
+/* ---- BUG-057 P3（审计跟进）：持久化老盘的只读补齐 ----
+ * initramfs 重建路径（无盘 + 有盘首启格式化）在写文件后已 fs_protect；
+ * 但"有效 FS 直接挂载"路径跳过 initramfs，老镜像系统文件 mode=0 仍可删可改——
+ * 启动时对系统文件清单幂等 fs_protect 一次，老盘升级首启即补齐保护、无缝迁移。
+ * fs_protect 幂等（mode |= FS_MODE_RO）；清单中缺失的文件（旧盘无此类）走 fs_lookup
+ * 失败返回 -1 无害，不要求重新格式化/save。 */
+static const char *const sysfiles[] = {
+    "motd",
+    "hello", "echo", "crash", "isol", "forkdemo", "args", "stackovf",
+    "deep", "deepfork", "deepexec", "heapdemo", "fsdemo", "waitdemo",
+    "abuse", "sockdemo", "zbig", "bigdemo", "cc500", "cc500.c",
+    "shell", "httpdemo", "dldemo", "cansmash", "sandboxdemo",
+};
+#define SYSFILES_COUNT (sizeof(sysfiles) / sizeof(sysfiles[0]))
+
+static void storage_protect_sysfiles(void) {
+    for (uint32_t i = 0; i < SYSFILES_COUNT; i++)
+        fs_protect(fs_device(), sysfiles[i]);
+}
+
 void storage_init(void) {
     uint32_t phys = frame_alloc_run(RAMDISK_BLOCKS);   /* 申请连续物理帧 */
     if (!phys) {
@@ -203,6 +226,10 @@ void storage_init(void) {
             persistent = 1;
             serial_printf("[storage] persistent FS mounted (magic=%x) @%x\n", magic, phys);
             vga_printf("[storage] persistent FS mounted (magic=%x)\n", magic);
+            /* BUG-057 P3：老盘挂载补齐系统文件只读。幂等、缺文件无害；补齐后落盘一次，
+             * 使 RO 位持久化（否则重启 disk_load 读回 mode=0 保护即失效）。 */
+            storage_protect_sysfiles();
+            disk_save();
             return;
         }
         serial_puts("[storage] disk blank -> format + initramfs\n");

@@ -107,6 +107,19 @@ void app_main(int argc, char **argv) {
         syscall3(SYS_FS_DELETE, (uint32_t)"/ok.tmp", 0, 0);
     }
 
+    /* BUG-057 两级权限：系统文件只读不可删/不可写，读正常 */
+    if (syscall3(SYS_FS_DELETE, (uint32_t)"/hello", 0, 0) != (uint32_t)-1) {
+        sys_print("[abuse] delete /hello should be -1\n"); fail++;
+    }
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)"/motd", 1) != (uint32_t)-1) {
+        sys_print("[abuse] open /motd write should be -1\n"); fail++;
+    }
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)"/motd", 0) != 0) {
+        sys_print("[abuse] open /motd read should be 0\n"); fail++;
+    } else {
+        syscall3(SYS_FS_CLOSE, 1, 0, 0);
+    }
+
     sys_print(fail == 0 ? "[abuse] verify OK\n" : "[abuse] verify FAIL\n");
     /* 返回后由 CRT 统一退出 */
 }
