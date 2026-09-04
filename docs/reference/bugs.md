@@ -1440,6 +1440,44 @@
 
 ***
 
+## BUG-063 \[已修复] DHCP 续约链内核栈写穿（4KB 栈叠加 5.5KB 缓冲帧）SEC-07
+
+* **版本**：当前 main（2026-09-04 独立系统安全评估 SEC-07，`-fstack-usage` 实测）
+* **危险度**：高 —— 静默内存破坏，无崩溃即越界写，破坏同栈数据。
+* **漏洞链**：DHCP 租期续约由 `timer_cb` 在 **IRQ0 定时器中断上下文**驱动，运行在当前进程
+  4KB 内核栈上（TSS `esp0` = 每进程 `kstack_top`，见 [sched.c](../../v2-c-kernel/src/kernel/sched.c) `KSTACK_SIZE`）。
+  接收链路**逐层开着整帧/整报临时缓冲**，一帧在三级函数里被拷贝 3 份同时挂栈：
+
+* **调用链 & 栈帧（修复前）**
+
+  | 函数                            | 栈帧   | 缓冲                          |
+  | ----------------------------- | ---- | --------------------------- |
+  | `e1000_dhcp_tick` → `dhcp_poll_once` | 2112B | `bootp[NET_RXMAX=2048]`       |
+  | `netsock_dhcp_recv`           | 48B   | -                           |
+  | `netsock_drain`               | 1712B | `f[1600]`                    |
+  | `netif_rx`                    | 8B    | -                           |
+  | `e1000_if_rx`                 | 1648B | `eth[1600]`                  |
+  | **合计**                        | **5528B** | **> 4096B → 写穿内核栈**       |
+
+* **根因**：① `dhcp_poll_once` 用 `NET_RXMAX(2048)` 当 DHCP 报缓冲，而 DHCP 报文上限只是
+  RFC 2131 最小重组缓冲 576B；② `e1000_if_rx` 先把整帧拷进本地 `eth[1600]` 再拷出，与上层
+  `netsock_drain` 的 `f[1600]` 及 `dhcp_poll_once` 的 `bootp` 同栈叠加；③ 各缓冲均按"宽松上限"
+  放大到 1600/2048，而实际一帧至多 1518B。
+* **修复**（[netif.h](../../v2-c-kernel/src/net/netif.h)、[netsock.c](../../v2-c-kernel/src/net/netsock.c)、
+  [e1000_netif.c](../../v2-c-kernel/src/drv/e1000_netif.c)、[e1000.c](../../v2-c-kernel/src/drv/e1000.c)）：
+  - 引入 `NET_ETH_FRAME_MAX=1518`（恰容一帧，含链路头），`netsock_drain` 的 `f` 由 1600→1518。
+  - `e1000_if_rx` 去掉本地 `eth[1600]` 中转：直接把整帧读入调用方缓冲后**原位剥头**，
+    消除一帧的重复挂栈（1648B→64B）。
+  - `dhcp_poll_once` 的 `bootp` 由 `NET_RXMAX(2048)`→576B（恰容一条 DHCP 应答），不再放大。
+* **修复后栈帧**：`e1000_dhcp_tick` 64 + `dhcp_poll_once` 640 + `netsock_dhcp_recv` 48 +
+  `netsock_drain` 1632 + `netif_rx` 8 + `e1000_if_rx` 64 = **2456B**（约 60% 内核栈）。
+* **回归**（[check_stack_budget.sh](../../v2-c-kernel/tests/check_stack_budget.sh)）：新增
+  `make test-stack` 门禁，用 `-fstack-usage` 逐帧断言链总和 ≤3584B（KSTACK 4096 − 512 裕量），
+  并进了 `make test` 主链，秒级。`test-net` / `test-tcp`（e1000 UDP + 串口 SLIP）均 PASS，
+  `test-host` pass=20/20。
+
+***
+
 ## 工程踩坑（非代码缺陷）
 
 | 编号      | 场景               | 现象                                                                                                                   | 处置/教训                                                                                                                                             |
