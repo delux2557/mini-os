@@ -229,6 +229,9 @@ void storage_init(void) {
         fs_mount(&ramdisk);
         if (magic == FS_MAGIC) {      /* 磁盘已有有效 FS：直接挂载，跳过格式化/initramfs */
             persistent = 1;
+            /* RD5（BUG-071）：外部镜像挂载即重建"块→owner"归属账本，扫描在用 inode 全部块；
+             * 检测"合法范围内重复块"（两 inode 共享同一数据块，含 RO 文件块被别名）并计数。 */
+            fs_scan_owners(&ramdisk);
             serial_printf("[storage] persistent FS mounted (magic=%x) @%x\n", magic, phys);
             vga_printf("[storage] persistent FS mounted (magic=%x)\n", magic);
             /* BUG-057 P3：老盘挂载补齐系统文件只读。幂等、缺文件无害；补齐后落盘一次，

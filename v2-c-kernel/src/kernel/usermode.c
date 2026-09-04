@@ -301,6 +301,9 @@ static uint32_t kern_audit(void) {
     bad += heap_audit();
     bad += sched_audit();
     bad += netsock_audit();          /* v0.31 socket 表不变量（含 DHCP 保留槽恒计数） */
+    /* RD5（BUG-071）：块归属冲突/违约累计次数——仅观测、不入 bad（防守成功的"被阻断"
+     * 不是健康失效，正常引导恒 0）。非 0 即镜像存在"范围内重复块"（含 RO 块被别名）。 */
+    serial_printf("[audit] fs_owner: %u violations\n", fs_owner_violations_get());
     uint32_t objs = 0;
     for (uint32_t i = 1; i < SEM_MAX_OBJ; i++) {
         if (!sem_objects[i].used) continue;
