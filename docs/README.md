@@ -49,6 +49,11 @@ mini-os 的开发文档遵循三条铁律：
    - ① 多数 job 需要的包 → 追加到 `CI_RUNNER_PKGS`；
    - ② 个别 job 特有的包 → 追加到 `CI_RUNNER_PKGS_EXTRA`，并在旁边注释写明用途；
    - ③ 确属"无需工具链"的纯静态 job（如 ci.yml 的 lint：只跑 grep/脚本）在 workflow 注释中显式声明为白名单例外，不消费该清单；**禁止散落的 `apt-get install` 追加行**。
+9. **门禁观测打点（插曲 1/2，Commit 2/3）**：三个测试脚本（`test_serial.sh`/`test_socket.sh`/`qemu_regression.sh`）在各自等断函数（wait_for/wait_after）每断言恰打一行，落盘 `$BUILD/assert_timing_<script>.tsv`（serial/socket/qemu 各一文件，分文件防 `make test` 串行同 BUILD 互覆盖），字段=`断言名 \t 耗时ms \t ok|timeout`；`make clean` 对 `assert_timing_*.tsv` 做 stash→放回（只清构建、留观测台账）。随 CI artifact 上传，经 `tests/tr2sqlite.py --assert-timing` 导入 sqlite，`tests/baseline_check.py --asserts` 做跨轮 P50/P95 基线。
+   - **断言名即 RR 基线 key**：改名即新基线——三脚本的断言名保持稳定，勿随日志文案改动而随意 rename（先确认确实换断言语义再改）。
+   - **GNU date 依赖**：打点用 `date +%s%3N`（GNU date）。CI=ubuntu 无碍；本地 mac 的 BSD date 不支持 `%3N`，脚本内已 `|| echo 0` 兜底（耗时记 0、不崩不误判）。
+   - **耗时是 250ms 轮询粒度**（0.25s sleep），非真毫秒；仅作跨轮 P50/P95 趋势信号，P50/P95 与 timeout 判定不受粒度影响。
+   - **MD047**：所有 *.md 文件末尾必须保留换行（门下 lint 曾 5 次回退）。
 
 ## 已知待办（治理）
 
