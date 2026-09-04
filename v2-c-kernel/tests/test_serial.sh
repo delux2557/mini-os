@@ -101,6 +101,13 @@ send "run cansmash"
 wait_for "cansmash 启动"       "\[cansmash\] starting stack smash"
 wait_for "cansmash 触发金丝雀"  "\[CRIT\] stack smashing detected"
 wait_for "cansmash 退出"       "'cansmash' exited code="
+# ---- v0.34 BUG-058 per-process syscall 掩码（最小权限，seccomp 教学版） ----
+# 单向收窄：受限后 fs 写面/网络 syscall 返回 -1，生存项仍活，sys_limit(0,0) 无法放宽。
+send "run sandboxdemo"
+wait_for "沙盒演示启动"        "\[sandboxdemo\] mask demo start"
+wait_for "沙盒受限后存活"      "\[sandboxdemo\] still alive pid="
+wait_for "沙盒演示通过"        "\[sandboxdemo\] verify OK"
+wait_for "沙盒演示退出码"      "'sandboxdemo' exited code="
 # ---- v0.26 用户栈按需生长 ----
 send "run deep"
 wait_for "deep 开始递归"       "\[deep\] pid=.* recursing 12\*1KB on a 4KB start stack"

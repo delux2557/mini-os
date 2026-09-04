@@ -326,6 +326,18 @@ void syscall_dispatch(registers_t *r) {
     uint32_t num = r->eax;
     uint32_t a = r->ebx, b = r->ecx, c = r->edx;
 
+    /* BUG-058 per-process syscall 掩码（最小权限）：num>=64 直接拒（防 1ull<<num 移位 UB）；
+     * 被禁用则 -1。置于任何 copyin/参数解析之前，尽早拦截（被掩码的 syscall 不解析参数）。
+     * 注意：只判断"是否被本进程禁用"，不拦截 SYS_LIMIT 本身（除非该进程连 36 都禁了）。 */
+    {
+        pcb_t *curp = sched_get(sched_current_pid());
+        if (curp && curp->sc_mask && num < 64 && (curp->sc_mask & (1ull << num))) {
+            serial_printf("[syscall] pid=%u masked syscall %u\n", curp->pid, num);
+            r->eax = (uint32_t)-1;
+            return;
+        }
+    }
+
     switch (num) {
     case 0:   /* sys_exit(code) */
         serial_printf("[user] sys_exit(%u) pid=%u\n", a, sched_current_pid());
@@ -854,6 +866,17 @@ void syscall_dispatch(registers_t *r) {
         }
         p->heap_brk = a;
         serial_printf("[heap] brk pid=%u %x -> %x pages=%u\n", p->pid, old, a, p->heap_fcount);
+        r->eax = 0;
+        return;
+    }
+    case 36: { /* sys_limit(mask_lo, mask_hi)：v0.34 BUG-058 per-process syscall 掩码 · 只收窄。
+                 a=mask 低 32 位, b=高 32 位；与当前掩码按位 OR（|= 无清位/放宽路径）。
+                 若本进程已禁用位 36，则入口检查会挡住本调用（只能继续收窄）——单向语义自洽。 */
+        pcb_t *p = sched_get(sched_current_pid());
+        if (p) p->sc_mask |= ((uint64_t)(uint32_t)b << 32) | (uint32_t)a;
+        serial_printf("[syscall] pid=%u limit -> mask=%08x%08x\n",
+                      sched_current_pid(), (uint32_t)(p ? (uint32_t)(p->sc_mask >> 32) : 0),
+                      (uint32_t)(p ? (uint32_t)p->sc_mask : 0));
         r->eax = 0;
         return;
     }
