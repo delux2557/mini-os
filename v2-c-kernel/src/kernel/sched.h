@@ -127,6 +127,12 @@ void sched_block(registers_t *r, uint32_t reason, uint32_t arg); /* 阻塞当前
 void sched_wake(uint32_t pid);                    /* 唤醒阻塞进程入就绪队列（eax=0） */
 void sched_wake_with(uint32_t pid, uint32_t eax); /* 唤醒并指定其系统调用返回值 */
 void sched_wake_keyboard(void);                   /* v0.9: 键盘行完成时唤醒 readline 等待者 */
+/* v0.36（红队 RBT-2026-014，BUG-068）：文件被删除后仍打开的悬垂 fd 回收。
+ * 删除成功方（fs_delete/fs_rmdir）以被删 inode 调用本接口；遍历所有进程 fd 表，
+ * 把 `used && fd.inode==inode` 的槽随手置 used=0 并记日志——防止 inode 最低位被
+ * alloc_inode 复用给新文件后，旧 fd 写落入"新文件"造成跨文件写、静默改数据。
+ * 依赖 PCB/fd 表（进程面回收），故放调度层而不是纯逻辑的 fs 层。 */
+void sched_fd_revoke(uint32_t inode);
 void sched_exit(registers_t *r, uint32_t code);    /* 正常退出当前进程（不返回） */
 void sched_kill(registers_t *r, uint32_t code);    /* 故障终止当前进程（不返回） */
 /* v0.14: 立即回收指定僵尸进程的资源并置 FREE（父进程 sys_wait 时调用）。
