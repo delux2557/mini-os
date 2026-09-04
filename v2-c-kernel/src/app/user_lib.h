@@ -89,6 +89,28 @@ static inline int sys_exec(const char *name, uint32_t argc, const char **argv) {
 }
 static inline int sys_fs_sync(void) { return (int)syscall3(SYS_FS_SYNC, 0, 0, 0); }
 
+/* ---- R3（OBS-R3 契约补录）：fs 开放固定槽位句柄 ----
+ * 契约一句话：**fd 是调用方写死的固定槽位号（1..FS_FDS_PER_PROC-1），不是内核分配的返回值——
+ * sys_fs_open 仅在 fd 槽上打开该文件并返回 0（成功）/-1（失败）**，切勿把返回值当 fd 用
+ * （红队 D2 曾把返回值=0 当"成功句柄"导致后续 fs_write/read 全被 -1 拒的假阳性）。
+ * 成功打开后，对该槽的读写/定位/关闭都继续用同一个 fd 号。 */
+static inline int open_at(uint32_t fd, const char *name, uint32_t mode) {
+    return (int)syscall3(SYS_FS_OPEN, fd, (uint32_t)name, mode);
+}
+static inline int sys_fs_create(const char *name) {
+    return (int)syscall3(SYS_FS_CREATE, (uint32_t)name, 0, 0);
+}
+static inline int sys_fs_write(uint32_t fd, const void *buf, uint32_t len) {
+    return (int)syscall3(SYS_FS_WRITE, fd, (uint32_t)buf, len);
+}
+static inline int sys_fs_read(uint32_t fd, void *buf, uint32_t len) {
+    return (int)syscall3(SYS_FS_READ, fd, (uint32_t)buf, len);
+}
+static inline int sys_fs_close(uint32_t fd) { return (int)syscall3(SYS_FS_CLOSE, fd, 0, 0); }
+static inline int sys_fs_seek(uint32_t fd, uint32_t pos) {
+    return (int)syscall3(SYS_FS_SEEK, fd, pos, 0);
+}
+
 /* v0.20: 用户态 UDP socket（参数结构见 netio.h） */
 static inline int sys_net_socket(uint16_t port) {
     return (int)syscall3(SYS_NET_SOCKET, port, 0, 0);

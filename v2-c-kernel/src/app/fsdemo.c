@@ -39,13 +39,13 @@ static void fs_create_p(const char *p) {
 
 /* 以 mode（1=写 2=追加）打开并写一段后关闭 */
 static void fs_write_p(const char *p, const char *s, uint32_t mode) {
-    if ((int)syscall3(SYS_FS_OPEN, 1, (uint32_t)p, mode) != 0) {
+    if (open_at(1, p, mode) != 0) {   /* R3: 固定槽位 1 打开；返回 0=成功 -1=失败 */
         fs_report("[fsdemo] open fail ", p, 0);
         return;
     }
-    int n = (int)syscall3(SYS_FS_WRITE, 1, (uint32_t)s, (uint32_t)user_strlen(s));
+    int n = sys_fs_write(1, s, user_strlen(s));
     fs_report("[fsdemo] write '", s, (uint32_t)n);
-    syscall3(SYS_FS_CLOSE, 1, 0, 0);
+    sys_fs_close(1);
 }
 
 static void fs_del_p(const char *p) {
@@ -76,12 +76,12 @@ void app_main(int argc, char **argv) {
     syscall3(SYS_FS_LS, (uint32_t)"/", 0, 0);
 
     /* 3) seek + 读回校验：conf.txt = "port=8080\nhost=0.0.0.0\n"，偏移 5 起是 "8080" */
-    if ((int)syscall3(SYS_FS_OPEN, 1, (uint32_t)"/etc/conf.txt", 0) != 0) {
+    if (open_at(1, "/etc/conf.txt", 0) != 0) {
         sys_print("[fsdemo] open conf fail\n");
     } else {
-        syscall3(SYS_FS_SEEK, 1, 5, 0);
+        sys_fs_seek(1, 5);
         char rb[32];
-        uint32_t rn = syscall3(SYS_FS_READ, 1, (uint32_t)rb, 17);   /* 恰好 "8080\nhost=0.0.0.0"（17B） */
+        uint32_t rn = sys_fs_read(1, rb, 17);   /* 恰好 "8080\nhost=0.0.0.0"（17B） */
         rb[rn] = 0;
         char okbuf[64];   /* 足够容纳前缀 + 读回 + "' -> OK\n"，不被截断 */
         uint32_t i = 0;

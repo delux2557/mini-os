@@ -41,7 +41,7 @@ run_test() {
 
 # 每个测试： 套件名, 源文件（内核源码 + 测试源码；v0.19 起按子系统分目录）
 run_test test_heap "src/mm/heap.c tests/test_heap.c"
-run_test test_kb   "src/drv/kb.c tests/test_kb.c"
+run_test test_kb   "src/drv/kb.c tests/test_kb.c tests/host_serial_stub.c"
 run_test test_sched "src/kernel/sched_policy.c tests/test_sched.c"
 run_test test_sem   "src/kernel/sem.c tests/test_sem.c"
 run_test test_msg   "src/kernel/msg.c tests/test_msg.c"
