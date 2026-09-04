@@ -1,5 +1,5 @@
 /* mini-os/v2-c-kernel/tools/minicc/minicc.c
- * minicc —— mini-os 自研小型 C 编译器（V2c：字符串/char + syscall3 stub，产物可 I/O）。
+ * minicc —— mini-os 自研小型 C 编译器（V2d：数组 int a[N] 局部/全局 + a[i] 读写）。
  *
  * 版权与许可：
  *   Copyright (C) 2026 mini-os authors
@@ -9,17 +9,19 @@
  *
  * 架构（详见 docs/design/minicc-design.md）：
  *   V1 为单遍直接生成（无 AST）；V2a 起引入显式 AST：Parser 建树、Codegen 遍历；
- *   V2b 引入类型系统与指针（TY_INT/TY_PTR）；V2c 引入 TY_CHAR 与字符串字面量
- *   （只读数据段 + 隐式 char*），并为隐式声明的 syscall3 生成 int $0x80 包装，
- *    使编译产物可做可观察 I/O（sys_print/文件），打通 guest"写-编-跑"的观察闭环。
+ *   V2b 引入类型系统与指针（TY_INT/TY_PTR）；V2c 引入 TY_CHAR 与字符串字面量、
+ *     并为隐式声明的 syscall3 生成 int $0x80 包装（产物可观察 I/O）；
+ *   V2d 引入 TY_ARRAY：局部/全局定长数组（int/char 元素），a[i] 读写，&a[i]
+ *     可作指针；帧布局由"4 字节槽"改为"字节偏移"（数组按元素尺寸紧凑分配）。
  *
- * 当前子集（V2c）：
- *   类型 int / char / int* / char*（无多级指针）；字面量十进制 + 字符串 + 字符；
- *   字符串字面量（\n \t \\ \" \' \0 \xNN 转义，≤254 字节，入只读数据段，隐式 char*）；
- *   局部/参数/全局变量（全局仅常量初始化）；+ - * / % < <= > >= == != && || !
- *   一元负号、赋值；& 取地址、* 解引用（按基类型缩放/读写宽度）；{} if/else while
- *   return 表达式语句；多参数函数、递归、前向调用；块注释与 // 行注释；
- *   隐式声明并调用 syscall3(n,a,b,c)（编译器生成机器码 stub）。
+ * 当前子集（V2d）：
+ *   类型 int / char / int* / char*（无多级指针）/ int[N] / char[N]（无数组初始化）；
+ *   字面量十进制 + 字符串 + 字符；字符串字面量（\n \t \\ \" \' \0 \xNN 转义，
+ *   ≤254 字节，入只读数据段，隐式 char*）；局部/参数/全局变量（全局仅常量初始化）；
+ *   + - * / % < <= > >= == != && || ! 一元负号、赋值；& 取地址、* 解引用、a[i] 下标
+ *   （下标边界不检查，UB 由用户负责）；{} if/else while return 表达式语句；
+ *   多参数函数、递归、前向调用；块注释与 // 行注释；隐式声明并调用
+ *   syscall3(n,a,b,c)（编译器生成机器码 stub）。
  *
  * 代码生成（x86 32 位，直出 ELF32）：
  *   - 标准 ebp 栈帧；表达式值在 eax；二元运算 push 左操作数。
@@ -27,7 +29,8 @@
  *   - ELF 布局：0x00 头+程序头，0x54 入口 stub
  *       call main ; mov %eax,%ebx ; xor %eax,%eax ; int $0x80
  *     （main 返回值作 sys_exit 退出码：mini-os ABI eax=号 ebx=a 返回 ebx）。
- *   - char 值无符号（movzbl 读 / mov %al 写）；指针算术按基类型缩放（int×4，char×1）。
+ *   - char 值无符号（movzbl 读 / mov %al 写）；指针算术按基类型缩放（int×4，char×1）；
+ *     局部帧按字节偏移分配（数组紧凑，char 标量 4 字节对齐）。
  *
  * 运行环境：guest 由 minicc_crt.c 提供 syscall3（int $0x80）；host 由
  *   tools/minicc/host_crt.c 提供（Linux 文件模拟）。仅依赖 syscall3(0/1/13/14/15/16/17/19/35)。
@@ -114,15 +117,16 @@ static void save32(int pos, int v) {
 
 #define SYM_MAX 512
 enum { K_FUNC, K_GLOBAL, K_LOCAL, K_ARG };
-enum { TY_INT, TY_CHAR, TY_PTR };   /* V2c：char（无符号）加入；指针存 bty 基类型 */
+enum { TY_INT, TY_CHAR, TY_PTR, TY_ARRAY };  /* V2c：char（无符号）；V2d：数组 */
 
 typedef struct {
     char name[32];
     int kind;
-    int ty;                     /* TY_INT / TY_CHAR / TY_PTR */
-    int bty;                    /* 指针基类型（ty==TY_PTR 时有效：TY_INT / TY_CHAR） */
+    int ty;                     /* TY_INT / TY_CHAR / TY_PTR / TY_ARRAY */
+    int bty;                    /* 指针基类型 / 数组元素类型（非指针数组时无意义） */
+    int len;                    /* V2d：数组元素个数（非数组=0） */
     int val;                    /* FUNC: 代码偏移(未定义=-1)；GLOBAL: 数据偏移；
-                                   LOCAL: 局部序号；ARG: 参数序号 */
+                                   LOCAL: 帧字节偏移；ARG: 参数序号 */
 } Sym;
 
 static Sym syms[SYM_MAX];
@@ -134,12 +138,13 @@ static int sym_find(const char *name) {
     return -1;
 }
 
-static int sym_add(const char *name, int kind, int ty, int bty, int val) {
+static int sym_add(const char *name, int kind, int ty, int bty, int len, int val) {
     if (nsym >= SYM_MAX) fail("symbol table full");
     s_cpy(syms[nsym].name, name);
     syms[nsym].kind = kind;
     syms[nsym].ty = ty;
     syms[nsym].bty = bty;
+    syms[nsym].len = len;
     syms[nsym].val = val;
     return nsym++;
 }
@@ -201,6 +206,7 @@ enum {
     ND_EQ, ND_NE, ND_LT, ND_LE, ND_GT, ND_GE,
     ND_AND, ND_OR, ND_NEG, ND_NOT, ND_ASSIGN,
     ND_ADDR, ND_DEREF,         /* V2b：& 取地址 / * 解引用 */
+    ND_INDEX,                  /* V2d：a[i] 下标（l=数组 VAR，r=下标表达式，左值） */
     ND_EXPR_STMT, ND_BLOCK, ND_IF, ND_WHILE, ND_RET,
     ND_DECL, ND_FUNC, ND_GVAR
 };
@@ -208,19 +214,21 @@ enum {
 typedef struct Node Node;
 struct Node {
     int kind;
-    int ty;             /* TY_INT / TY_CHAR / TY_PTR：表达式类型（VAR/DEREF/ADD 等） */
-    int bty;            /* V2c：指针基类型（ty==TY_PTR 时有效；DEREF 结果的类型来源） */
+    int ty;             /* TY_INT / TY_CHAR / TY_PTR / TY_ARRAY：表达式类型 */
+    int bty;            /* V2c：指针基类型/数组元素类型（DEREF/INDEX 结果的类型来源） */
+    int len;            /* V2d：数组元素个数（DECL/GVAR 用） */
     Node *l, *r;        /* 二元操作数；ASSIGN: l=左值 r=右值；IF: l=cond r=then；
-                           WHILE: l=cond r=body；RET: l=表达式；NOT/NEG/ADDR/DEREF: l=操作数 */
+                           WHILE: l=cond r=body；RET: l=表达式；NOT/NEG/ADDR/DEREF: l=操作数；
+                           INDEX: l=数组 VAR r=下标 */
     Node *a, *b;        /* FUNCALL: a=实参链表；FUNC: a=形参链表 b=函数体；
                            IF: b=else 分支（可空）；BLOCK: a=语句链表 */
     Node *next;         /* 语句/实参/形参链表的后继 */
-    int val;            /* NUM: 数值；STR: 无；DECL: 局部槽位；FUNC/GVAR: 符号下标；VAR: 无 */
-    int vkind, vslot;   /* VAR: 变量类别（K_LOCAL/K_ARG/K_GLOBAL）与槽位序号（local/arg）——
+    int val;            /* NUM: 数值；STR: 无；DECL: 帧字节偏移；FUNC/GVAR: 符号下标；VAR: 无 */
+    int vkind, vslot;   /* VAR: 变量类别（K_LOCAL/K_ARG/K_GLOBAL）与偏移/序号（local 字节偏移）——
                            节点脱离符号表自携带，作用域恢复丢弃符号后仍可正确生成 */
     char vname[32];     /* VAR: 全局变量名（patch 用） */
     int ival;           /* STR: 字符串池偏移；GVAR: 常量初始化值（无初始化=0） */
-    int nargs, nlocals; /* FUNC: 形参个数 / 局部变量总数（帧大小=4*nlocals）；FUNCALL: 实参个数 */
+    int nargs, nlocals; /* FUNC: 形参个数 / 帧大小（字节）；FUNCALL: 实参个数 */
     char name[32];      /* FUNC/GVAR/FUNCALL: 名字 */
 };
 
@@ -229,6 +237,7 @@ static Node *node_new(int kind) {
     n->kind = kind;
     n->ty = TY_INT;
     n->bty = 0;
+    n->len = 0;
     n->l = n->r = n->a = n->b = n->next = NULL;
     n->val = n->vkind = n->vslot = n->ival = n->nargs = n->nlocals = 0;
     n->vname[0] = 0;
@@ -415,8 +424,9 @@ static void expect(const char *s) {
     if (!accept(s)) fail("expected token");
 }
 
-/* 读取类型声明（int/char 已被调用方 peek，此处消费关键字与 `*` 数量）；
- * 返回 TY_INT / TY_CHAR / TY_PTR，指针基类型经 bty 输出（V2c 不支持多级指针） */
+/* 读取类型声明（int/char 已被调用方 peek，此处消费关键字与 `*`）；
+ * 返回 TY_INT / TY_CHAR / TY_PTR，指针基类型经 bty 输出（V2d：不支持多级指针）。
+ * 数组后缀 [N] 在标识符之后，由 array_suffix() 单独处理。 */
 static int decl_type(int *bty) {
     int base = TY_INT;          /* 初始化避免 -Wmaybe-uninitialized（fail 非 noreturn） */
     if (accept("int")) base = TY_INT;
@@ -430,10 +440,33 @@ static int decl_type(int *bty) {
     return base;
 }
 
-/* 类型等价（契约式语义检查）：指针须基类型一致；int/char 同属整型族可互转 */
+/* V2d：标识符之后的数组后缀 [N]（N 为十进制常量 ≥1，指针数组拒绝）；
+ * 命中则置 *len 并返回 1，否则 *len=0 返回 0。 */
+static int array_suffix(int ty, int *len) {
+    *len = 0;
+    if (!accept("[")) return 0;
+    if (ty == TY_PTR) fail("unsupported: array of pointers");
+    if (!tok_is_num) fail("array size must be a constant");
+    int n = 0;
+    for (int i = 0; tok[i]; i++) n = n * 10 + (tok[i] - '0');
+    if (n < 1) fail("array size must be positive");
+    next_tok();
+    expect("]");
+    *len = n;
+    return 1;
+}
+
+/* 变量字节大小：int/char/指针标量 4 字节（char 标量对齐）；数组 = len × 元素尺寸 */
+static int size_of(int ty, int bty, int len) {
+    if (ty == TY_ARRAY) return len * (bty == TY_INT ? 4 : 1);
+    return 4;
+}
+
+/* 类型等价（契约式语义检查）：指针须基类型一致；int/char 同属整型族可互转；
+ * 数组元素（INDEX 结果）按元素类型参与检查 */
 static int type_eq(int t1, int b1, int t2, int b2) {
-    if (t1 != t2) return t1 != TY_PTR && t2 != TY_PTR;
-    if (t1 != TY_PTR) return 1;
+    if (t1 != t2) return t1 != TY_PTR && t2 != TY_PTR && t1 != TY_ARRAY && t2 != TY_ARRAY;
+    if (t1 != TY_PTR && t1 != TY_ARRAY) return 1;
     return b1 == b2;
 }
 
@@ -494,7 +527,7 @@ static Node *primary(void) {
             s_cpy(n->name, name);
             int si = sym_find(name);
             if (si >= 0 && syms[si].kind != K_FUNC) fail("call to non-function");
-            if (si < 0) sym_add(name, K_FUNC, TY_INT, 0, -1);   /* 隐式声明 */
+            if (si < 0) sym_add(name, K_FUNC, TY_INT, 0, 0, -1);   /* 隐式声明 */
             n->val = si < 0 ? nsym - 1 : si;         /* 符号下标 */
             expect("(");
             Node *head = NULL, **tail = &head;
@@ -510,6 +543,23 @@ static Node *primary(void) {
         }
         int si = sym_find(name);
         if (si < 0) fail("undefined variable");
+        if (syms[si].ty == TY_ARRAY) {
+            /* V2d：数组名必须带下标 a[i]（数组名退化/传参留待后续切片，明确拒绝） */
+            n = node_new(ND_INDEX);
+            n->l = node_new(ND_VAR);
+            n->l->ty = TY_ARRAY;
+            n->l->bty = syms[si].bty;
+            n->l->vkind = syms[si].kind;
+            n->l->vslot = syms[si].val;
+            if (n->l->vkind == K_GLOBAL) s_cpy(n->l->vname, syms[si].name);
+            if (!accept("[")) fail("array without subscript");
+            n->r = expr();
+            if (n->r->ty == TY_PTR || n->r->ty == TY_ARRAY) fail("array index must be integer");
+            expect("]");
+            n->ty = syms[si].bty;               /* 元素类型 */
+            n->bty = 0;
+            return n;
+        }
         n = node_new(ND_VAR);
         n->ty = syms[si].ty;
         n->bty = syms[si].bty;
@@ -541,8 +591,9 @@ static Node *unary(void) {
     if (accept("&")) {
         Node *n = node_new(ND_ADDR);
         n->l = unary();
-        /* & 操作数必须可寻址（变量/解引用）；类型为指向其的指针（bty=操作数类型） */
-        if (n->l->kind != ND_VAR && n->l->kind != ND_DEREF) fail("cannot take address");
+        /* & 操作数必须可寻址（变量/解引用/数组元素）；类型为指向其的指针（bty=操作数类型） */
+        if (n->l->kind != ND_VAR && n->l->kind != ND_DEREF && n->l->kind != ND_INDEX)
+            fail("cannot take address");
         n->ty = TY_PTR;
         n->bty = n->l->ty;
         return n;
@@ -627,7 +678,8 @@ static Node *expr(void) {
         Node *a = node_new(ND_ASSIGN);
         a->l = n;               /* 左值（语法层不校验，codegen 时对非地址报错） */
         a->r = expr();          /* 右结合 */
-        if (a->l->kind != ND_VAR && a->l->kind != ND_DEREF) fail("assign to non-lvalue");
+        if (a->l->kind != ND_VAR && a->l->kind != ND_DEREF && a->l->kind != ND_INDEX)
+            fail("assign to non-lvalue");
         if (!type_eq(a->l->ty, a->l->bty, a->r->ty, a->r->bty))
             fail("type mismatch in assignment");
         return a;
@@ -637,8 +689,9 @@ static Node *expr(void) {
 
 /* ---- 语句 ---- */
 
-static int cur_nlocals;         /* 当前函数局部变量计数（帧槽位分配，块间不回收） */
+static int cur_frame;           /* 当前函数已用帧字节（局部变量偏移分配，块间不回收） */
 static int bty_top;             /* 顶层声明（函数/全局）的指针基类型（非指针时无意义） */
+static int len_top;             /* 顶层声明（函数/全局）的数组元素个数（非数组=0） */
 
 static Node *stmt(void);
 
@@ -664,16 +717,21 @@ static Node *stmt(void) {
         return block_stmt();
     }
     if (peek("int") || peek("char")) {
-        /* 局部声明（`int x;` / `char c;` / `int* p;` / `char *s;`） */
+        /* 局部声明（`int x;` / `char c;` / `int* p;` / `int a[3];` / `char s[8];`） */
         n = node_new(ND_DECL);
         n->ty = decl_type(&n->bty);
         if (!tok_is_word) fail("expected identifier");
         char name[32];
         s_cpy(name, tok);
         next_tok();
-        if (cur_nlocals >= 512) fail("too many locals");
-        n->val = cur_nlocals++;
-        sym_add(name, K_LOCAL, n->ty, n->bty, n->val);
+        if (array_suffix(n->ty, &n->len)) { n->bty = n->ty; n->ty = TY_ARRAY; }
+        if (n->ty == TY_ARRAY && peek("=")) fail("array init not supported");
+        /* V2d：帧按字节偏移分配（数组紧凑 len×元素尺寸，标量 4 字节对齐） */
+        int size = size_of(n->ty, n->bty, n->len);
+        cur_frame += size;
+        if (cur_frame > 4096) fail("frame too big");
+        n->val = cur_frame;             /* 帧字节偏移（首个变量 = 4，lea -4(%ebp)） */
+        sym_add(name, K_LOCAL, n->ty, n->bty, n->len, n->val);
         if (accept("=")) {
             n->l = expr();
             if (!type_eq(n->ty, n->bty, n->l->ty, n->l->bty))
@@ -727,19 +785,21 @@ static void parse_program(void) {
         char name[32];
         s_cpy(name, tok);
         next_tok();
+        len_top = 0;
+        if (array_suffix(ty, &len_top)) { bty_top = ty; ty = TY_ARRAY; }
         if (accept("(")) {
             /* ---- 函数定义 ---- */
             int si = sym_find(name);
             if (si >= 0) {
                 if (syms[si].kind != K_FUNC || syms[si].val >= 0) fail("redefined");
             } else {
-                si = sym_add(name, K_FUNC, TY_INT, 0, -1);
+                si = sym_add(name, K_FUNC, TY_INT, 0, 0, -1);
             }
             Node *fn = node_new(ND_FUNC);
             s_cpy(fn->name, name);
             fn->val = si;
             int func_scope = nsym;
-            cur_nargs = 0; cur_nlocals = 0;
+            cur_nargs = 0; cur_frame = 0;
             Node *params = NULL, **ptail = &params;
             if (!peek(")")) {
                 for (;;) {
@@ -748,9 +808,11 @@ static void parse_program(void) {
                     if (!tok_is_word) fail("expected parameter name");
                     s_cpy(p->name, tok);
                     next_tok();
+                    int plen;
+                    if (array_suffix(p->ty, &plen)) fail("unsupported: array parameter");
                     p->vkind = K_ARG;
                     p->vslot = cur_nargs;
-                    sym_add(p->name, K_ARG, p->ty, p->bty, cur_nargs);
+                    sym_add(p->name, K_ARG, p->ty, p->bty, 0, cur_nargs);
                     *ptail = p; ptail = &p->next;
                     cur_nargs++;
                     if (!accept(",")) break;
@@ -761,19 +823,21 @@ static void parse_program(void) {
             fn->a = params;
             if (!accept("{")) fail("expected function body");
             fn->b = block_stmt();
-            fn->nlocals = cur_nlocals;
+            fn->nlocals = cur_frame;    /* 帧大小（字节） */
             nsym = func_scope;
             *funcs_tail = fn; funcs_tail = &fn->next;
         } else {
-            /* ---- 全局变量（仅常量初始化：十进制数字或字符字面量） ---- */
+            /* ---- 全局变量（数组仅 0 填充；标量常量初始化：数字或字符字面量） ---- */
             if (sym_find(name) >= 0) fail("redefined");
             Node *g = node_new(ND_GVAR);
             s_cpy(g->name, name);
             g->ty = ty;
             g->bty = bty_top;
-            int si = sym_add(name, K_GLOBAL, ty, bty_top, 0);
+            g->len = len_top;
+            int si = sym_add(name, K_GLOBAL, ty, bty_top, len_top, 0);
             g->val = si;
             if (accept("=")) {
+                if (ty == TY_ARRAY) fail("array init not supported");
                 if (tok_is_num) {
                     g->ival = 0;
                     for (int i = 0; tok[i]; i++) g->ival = g->ival * 10 + (tok[i] - '0');
@@ -797,7 +861,7 @@ static void gen(Node *n);       /* gen_addr 在解引用时递归取指针值 */
 
 static void gen_addr(Node *n) {
     if (n->kind == ND_VAR) {
-        if (n->vkind == K_LOCAL)      emit_lea_ebp(-4 * (n->vslot + 1));
+        if (n->vkind == K_LOCAL)      emit_lea_ebp(-n->vslot);   /* V2d：vslot=帧字节偏移 */
         else if (n->vkind == K_ARG)   emit_lea_ebp(8 + 4 * (cur_nargs - 1 - n->vslot));
         else if (n->vkind == K_GLOBAL) {
             emit_mov_imm(0);
@@ -807,6 +871,15 @@ static void gen_addr(Node *n) {
     }
     if (n->kind == ND_DEREF) {
         gen(n->l);                  /* 解引用：地址 = 指针值（在 eax） */
+        return;
+    }
+    if (n->kind == ND_INDEX) {
+        /* V2d：a[i] 地址 = 数组基址 + 下标 × 元素尺寸（int×4，char×1 不缩放） */
+        gen_addr(n->l);             /* 数组基地址 */
+        emit1(0x50);
+        gen(n->r);                  /* 下标 */
+        if (n->l->bty == TY_INT) emit_op("\xc1\xe0\x02");   /* shl $2,%eax */
+        emit_op("\x5b\x01\xd8");    /* pop %ebx; add %ebx,%eax */
         return;
     }
     fail("assign to non-lvalue");
@@ -820,6 +893,7 @@ static void gen(Node *n) {
         return;
     case ND_VAR:
     case ND_DEREF:
+    case ND_INDEX:              /* V2d：a[i] 读（元素按类型取宽） */
         gen_addr(n);
         if (n->ty == TY_CHAR) emit_load8(); else emit_load();
         return;
@@ -909,7 +983,7 @@ static void gen_stmt(Node *n) {
         return;
     case ND_DECL:
         if (n->l) {
-            emit_lea_ebp(-4 * (n->val + 1));    /* 槽位地址（ND_DECL 直接算，不经 gen_addr） */
+            emit_lea_ebp(-n->val);      /* V2d：val=帧字节偏移（数组声明无初始化） */
             emit1(0x50);
             gen(n->l);
             if (n->ty == TY_CHAR) emit_store8(); else emit_store();
@@ -943,12 +1017,13 @@ static void gen_stmt(Node *n) {
     }
 }
 
-/* 全局数据（ND_GVAR）：emit 4 字节占位，回写初值，登记符号偏移 */
+/* 全局数据（ND_GVAR）：emit 变量字节（数组 0 填充；标量回写初值），登记符号偏移 */
 static void gen_global(Node *n) {
     int si = n->val;
     int pos = code_len;
-    emit4(0);
-    if (n->ival) save32(pos, n->ival);      /* 常量初始化 */
+    int size = size_of(n->ty, n->bty, n->len);
+    for (int i = 0; i < size; i++) emit1(0);
+    if (n->ival && n->ty != TY_ARRAY) save32(pos, n->ival);     /* 常量初始化 */
     syms[si].val = pos;
 }
 
@@ -962,7 +1037,7 @@ static void gen_func(Node *n) {
     frame_patch = code_len - 4;
     gen_stmt(n->b);
     emit_epilogue();
-    save32(frame_patch, n->nlocals * 4);
+    save32(frame_patch, n->nlocals);        /* V2d：nlocals=帧字节数 */
 }
 
 /* ================= 收尾：回填补丁、校验、写文件 ================= */
@@ -1077,7 +1152,7 @@ int minicc_main(char *argv, int argc) {
     for (int i = 0; i < npatch; i++) {
         if (patches[i].kind != P_CALL || !s_eq(patches[i].name, "syscall3")) continue;
         int ss = sym_find("syscall3");
-        if (ss < 0) ss = sym_add("syscall3", K_FUNC, TY_INT, 0, -1);
+        if (ss < 0) ss = sym_add("syscall3", K_FUNC, TY_INT, 0, 0, -1);
         if (syms[ss].val < 0) {
             syms[ss].val = code_len;
             emit_op("\x55\x89\xe5");            /* push %ebp; mov %esp,%ebp */

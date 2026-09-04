@@ -78,6 +78,15 @@ hrun t_badesc 'int main(){char* s;s="\q";return 0;}' 1 'bad escape' 'compiled OK
 hrun t_badpbase 'int main(){int* p;p="hi";return 0;}' 1 'type mismatch' 'compiled OK'
 # 字符串字面量超长（>254 字节）-> 必须 FAIL + string too long
 hrun t_strlng "int main(){char* s;s=\"$(printf 'A%.0s' $(seq 1 255))\";return 0;}" 1 'string too long' 'compiled OK'
+echo "== [2a3] 宿主数组错误路径（V2d） =="
+# 数组名无下标 -> 必须 FAIL + array without subscript
+hrun t_anosub 'int main(){int a[2];return a;}' 1 'array without subscript' 'compiled OK'
+# 数组初始化 -> 必须 FAIL + array init not supported
+hrun t_ainit 'int main(){int a[2]=1;return 0;}' 1 'array init not supported' 'compiled OK'
+# 数组大小非正 -> 必须 FAIL + array size must be positive
+hrun t_asize0 'int main(){int a[0];return 0;}' 1 'array size must be positive' 'compiled OK'
+# 数组参数 -> 必须 FAIL + array parameter
+hrun t_aparam 'int f(int a[3]){return 0;}int main(){return 0;}' 1 'array parameter' 'compiled OK'
 echo "== [2b] 宿主成功路径 =="
 # 成功：变量/四则/if/else/while/递归/全局/逻辑，编译层全过
 hrun t_arith 'int main(){int a;a=1+2*3-4;return 0;}' 0 'compiled OK' ''
@@ -96,6 +105,12 @@ hrun t_char 'int main(){char c;c='\''A'\'';if(c==65)return 0;return 1;}' 0 'comp
 hrun t_charptr 'int main(){char c;char* p;p=&c;*p=88;if(c==88)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_gchar 'char g='\''B'\'';int main(){if(g==66)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_sys3 'int main(){syscall3(1,"hi",0,0);return 0;}' 0 'compiled OK' ''
+# 数组（V2d）：局部 int/char、全局、下标表达式、&a[0] 指针
+hrun t_arr 'int main(){int a[3];a[0]=1;a[1]=2;a[2]=3;if(a[0]+a[2]==4)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_arridx 'int main(){int a[3];a[0]=5;int i;i=1;if(a[i-1]==5)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_arrchar 'int main(){char s[3];s[0]=104;s[1]=105;s[2]=0;if(s[0]==104)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_arrg 'int a[2];int main(){a[0]=7;a[1]=8;return a[0]+a[1]-15;}' 0 'compiled OK' ''
+hrun t_arrptr 'int main(){int a[2];a[0]=9;int* p;p=&a[0];return *p-9;}' 0 'compiled OK' ''
 
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
@@ -182,6 +197,19 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "micc /s3.c /s3.elf"
     gwait "产物输出 ZY（I/O）" "ZY" 40
     gwait "sys_print I/O 运行" "\[micc\] '/s3.elf' exited code=0 PASS" 40
+    # 数组（V2d）：局部读写求和、char 数组、全局数组、&a[0] 指针
+    gsend "writefile /a1.c int main(){int a[3];a[0]=1;a[1]=2;a[2]=3;return a[0]+a[1]+a[2]-6;}"
+    gsend "micc /a1.c /a1.elf"
+    gwait "数组读写求和" "\[micc\] '/a1.elf' exited code=0 PASS" 40
+    gsend "writefile /a2.c int main(){char s[3];s[0]=104;s[1]=105;s[2]=0;if(s[0]==104)return 0;return 1;}"
+    gsend "micc /a2.c /a2.elf"
+    gwait "char 数组" "\[micc\] '/a2.elf' exited code=0 PASS" 40
+    gsend "writefile /a3.c int a[2];int main(){a[0]=7;a[1]=8;return a[0]+a[1]-15;}"
+    gsend "micc /a3.c /a3.elf"
+    gwait "全局数组" "\[micc\] '/a3.elf' exited code=0 PASS" 40
+    gsend "writefile /a4.c int main(){int a[2];a[0]=9;int* p;p=&a[0];return *p-9;}"
+    gsend "micc /a4.c /a4.elf"
+    gwait "数组 &a[0] 指针" "\[micc\] '/a4.elf' exited code=0 PASS" 40
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest micc 端到端通过"
 else
