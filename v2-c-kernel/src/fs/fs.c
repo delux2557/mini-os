@@ -276,7 +276,7 @@ int fs_mkdir(blockdev_t *bd, const char *path) {
 
 /* ---- BUG-057 两级权限：系统文件只读 / 用户文件可写 ----
  * 权威判定集中在 fs 层（不依赖 syscall 调用者），fs_delete/fs_rmdir/fs_write 均据此拦截，
- * 用户无从绕过。仅需位运算，不引入 strcpy/sprintf。 */
+ * 用户无从绕过。纯位运算实现，未引入任何受限库调用。 */
 int fs_protect(blockdev_t *bd, const char *path) {
     int ino = fs_lookup(bd, path);
     if (ino < 0) return -1;
