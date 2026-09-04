@@ -80,6 +80,10 @@ void irq_install_handler(int irq, isr_t handler) {
 
 /* 汇编桩调用进来的统一入口（在 isr.s 中定义） */
 void isr_handler(registers_t *r) {
+    /* L0（栈预算总账）：先校验当前进程内核栈底部 canary。中断门进即关 IF、单链独占
+     * 4KB 内核栈，上一次 IRQ/syscall 深链若写穿栈底，这里立即检出并停机（SEC-07）。 */
+    extern void kstack_check(void);
+    kstack_check();
     if (r->int_no >= 32 && r->int_no < 48) {
         int irq = (int)(r->int_no - 32);
         /* EOI 必须在调用处理函数之前发出：
