@@ -11,7 +11,10 @@ command -v "${CC:-gcc}" >/dev/null 2>&1 || { echo "[ERR] 缺 ${CC:-gcc}，无法
 CC="${CC:-gcc}"
 # -no-pie：内核用 32 位地址当指针，宿主编译需把静态数据放在 4GB 内
 # v0.19：源文件按子系统分目录（arch/kernel/mm/drv/fs/net/app），头文件逐目录 -I
-CFLAGS="-Wall -Wextra -O1 -g -fno-pie -no-pie \
+# 编译硬化门禁（P1）：与 Makefile WERROR 一致，默认 -Werror 强制零告警（本机已验证零告警）。
+# 本地临时豁免：`make WERROR= test-host` 或 `WERROR= ./tests/run_host_tests.sh`。
+WERROR="${WERROR:--Werror}"
+CFLAGS="-Wall -Wextra $WERROR -O1 -g -fno-pie -no-pie \
         -Isrc -Isrc/arch -Isrc/kernel -Isrc/mm -Isrc/drv -Isrc/fs -Isrc/net -Isrc/app -Itests \
         -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast"
 PASS=0
