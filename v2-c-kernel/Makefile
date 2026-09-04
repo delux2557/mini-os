@@ -376,8 +376,21 @@ lint:
 	  echo "[lint] ERROR: banned libc function found"; exit 1; fi
 	@echo "[lint] OK"
 
+# -- 观测台账（Commit 2，纯观测→RR 基线）：assert_timing_*.tsv ----------
+# 三个测试脚本（serial/socket/qemu）把每个等断断言的耗时/状态打点为
+#   $(BUILD)/assert_timing_<script>.tsv。因同 BUILD 串行 `make test` 下多脚本会做
+#   `make clean`（强制按新 CFLAGS 重编），若 clean 整套 rm -rf 会把先前脚本落到本目录的
+#   打点产物一并清掉，导致验收"串行 make test 后三 tsv 并存"不成立。
+# 故 clean 对 assert_timing_*.tsv 做 stash→rm→放回：只清构建产物、保留观测台账。
+# 纯观测基础设施：不改任何 job/工作流/判定/超时，也不进入构建依赖图（无 .d 链接）。
 clean:
-	rm -rf $(BUILD) tests/build
+	@set -e; \
+	tsv_st=$$(mktemp -d); \
+	mv $(BUILD)/assert_timing_*.tsv "$$tsv_st"/ 2>/dev/null || true; \
+	rm -rf $(BUILD) tests/build; \
+	mkdir -p $(BUILD); \
+	mv "$$tsv_st"/assert_timing_*.tsv $(BUILD)/ 2>/dev/null || true; \
+	rm -rf "$$tsv_st"
 
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
