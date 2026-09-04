@@ -35,8 +35,9 @@ jobs:
             qemu-user \
             socat
 
-      # Makefile 的 test: 依赖链已含全 9 层（host/qemu/serial/persist/net/socket/cc500/slip/tcp）
-      - name: 全链回归（9 层，失败即中断）
+      # make test 聚合 = v2-c-kernel/Makefile 的 TEST_LAYERS（唯一事实源）；
+      # 新增/减少层见 docs/README.md 维护规则，勿在此手抄层名清单。
+      - name: 全链回归（TEST_LAYERS，失败即中断）
         run: make test
         working-directory: v2-c-kernel
 
