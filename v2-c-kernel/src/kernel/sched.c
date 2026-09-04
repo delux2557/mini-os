@@ -745,6 +745,24 @@ void sched_wake_keyboard(void) {
     }
 }
 
+/* v0.36（红队 RBT-2026-014，BUG-068）：悬垂 fd 回收。删除成功方以被删 inode 调用，
+ * 遍历所有进程 fd 表把指向该 inode 的槽置 used=0（后续 fd 读写立即 -1），并记日志。
+ * 解决的问题：文件删除后旧 fd 仍持 inode 号，alloc_inode 最低位复用该号给新文件后，
+ * 旧 fd 写会静默落入"新文件"= 跨文件写、无告警。进程面回收依赖 PCB/fd 表，故放调度层。 */
+void sched_fd_revoke(uint32_t inode) {
+    for (uint32_t pid = 1; pid < MAX_PROCS; pid++) {   /* skip idle PID 0 */
+        pcb_t *p = &procs[pid];
+        if (p->state == PROC_FREE) continue;
+        for (uint32_t i = 0; i < FS_FDS_PER_PROC; i++) {
+            fs_file_t *fd = &p->fd_table[i];
+            if (fd->used && fd->inode == inode) {
+                fd->used = 0;
+                serial_printf("[fs] revoke fd=%u inode=%u (pid=%u)\n", i, inode, pid);
+            }
+        }
+    }
+}
+
 static void terminate_current(registers_t *r, uint32_t code, const char *why) {
     pcb_t *p = &procs[current_pid];
     p->exit_code = code;

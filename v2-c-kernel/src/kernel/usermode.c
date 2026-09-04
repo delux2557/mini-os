@@ -666,14 +666,23 @@ void syscall_dispatch(registers_t *r) {
     case 19: { /* sys_fs_delete(name)：删除文件（v0.14 支持路径；目录用 sys_fs_rmdir） */
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
-        int rc = fs_delete(fs_device(), path);
+        blockdev_t *bd = fs_device();
+        int ino = fs_lookup(bd, path);        /* 解析实际对象（成功删除后供 revoke 悬垂 fd） */
+        int rc = fs_delete(bd, path);
         serial_printf("[fs] delete '%s' rc=%d\n", path, rc);
+        /* D4（红队 RBT-2026-014，BUG-068）：删除成功即回收指向该 inode 的悬垂 fd，
+         * 防 inode 最低位复用后被旧 fd 写落到新文件（跨文件写、无告警）。 */
+        if (rc == 0 && ino >= 0) sched_fd_revoke((uint32_t)ino);
         r->eax = (uint32_t)rc;
         return;
     }
     case 20: { /* sys_readline(buf, max)：阻塞式读一行；行已就绪则直接返回长度 */
         char *out = (char *)a;
-        uint32_t max = b ? b : KB_LINE_MAX + 1;
+        /* v0.36（红队 RBT-2026-013，BUG-067）：max=0 不是"未指定"哨兵。旧写 0 被吞成
+         * KB_LINE_MAX+1(129)，会向"零容量"调用方缓冲整行写入（契约违反）。调用方必须给
+         * 真实缓冲容量；0 直接显式失败，便于尽早暴露非法调用方，而不是静默越界写。 */
+        if (b == 0) { r->eax = (uint32_t)-1; return; }
+        uint32_t max = b;
         if (!user_ptr_valid(out, max)) { r->eax = (uint32_t)-1; return; }   /* v0.17 */
         if (!kb_line_ready()) {
             /* 无行：记录缓冲区（唤醒时由 sched_wake_keyboard 拷入），阻塞等待 */
@@ -821,8 +830,12 @@ void syscall_dispatch(registers_t *r) {
     case 28: { /* sys_fs_rmdir(path)：删空目录（非空/非目录返回 -1） */
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
-        int rc = fs_rmdir(fs_device(), path);
+        blockdev_t *bd = fs_device();
+        int ino = fs_lookup(bd, path);        /* 解析实际对象（成功删除后供 revoke 悬垂 fd） */
+        int rc = fs_rmdir(bd, path);
         serial_printf("[fs] rmdir '%s' rc=%d\n", path, rc);
+        /* D4（红队 RBT-2026-014，BUG-068）：删空目录成功即回收指向该 inode 的悬垂 fd */
+        if (rc == 0 && ino >= 0) sched_fd_revoke((uint32_t)ino);
         r->eax = (uint32_t)rc;
         return;
     }
