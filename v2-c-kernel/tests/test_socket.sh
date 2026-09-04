@@ -17,6 +17,10 @@ LOG="$BUILD/socket.log"
 TIN="$BUILD/socket_in.fifo"
 TOUT="$BUILD/socket_out.fifo"
 ECHO_LOG="$BUILD/socket_echo.log"
+# ---- 观测打点（Commit 2，纯观测→RR 基线）：assert_timing_socket.tsv ----
+# 每个等断断言(wait_for/wait_after)恰打一行 TSV。分文件防 test job 串行 make test 互覆盖。
+TSV="$BUILD/assert_timing_socket.tsv"
+rm -f "$TSV"
 QPID=""; CAT_PID=""; ECHO_PID=""; RESTORED=0
 FAIL=0
 
@@ -73,25 +77,47 @@ qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -vga std \
 QPID=$!
 exec 9>"$TIN"                        # 固定 fd 9 写串口
 
+# 观测打点：每断言恰打一行 TSV（断言名 sed 转义 tab/换行）。250ms 轮询粒度，见脚本头注。
+pop_ts() {  # pop_ts <tsv> <断言名> <耗时ms> <ok|timeout>
+    local pdesc
+    pdesc=$(printf '%s' "$2" | sed 's/[\t\n]/_/g')
+    printf '%s\t%s\t%s\n' "$pdesc" "$3" "$4" >> "$1"
+}
 # 有序断言工具：从 start 行起匹配（保证"攻击之后"的时序）
 wait_for() {   # wait_for <说明> <正则> [超时秒]
-    local desc="$1" re="$2" tmo="${3:-10}" i
+    local desc="$1" re="$2" tmo="${3:-10}" i t0 t1
+    t0=$(date +%s%3N 2>/dev/null || echo 0)
     for ((i = 0; i < tmo * 4; i++)); do
-        grep -aq "$re" "$LOG" 2>/dev/null && { echo "[ok]   $desc"; return 0; }
+        grep -aq "$re" "$LOG" 2>/dev/null && break
         sleep 0.25
     done
+    t1=$(date +%s%3N 2>/dev/null || echo 0)
+    if [ "$i" -lt $((tmo * 4)) ]; then
+        pop_ts "$TSV" "$desc" "$((t1 - t0))" ok
+        echo "[ok]   $desc"; return 0
+    fi
+    pop_ts "$TSV" "$desc" "$((t1 - t0))" timeout
     echo "[FAIL] $desc (缺: $re)"
+    echo "  >> 现场（LOG 尾 ~20 行）："
+    tail -n 20 "$LOG" 2>/dev/null | sed 's/^/      /'
     FAIL=$((FAIL + 1)); return 1
 }
 wait_after() { # wait_after <起始行> <说明> <正则> [超时秒]
-    local start="$1" desc="$2" re="$3" tmo="${4:-10}" i
+    local start="$1" desc="$2" re="$3" tmo="${4:-10}" i t0 t1
+    t0=$(date +%s%3N 2>/dev/null || echo 0)
     for ((i = 0; i < tmo * 4; i++)); do
-        if tail -n +$((start + 1)) "$LOG" 2>/dev/null | grep -q "$re"; then
-            echo "[ok]   $desc"; return 0
-        fi
+        if tail -n +$((start + 1)) "$LOG" 2>/dev/null | grep -q "$re"; then break; fi
         sleep 0.25
     done
+    t1=$(date +%s%3N 2>/dev/null || echo 0)
+    if [ "$i" -lt $((tmo * 4)) ]; then
+        pop_ts "$TSV" "$desc" "$((t1 - t0))" ok
+        echo "[ok]   $desc"; return 0
+    fi
+    pop_ts "$TSV" "$desc" "$((t1 - t0))" timeout
     echo "[FAIL] $desc (缺: $re, from line $start)"
+    echo "  >> 现场（LOG 尾 ~20 行）："
+    tail -n 20 "$LOG" 2>/dev/null | sed 's/^/      /'
     FAIL=$((FAIL + 1)); return 1
 }
 send() { printf '%s\n' "$1" >&9; sleep 0.3; }

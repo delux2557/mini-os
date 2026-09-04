@@ -16,6 +16,10 @@ done
 LOG="$BUILD/serial.log"
 MON="/tmp/minios-mon.sock"
 DURATION="${DURATION:-35}"
+# ---- 观测打点（Commit 2，纯观测→RR 基线）：assert_timing_qemu.tsv ----
+# 每个 wait_after 等断（含 cmd 内部的逐正则调用）恰打一行 TSV。分文件防串行 make test 互覆盖。
+TSV="$BUILD/assert_timing_qemu.tsv"
+rm -f "$TSV"
 
 echo "== [1/4] 构建内核 =="
 if ! make BUILD="$BUILD" >/dev/null 2>&1; then
@@ -55,17 +59,30 @@ sendkeys() {   # sendkeys <字符串>；空格=spc，换行=ret
 
 # ---- 等待日志"自起始行之后新增内容"中出现关键字 ----
 INTERACTIVE_FAIL=0
+# 观测打点：每 wait_after 等断恰打一行 TSV（断言名 sed 转义 tab/换行）。250ms 轮询粒度。
+pop_ts() {  # pop_ts <tsv> <断言名> <耗时ms> <ok|timeout>
+    local pdesc
+    pdesc=$(printf '%s' "$2" | sed 's/[\t\n]/_/g')
+    printf '%s\t%s\t%s\n' "$pdesc" "$3" "$4" >> "$1"
+}
 wait_after() {   # wait_after <起始行> <说明> <正则> [超时秒]；命中返回 0，超时返回 1（不计数）
     local start="$1" desc="$2" re="$3" tmo="${4:-8}"
-    local i
+    local i t0 t1
+    t0=$(date +%s%3N 2>/dev/null || echo 0)
     for ((i = 0; i < tmo * 4; i++)); do
-        if tail -n +$((start + 1)) "$LOG" 2>/dev/null | grep -q "$re"; then
-            echo "[ok]   $desc"
-            return 0
-        fi
+        if tail -n +$((start + 1)) "$LOG" 2>/dev/null | grep -q "$re"; then break; fi
         sleep 0.25
     done
+    t1=$(date +%s%3N 2>/dev/null || echo 0)
+    if [ "$i" -lt $((tmo * 4)) ]; then
+        pop_ts "$TSV" "$desc" "$((t1 - t0))" ok
+        echo "[ok]   $desc"
+        return 0
+    fi
+    pop_ts "$TSV" "$desc" "$((t1 - t0))" timeout
     echo "[FAIL] 未等到 $desc (匹配: $re)"
+    echo "  >> 现场（LOG 尾 ~20 行）："
+    tail -n 20 "$LOG" 2>/dev/null | sed 's/^/      /'
     return 1
 }
 
