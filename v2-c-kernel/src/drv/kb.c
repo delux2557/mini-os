@@ -4,6 +4,7 @@
  *  主循环通过 kb_getchar() 轮询读取 */
 #include "kb.h"
 #include "idt.h"
+#include "serial.h"   /* OBS-R1: 非 ASCII 丢弃计数告警走既有 serial_printf */
 #include <stdint.h>
 
 static inline uint8_t inb(uint16_t port) {
@@ -49,6 +50,21 @@ static int  line_len = 0;
 static int  line_ready = 0;
 static kb_line_hook_t line_hook = 0;
 
+/* ---- OBS-R1：串口/kb 非 ASCII 高位字节丢弃计数告警 ----
+ * kb_feed_char 以 char 收单字节，≥0x80 经符号位扩展为负、被 `c>=32` 判定静默丢弃，
+ * 实测非 ASCII 载荷/路径经串口注入逐字节丢失且无任何可见告警。此处对每次非 ASCII 丢弃
+ * 累计计数，行结束（定行/取行）且计数>0 时打印一行 `[kb] N non-ascii bytes dropped`。
+ * 对纯 ASCII 回归零影响（计数恒 0、零新输出）；仅行内计数告警，不做转义/UTF-8 全支持
+ * （如需另立项）。 */
+static uint32_t kb_nonascii_dropped = 0;
+
+static void kb_report_drops(void) {
+    if (kb_nonascii_dropped) {
+        serial_printf("[kb] %u non-ascii bytes dropped\n", kb_nonascii_dropped);
+        kb_nonascii_dropped = 0;
+    }
+}
+
 static void kb_cb(registers_t *r) {
     (void)r;
     kb_feed_scan(inb(0x60));
@@ -69,6 +85,7 @@ int kb_line_take(char *out, uint32_t max) {
     out[n] = 0;
     line_ready = 0;
     line_len = 0;
+    kb_report_drops();   /* OBS-R1: 取行后同样兜底上报（换行上报已重置，此处恒零或补报） */
     return (int)n;
 }
 
@@ -83,8 +100,11 @@ int kb_feed_char(char c) {
         if (!line_ready) {          /* 满行也可定行（len<=KB_LINE_MAX 恒成立） */
             line_buf[line_len] = 0;
             line_ready = 1;
+            kb_report_drops();      /* OBS-R1: 行结束即上报本行丢弃的非 ASCII 字节数 */
             if (line_hook) line_hook();
         }
+    } else if ((unsigned char)c >= 0x80u) {
+        kb_nonascii_dropped++;      /* OBS-R1: 非 ASCII 高位字节不入行缓冲，累计计数 */
     } else if (c >= 32) {      /* 可打印字符：行未就绪才入行缓冲（v0.30 防两行合并） */
         if (!line_ready && line_len < KB_LINE_MAX) line_buf[line_len++] = c;
     }

@@ -1691,6 +1691,35 @@
 
 ***
 
+## 加固 A-2 + OBS 观察工程化（BUG-073+）\[已修复，2026-09-05]
+
+> 独立安全评估 SEC 清单遗留 + 红队观察入库收尾，一段含**少量内核改动 + 纯文档**（单 PR、多 commit）。
+> ① DHCP 应答源校验 ② syscall 负参/哨兵语义清理 ③ OBS R1/R2/R3 收尾。
+
+* **版本**：当前 main（2026-09-05，v1.4.17）
+* **① DHCP 应答源校验**（红队 C2 enabler，RFC 2131 §4.1 校验义务，SEC 清单遗留）：
+  此前续约应答**只按"端口 68 + 可预测 xid"分发、不验源**。改 [e1000.c `dhcp_poll_once`](../../v2-c-kernel/src/drv/e1000.c)：
+  收包处要求 **op==BOOTREPLY**、**UDP 源端口==67**、**已绑定（`dhcp_server_ip!=0`）则源 IP 匹配**，否则整包丢弃并打一行
+  `[dhcp] drop:` 日志。`netsock_dhcp_recv` 出参暴露源 IP/端口。SLIRP 服务器源为 `10.0.2.2:67`，现有续约流程天然通过，
+  test-net 零回归。**非目标**：不改 DHCP 状态机（RENEW→REBIND 回退另立项）。
+* **② syscall 负参/哨兵语义清理**（BUG-067 口径延续）：把 syscall 参数表过一遍——
+  * `sys_sem_create` **负 init**：按 int32 解释，负数（含误传 `-1` 哨兵）令 sem 计数为负、触发 `sem_invariant_ok`
+    审计误报（SEM-1）且无合法语义 → **显式拒绝并打日志**（fail-closed，非静默截断）。
+  * `sys_fs_seek` **负/巨大偏移**：off 按无符号 uint32 原生存放，负偏移回绕成巨大 pos；越界由后续 read/write 的越界哨兵
+    fail-closed，非内存不安全 → **补注释**说明原则（要验"在文件内"须查 fs_size，超出本 syscall 职责）。
+  * **brk**：上下界原已钳位（`brk_in_range` 保 `[heap_base, USER_HEAP_MAX]` + 页数 `cap` ≤ USER_HEAP_PAGES），无缺口。
+  * 全部处理原则汇总为 [usermode.c syscall_dispatch 头部](../../v2-c-kernel/src/kernel/usermode.c) **"参数语义表"**注释：
+    ① id/槽位 `0||>=N` 双检（负 fd 被上界回绕挡住）② 指针整区 `user_ptr_valid`/copyin ③ 长度/容量 clamp ④ 有符号语义显式拒绝
+    ⑤ 地址/偏移钳位。**维护规则**：新增 syscall 按①②③④⑤对照自查。
+* **③ OBS-R1/R2/R3 收尾**（各自在观察表打了 ✅ 已修复）：
+  * R1（代码）：[kb.c](../../v2-c-kernel/src/drv/kb.c) 非 ASCII 高位字节丢弃计数、行结束/取行上报。
+  * R2（文档）：README cc500 阵列声明表述对齐（不扩文法）。
+  * R3（文档 + user_lib）：[user_lib.h](../../v2-c-kernel/src/app/user_lib.h) `open_at`/`sys_fs_*` 包装 + fs 固定槽位契约；
+    [fsdemo.c](../../v2-c-kernel/src/app/fsdemo.c) 改用冒烟。
+* **回归**：`make`（-Werror）干净；`make test-host` / `test-serial` / `test-net` 全绿。
+
+***
+
 ## 威胁模型注记（RD3 诚实边界，及 RD5-V4 收口）
 
 **RD3 断掉的链路**是**"元数据区被当数据读写"**：块号被篡改成指向位图 / inode 表 / 越界地址时，文件读写不再
@@ -1727,10 +1756,11 @@ inode 所有"的数据块访问（含经它写 RO 文件块）在 `file_block` �
 | OBS-008（协议 压测 2026-09-01）     | 宿主层解析器（IP / UDP / ICMP / DHCP / SLIP / 虚拟 TCP 会话头）**ASan+UBSan 150w 轮 fuzz = 1200w 次 parse 调用**，无崩溃/越界/UB（19 项宿主单测 0 fail）                                                                                                   | 解析器加固到位，1200w 调用未暴露新协议漏洞。ASan+UBSan 清洁是业界回归基线；保留 `tests/fuzz_parse.c` + `run_host_tests.sh`，`FUZZ_ITERS=1500000` CI 可直接跑。                                                                                                               |
 | OBS-009（返回状态穷举 2026-09-03）   | 用"枚举每个分配/映射接口返回状态"审计 `frame_alloc`/`map_page_in` 调用点：`usermode.c app_mapfn` 加载 ELF 时 `map_page_in` **页表帧 OOM 后静默丢映射**（后续该 app 跑触该页才缺页崩）；懒分配 [mem.c](../../v2-c-kernel/src/mm/mem.c) `map_page` 丢弃 `-1`（可能 fault 重试循环）；sched/idle 初始化及 e1000 MMIO 映射未校验返回 | 静态推演的 **OOM 边界**（正常内存配置不可达，需帧池耗尽才触发）。`frame_alloc` 各数据帧调用点多已降级（BUG-033 后维护良好）；真缺口在 **usermode app_mapfn 页表帧 OOM → 未置 load_failed**（P2，~3 行：`if(map_page_in(...)!=0){ load_failed=1; return; }`）及 lazy/init/sched 未校验（P3）。建议按 P2 先收口 app_mapfn |
 | OBS-010（ATA 设备残留）             | ATA 超时恢复：`ata_wait_ready` 超时返回 -1 但**未发 SRST 软复位**，设备命令状态可能残留（[ata.c](file:///workspace/mini-os/v2-c-kernel/src/drv/ata.c#L52-L61) 超时路径）——QEMU 下近不可达，仅 fs_sync/save 偶发触发且返回 -1 不崩                                                                                              | 低危观察；建议超时后发 `0x08(SRST)` 软复位恢复（状态机 + 超时计数，勿用 `sleep`）；当前未改，待后续小 PR                                                                                                        |
-| OBS-011（独立安全评估 SEC-06，2026-09-04） | 缓解技术缺口：无 ASLR/PIE（用户程序固定链接 `0x800A0000` 等）；无 NX（用户代码/栈/堆均 `0x7` P|RW|U 含可执行映射）；ELF `e_entry` 不校验落用户可执行区 | **单用户教学模型下可接受的有意取舍（降级"代码注入+ROP"成本，但无提权路径）**；页表 U/S 位隔离是根本防线（实测有效）。建议在 `docs/security.md` 威胁模型声明"未启用 NX/ASLR，功能演示优先"（对应 CWE-693）；不改码 |
+| OBS-011（独立安全评估 SEC-06，2026-09-04） | 缓解技术缺口：无 ASLR/PIE（用户程序固定链接 `0x800A0000` 等）；无 NX（用户代码/栈/堆均 `0x7` P|RW|U 含可执行映射）；ELF `e_entry` 不校验落用户可执行区 | **单用户教学模型下可接受的有意取舍（降级"代码注入+ROP"成本，但无提权路径）**；页表 U/S 位隔离是根本防线（实测有效）。建议在 [`docs/reference/security.md`](security.md) 威胁模型声明"未启用 NX/ASLR，功能演示优先"（对应 CWE-693）；不改码 |
 | OBS-012（独立安全评估 SEC-02 交叉引用，2026-09-04） | UDP socket 无进程归属：`netsock_send`（[netsock.c](file:///workspace/mini-os/v2-c-kernel/src/net/netsock.c#L93-L101)）/`netsock_recv`（[:103-116](file:///workspace/mini-os/v2-c-kernel/src/net/netsock.c#L103-L116)）只查 id/used、不校验 pid，任意 ring3 进程可对他人 socket 窃听/伪造/排空；仅 close 有归属检查（`netsock_close_if_owner`） | **= 既有 OBS-003**：作者已裁定为"单用户教学 OS 将 socket 视为进程共享资源"的设计取舍。独立评估接受其为有意设计；建议在 docs 显式写出该威胁模型，注明"未来存在互不信任 guest/agent 时须为 send/recv 增加归属校验"（校验成本低，见 BUG-038 同构写法） |
-| OBS-R1（红队二轮，2026-09-04，RBT-2026-013 相关） | 串口键盘通道丢 ≥0x80 字节：kb 通道对单字节 ≥0x80 的输入长期/复用路径可能丢失或改写，未做过滤即入行缓冲 | 仅记录、不修，归 P1：当前 agent/命令均为纯 ASCII（≤0x7F），无功能影响；如需通道过滤改造或转义支持另立项 |
-| OBS-R2（红队二轮，2026-09-04） | cc500 无数组/for/break/cast 文法，而 README/文档有"用局部数组"等表述，与编译器实际能力不符 | 仅记录、归 P1：文档表述与编译器能力需对齐（改文档或扩文法二选一），本轮不改；测试载荷一律写"无数组"方言 |
+| OBS-R1（红队二轮，2026-09-04，RBT-2026-013 相关） | 串口键盘通道丢 ≥0x80 字节：kb 通道对单字节 ≥0x80 的输入长期/复用路径可能丢失或改写，未做过滤即入行缓冲 | **✅ 已修复（v1.5，R1）**：`kb_feed_char` 对非 ASCII 高位字节累计计数，行结束/取行时若计数>0 打印 `[kb] N non-ascii bytes dropped`（纯 ASCII 零新输出）。仍不做 UTF-8 全支持/转义通道（如需另立项） |
+| OBS-R2（红队二轮，2026-09-04） | cc500 无数组/for/break/cast 文法，而 README/文档有"用局部数组"等表述，与编译器实际能力不符 | **✅ 已修复（v1.5，R2，文档对齐）**：README cc500 方言边界改为"数组声明不支持（局部与全局均不支持），对已有缓冲的下标访问 `p[i]` 仍支持"；未扩文法 |
+| OBS-R3（红队一轮，2026-09-04，D2 假阳性） | `sys_fs_open(fd,name,mode)` 的 **fd 是调用方写死的固定槽位号，返回值 0=成功 / -1=失败**——载荷易把返回 0 当"成功句柄 fd"用，后续 fs_write/read 全被 -1 拒（红队 D2 曾因此假阳性） | **✅ 已补契约（v1.5，R3）**：`user_lib.h` 新增 `open_at(fd,name,mode)` 包装 + 契约一句话（fd 非返回值、返回 0/-1）；fsdemo 改用之冒烟。见 [user_lib.h](../../v2-c-kernel/src/app/user_lib.h) |
 | A4（红队二轮，2026-09-04） | 存活父进程若迟迟不 start/复收，已退出子进程的僵尸会钉死 pid 槽，导致 MAX_PROCS 内新 spawn 取不到该 pid | 设计权衡，接受：单用户模型下父进程相位短、僵尸无 double-free；待父进程 sys_wait 复收即释放，无需改（P3 记录） |
 | A5（红队二轮，2026-09-04） | sleep 传巨值时 ticks 判定回绕 → 被当作"已到点"立即唤醒，而非长眠 | 仅记录、不修：单用户无真实长时等待需求，回绕语义即"错误即醒"是安全侧的有利方向；若需真实延时另设计（P3 记录） |
 | OBS-013（门禁 flaky 治理，2026-09-04，插曲 1/2） | 门禁间歇性红：**类型 I** 时序 flake（等断窗口不足→整行缺，如插曲 1 deepfork 退出码缺行、B test-socket F-0a wait_for 20s 超时、C test-qemu abuse 超时、D DHCP 时序级联；均在等断函数、零打点）；**类型 II** 断言/实现缺陷（行在场但格式不符，如插曲 2 test_serial 长名 `run=[1-9]` 在 10ms tick 边界误判 run=0ms 合法快执行） | 治理三层（Commit 1~4，ops 已批准 Commit 1）：① **打点**——三脚本 wait_for/wait_after 每断言恰打一行 `$BUILD/assert_timing_<script>.tsv`（断言名\t耗时ms\tok\|timeout，250ms 轮询粒度），FAIL/超时打 LOG 尾 ~20 行现场；随 CI artifact 上传，经 `tr2sqlite.py --assert-timing` 导入、`baseline_check.py --asserts` 跨轮 P50/P95 基线。② **分类口径**——**假失败必先看 FAIL 现场**，整行缺=类型 I（窗口/重试，留待 B2 打点数据后再议放宽 timeout），行在格式不符=类型 II（断言根修，如插曲 2 已收敛 `run=[0-9]+`）；禁止无分类归档。③ **断言名即 RR 基线 key**，改名即新基线，须保持稳定。目标：类型 I 靠数据积累后按 B2 流程提案，类型 II 当场根修；本轮不动 B2 20s 阈值、不新增 job/不改 job 名 |

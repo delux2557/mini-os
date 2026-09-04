@@ -171,7 +171,8 @@ void netsock_dhcp_open(void) {
 
 /* 排空网卡并取一条 DHCP 应答载荷（BOOTP 内容，可直接交 dhcp_parse_reply）；
  * 返回载荷长度；0=无；-1=失败。非阻塞（与轮询驱动一致）。 */
-int netsock_dhcp_recv(uint8_t *buf, uint32_t max) {
+int netsock_dhcp_recv(uint8_t *buf, uint32_t max,
+                      uint32_t *src_ip, uint16_t *src_port) {
     if (dhcp_sock < 0) netsock_dhcp_open();
     if (dhcp_sock < 0) return -1;
     netsock_drain();                    /* 排空网卡（MMIO 访问在适配层切内核页目录） */
@@ -180,6 +181,8 @@ int netsock_dhcp_recv(uint8_t *buf, uint32_t max) {
     uint32_t n = socks[dhcp_sock].rxlen[h];
     if (n > max) n = max;
     for (uint32_t i = 0; i < n; i++) buf[i] = socks[dhcp_sock].rxb[h][i];
+    if (src_ip)   *src_ip   = socks[dhcp_sock].rxsip[h];
+    if (src_port) *src_port = socks[dhcp_sock].rxsport[h];
     socks[dhcp_sock].rx_head = (h + 1) % NET_RXQ;
     return (int)n;
 }

@@ -199,15 +199,39 @@ static void print_ip(uint32_t ip) {
 
 /* 单次非阻塞收帧：只取 DHCP 67->68 且本事务(xid) 的应答，置出参返回 1；否则 0。
  * v0.28：经 netsock 端口 68 专用 socket 读取（用户 socket 的 recvfrom 会"排空"网卡、
- * 抢先消费无匹配端口的 DHCP 应答，见 netsock.c；socket 队列与用户流量共享分发路径）。 */
+ * 抢先消费无匹配端口的 DHCP 应答，见 netsock.c；socket 队列与用户流量共享分发路径）。
+ * A-2 ① DHCP 应答源校验（RFC 2131 §4.1 校验义务，红队 C2 enabler）：
+ * 以前只顾端口 68 + 可预测 xid 分发、不验源；现在收包处要求 op==BOOTREPLY、UDP 源端口
+ * ==67、若已绑定 server（dhcp_server_ip!=0）则源 IP 必须匹配，否则整包丢弃并打一行日志。
+ * SLIRP 服务器源为 10.0.2.2:67，现有续约流程天然通过，零回归。 */
 static int dhcp_poll_once(uint8_t *mt, uint32_t *yi, uint32_t *si,
                           uint32_t *rt, uint32_t *ls) {
     /* SEC-07：原用 bootp[NET_RXMAX]=2048，在 IRQ0 中断栈上叠加溢出 4KB。
      * DHCP 报文上限 = RFC 2131 最小 IP 重组缓冲 576B，此处钳到恰好容纳一条 DHCP
      * 应答即可（netsock_dhcp_recv 按 max 截断，超长截断后 parse 拒绝，不越界）。 */
     uint8_t bootp[576];
-    int n = netsock_dhcp_recv(bootp, sizeof(bootp));
+    uint32_t src_ip = 0;
+    uint16_t src_port = 0;
+    int n = netsock_dhcp_recv(bootp, sizeof(bootp), &src_ip, &src_port);
     if (n <= 0) return 0;
+    /* A-2 ①：源校验——非 BOOTREPLY / 非 67 源端口 / 已绑定则源 IP 不匹配，一律丢弃 */
+    if (n < 4) return 0;                                   /* 浅包无法验 op，丢弃 */
+    if (bootp[0] != 2) {                                   /* op == BOOTREPLY */
+        serial_printf("[dhcp] drop: op=%u != BOOTREPLY\n", (unsigned)bootp[0]);
+        return 0;
+    }
+    if (src_port != DHCP_SERVER_PORT) {
+        serial_printf("[dhcp] drop: src port %u != 67\n", (unsigned)src_port);
+        return 0;
+    }
+    if (dhcp_server_ip != 0 && src_ip != dhcp_server_ip) {
+        serial_puts("[dhcp] drop: src ip mismatch (bound ");
+        print_ip(dhcp_server_ip);
+        serial_puts(", got ");
+        print_ip(src_ip);
+        serial_puts(")\n");
+        return 0;
+    }
     return dhcp_parse_reply(bootp, (uint32_t)n, dhcp_xid, mt, yi, si, rt, ls) == 0;
 }
 

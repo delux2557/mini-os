@@ -3,6 +3,42 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4.17] - 2026-09-05 · OBS 观察工程化（R1/R2/R3）+ 加固 A-2（BUG-073+）
+
+> **OBS 观察工程化**（红队/评估观察入库收尾）：
+> - **R1（串口 kb 通道告警，OBS-R1）**：kb 通道对 ≥0x80 单字节静默丢弃（实测非 ASCII 载荷逐字节丢失且无告警）。
+>   改 `kb_feed_char` 对非 ASCII 高位字节累计计数，行结束/取行时若计数>0 打印 `[kb] N non-ascii bytes dropped`
+>   （纯 ASCII 全链路零新输出）。仍不做 UTF-8 全支持/转义通道（另立项）。
+> - **R2（cc500 文法文档对齐，OBS-R2）**：README"用局部数组替代"表述与实现不符（statement() 无 `[` 分支，
+>   局部数组同样被拒）。改文档为"数组声明不支持（局部与全局均不支持），对已有缓冲的下标访问 `p[i]` 仍支持"，不扩文法。
+> - **R3（fs 固定槽位句柄契约，OBS-R3）**：`sys_fs_open(fd,name,mode)` 的 **fd 是调用方写死的固定槽位号，返回值
+>   0=成功 / -1=失败**（红队 D2 曾把返回 0 当"成功句柄"致后续 fs 操作全被 -1 拒的假阳性）。`user_lib.h` 新增
+>   `open_at(fd,name,mode)` 包装 + 契约注释；fsdemo 改用之冒烟。
+>
+> **加固 A-2**：
+> - **① DHCP 应答源校验**（红队 C2 enabler，RFC 2131 §4.1）：续约应答不再只按"端口 68 + 可预测 xid"分发。
+>   `dhcp_poll_once` 收包处要求 op==BOOTREPLY、UDP 源端口==67、已绑定则源 IP 匹配 `dhcp_server_ip`，否则整包丢弃并打一行日志
+>   （SLIRP 源 10.0.2.2:67 天然通过，test-net 零回归）。`netsock_dhcp_recv` 扩展出参暴露源 IP/端口。
+> - **② syscall 负参/哨兵语义清理**（BUG-067 延续）：`sys_sem_create` 负 init → 显式拒绝（SEM-1 审计误报根因）；
+>   fs_seek 负/巨大偏移按无符号原生存放，越界由 read/write fail-closed（补注释）；brk 上下界原已钳位。全部处理原则汇总为
+>   `usermode.c` syscall_dispatch 头部"参数语义表"（① id/槽位双检 ② 指针整区校验 ③ 长度/容量 clamp ④ 有符号语义拒绝 ⑤ 地址/偏移）。
+> - **③ docs/reference/security.md**：安全威胁模型显式化（信任边界 / 取舍 / 已知观察对账 / 新件自查清单），接入 docs/README。
+
+**Engineered**
+
+* [src/drv/kb.c](../../v2-c-kernel/src/drv/kb.c)：非 ASCII 丢弃计数 + 行结束/取行上报（OBS-R1）。
+* [src/app/user_lib.h](../../v2-c-kernel/src/app/user_lib.h) + [fsdemo.c](../../v2-c-kernel/src/app/fsdemo.c)：`open_at`/`sys_fs_*` 包装 + 契约注释（OBS-R3）。
+* [src/net/netsock.c](../../v2-c-kernel/src/net/netsock.c) + [netsock.h](../../v2-c-kernel/src/net/netsock.h)：`netsock_dhcp_recv` 出参暴露源 IP/端口。
+* [src/drv/e1000.c](../../v2-c-kernel/src/drv/e1000.c)：`dhcp_poll_once` 加 op/源端口/源 IP 三重校验 + 丢弃日志（A-2 ①）。
+* [src/kernel/usermode.c](../../v2-c-kernel/src/kernel/usermode.c)：`sys_sem_create` 负 init 拒绝 + fs_seek 注释 + dispatch 头部"参数语义表"（A-2 ②）。
+* [README.md](../../README.md)、[docs/reference/bugs.md](../../docs/reference/bugs.md)、[docs/reference/security.md](../../docs/reference/security.md)、[docs/README.md](../../docs/README.md)：R2/R3 + security.md + BUG/OBS 登记。
+
+**自测实录**
+
+* `make`（-Werror）干净；`make test-host` pass 全绿；`make test-serial` / `make test-net` 全绿。
+* 手验：DHCP 续约源校验——SLIRP 应答（10.0.2.2:67）通过、错误源 UDP 注入被拒并出 `[dhcp] drop:` 日志（验证后临时代码已还原）。
+* Docs：bugs.md 登记 OBS-R1/R2/R3（已修复）+ BUG-073（加固 A-2）。
+
 ## [v1.4.16] - 2026-09-05 · 加固 A-1：内核 SSP + panic 寄存器/调用栈回溯 + ring3 chaos 探针（BUG-072+）
 
 > 承接 #69（异常族单点已清）后的可观测性加固：编译期兜底 + 故障可观测性两层，非单一崩点修复。
