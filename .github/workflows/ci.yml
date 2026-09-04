@@ -8,9 +8,20 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # 编译硬化门禁（P1）：危险 libc 调用检查——秒级，独立并行 job，最先红绿可见。
+  # 不放 make test 前序，避免一条慢链把快门禁拖住。
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 危险 libc 门禁（banned libc）
+        run: make lint
+        working-directory: v2-c-kernel
+
   # 主门禁：job 名保持 test（main 分支保护 required check 绑定该名，勿改）
   test:
-    runs-on: ubuntu-latest
+    # 固定 ubuntu-24.04 钉住 gcc 13.3，防 ubuntu-latest 滚版本导致告警集漂移（P1 编译硬化）
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +51,7 @@ jobs:
   # - make test-repro   ：repro_bugs.sh（BUG-A/BUG-B 不复现 + F6 argv 生效硬断言）
   # - make test-tcp-attack：test_tcp_attack.sh（F3 端口占用→exit 2 环境病，不误杀）
   regression-rr:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
