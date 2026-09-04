@@ -264,6 +264,9 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
 
     p->pid = pid;
     p->parent_pid = current_pid;   /* v0.14: 记录父进程 */
+    /* BUG-058：spawn 继承发起进程的 syscall 掩码，避免受限 agent 经 spawn 生出"无掩码"
+     * 子进程绕过最小权限。boot/shell 从 idle(pid=0, sc_mask=0) 继承故仍为 0，不受影响。 */
+    p->sc_mask = procs[current_pid].sc_mask;
     set_name(p, name);
     p->entry_off = 0;
     p->state = PROC_READY;
@@ -385,6 +388,7 @@ int sched_fork(registers_t *r) {
 
     c->pid = pid;
     c->parent_pid = p->pid;   /* v0.14: fork 子进程的父进程 = 当前（父）进程 */
+    c->sc_mask = p->sc_mask;  /* BUG-058：fork 继承父进程 syscall 掩码 */
     c->state = PROC_READY;
     set_name(c, p->name);
     c->entry_off = 0;
@@ -500,6 +504,8 @@ int sched_exec(registers_t *r, const char *name, uint32_t pd,
      * 干净的 fd 表开始（与"释放旧地址空间、重建堆"的镜像替换语义自洽）。若保留旧 fd，新程序
      * open 同号会因占位返回 -1（如 cc500 场景踏坑）。 */
     memset8((uint8_t *)p->fd_table, 0, sizeof(p->fd_table));
+    /* BUG-058：sc_mask 刻意保留（exec 不清零）。否则受限 agent 直接 exec /shell 即自提权；
+     * "exec 保留" 是 per-process syscall 掩码的核心安全性质。 */
 
     /* 就地改写当前中断帧为新程序入口现场：
      * schedule() 保存的 kernel_esp 即 r，下次切回时 iret 从新入口执行。
