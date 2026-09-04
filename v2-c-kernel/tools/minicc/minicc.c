@@ -1,5 +1,5 @@
 /* mini-os/v2-c-kernel/tools/minicc/minicc.c
- * minicc —— mini-os 自研小型 C 编译器（V2a：AST 引入，int-only 语义与 V1 等价）。
+ * minicc —— mini-os 自研小型 C 编译器（V2c：字符串/char + syscall3 stub，产物可 I/O）。
  *
  * 版权与许可：
  *   Copyright (C) 2026 mini-os authors
@@ -8,15 +8,18 @@
  *   全新的独立实现（MIT），用于逐步取代 cc500 作为 mini-os 的板载编译器。
  *
  * 架构（详见 docs/design/minicc-design.md）：
- *   V1 为单遍直接生成（无 AST）；V2a 起引入显式 AST：Parser 建树、Codegen 遍历。
- *   设计决策 4.3：解引用/复合类型需要"先解析后决定生成策略"，故在本版本引入 AST，
- *   为 V2b 指针/解引用与语义分析（Mock 单测）打基础。int-only 语义与 V1 完全等价，
- *   make test-minicc 应保持全绿（本版是纯结构重构 + 测试锁定）。
+ *   V1 为单遍直接生成（无 AST）；V2a 起引入显式 AST：Parser 建树、Codegen 遍历；
+ *   V2b 引入类型系统与指针（TY_INT/TY_PTR）；V2c 引入 TY_CHAR 与字符串字面量
+ *   （只读数据段 + 隐式 char*），并为隐式声明的 syscall3 生成 int $0x80 包装，
+ *    使编译产物可做可观察 I/O（sys_print/文件），打通 guest"写-编-跑"的观察闭环。
  *
- * 当前子集（int-only，与 V1 相同）：
- *   类型 int；字面量十进制；局部/参数/全局变量（全局仅常量初始化）；
- *   + - * / % < <= > >= == != && || ! 一元负号、赋值；{} if/else while return 表达式语句；
- *   多参数函数、递归、前向调用；块注释与 // 行注释。
+ * 当前子集（V2c）：
+ *   类型 int / char / int* / char*（无多级指针）；字面量十进制 + 字符串 + 字符；
+ *   字符串字面量（\n \t \\ \" \' \0 \xNN 转义，≤254 字节，入只读数据段，隐式 char*）；
+ *   局部/参数/全局变量（全局仅常量初始化）；+ - * / % < <= > >= == != && || !
+ *   一元负号、赋值；& 取地址、* 解引用（按基类型缩放/读写宽度）；{} if/else while
+ *   return 表达式语句；多参数函数、递归、前向调用；块注释与 // 行注释；
+ *   隐式声明并调用 syscall3(n,a,b,c)（编译器生成机器码 stub）。
  *
  * 代码生成（x86 32 位，直出 ELF32）：
  *   - 标准 ebp 栈帧；表达式值在 eax；二元运算 push 左操作数。
@@ -24,6 +27,7 @@
  *   - ELF 布局：0x00 头+程序头，0x54 入口 stub
  *       call main ; mov %eax,%ebx ; xor %eax,%eax ; int $0x80
  *     （main 返回值作 sys_exit 退出码：mini-os ABI eax=号 ebx=a 返回 ebx）。
+ *   - char 值无符号（movzbl 读 / mov %al 写）；指针算术按基类型缩放（int×4，char×1）。
  *
  * 运行环境：guest 由 minicc_crt.c 提供 syscall3（int $0x80）；host 由
  *   tools/minicc/host_crt.c 提供（Linux 文件模拟）。仅依赖 syscall3(0/1/13/14/15/16/17/19/35)。
@@ -110,12 +114,13 @@ static void save32(int pos, int v) {
 
 #define SYM_MAX 512
 enum { K_FUNC, K_GLOBAL, K_LOCAL, K_ARG };
-enum { TY_INT, TY_PTR };        /* V2b：int 与 int*（多级指针不支持） */
+enum { TY_INT, TY_CHAR, TY_PTR };   /* V2c：char（无符号）加入；指针存 bty 基类型 */
 
 typedef struct {
     char name[32];
     int kind;
-    int ty;                     /* TY_INT / TY_PTR */
+    int ty;                     /* TY_INT / TY_CHAR / TY_PTR */
+    int bty;                    /* 指针基类型（ty==TY_PTR 时有效：TY_INT / TY_CHAR） */
     int val;                    /* FUNC: 代码偏移(未定义=-1)；GLOBAL: 数据偏移；
                                    LOCAL: 局部序号；ARG: 参数序号 */
 } Sym;
@@ -129,11 +134,12 @@ static int sym_find(const char *name) {
     return -1;
 }
 
-static int sym_add(const char *name, int kind, int ty, int val) {
+static int sym_add(const char *name, int kind, int ty, int bty, int val) {
     if (nsym >= SYM_MAX) fail("symbol table full");
     s_cpy(syms[nsym].name, name);
     syms[nsym].kind = kind;
     syms[nsym].ty = ty;
+    syms[nsym].bty = bty;
     syms[nsym].val = val;
     return nsym++;
 }
@@ -190,7 +196,7 @@ static void patch_lab(int lab, int target) {
 /* ================= AST ================= */
 
 enum {
-    ND_NUM, ND_VAR, ND_FUNCALL,
+    ND_NUM, ND_STR, ND_VAR, ND_FUNCALL,   /* V2c：ND_STR 字符串字面量（ival=池偏移） */
     ND_ADD, ND_SUB, ND_MUL, ND_DIV, ND_MOD,
     ND_EQ, ND_NE, ND_LT, ND_LE, ND_GT, ND_GE,
     ND_AND, ND_OR, ND_NEG, ND_NOT, ND_ASSIGN,
@@ -202,17 +208,18 @@ enum {
 typedef struct Node Node;
 struct Node {
     int kind;
-    int ty;             /* TY_INT / TY_PTR：表达式类型（VAR/DEREF/ADD 等） */
+    int ty;             /* TY_INT / TY_CHAR / TY_PTR：表达式类型（VAR/DEREF/ADD 等） */
+    int bty;            /* V2c：指针基类型（ty==TY_PTR 时有效；DEREF 结果的类型来源） */
     Node *l, *r;        /* 二元操作数；ASSIGN: l=左值 r=右值；IF: l=cond r=then；
                            WHILE: l=cond r=body；RET: l=表达式；NOT/NEG/ADDR/DEREF: l=操作数 */
     Node *a, *b;        /* FUNCALL: a=实参链表；FUNC: a=形参链表 b=函数体；
                            IF: b=else 分支（可空）；BLOCK: a=语句链表 */
     Node *next;         /* 语句/实参/形参链表的后继 */
-    int val;            /* NUM: 数值；DECL: 局部槽位；FUNC/GVAR: 符号下标；VAR: 无 */
+    int val;            /* NUM: 数值；STR: 无；DECL: 局部槽位；FUNC/GVAR: 符号下标；VAR: 无 */
     int vkind, vslot;   /* VAR: 变量类别（K_LOCAL/K_ARG/K_GLOBAL）与槽位序号（local/arg）——
                            节点脱离符号表自携带，作用域恢复丢弃符号后仍可正确生成 */
     char vname[32];     /* VAR: 全局变量名（patch 用） */
-    int ival;           /* GVAR: 常量初始化值（无初始化=0） */
+    int ival;           /* STR: 字符串池偏移；GVAR: 常量初始化值（无初始化=0） */
     int nargs, nlocals; /* FUNC: 形参个数 / 局部变量总数（帧大小=4*nlocals）；FUNCALL: 实参个数 */
     char name[32];      /* FUNC/GVAR/FUNCALL: 名字 */
 };
@@ -221,6 +228,7 @@ static Node *node_new(int kind) {
     Node *n = (Node *)xmalloc(sizeof(Node));
     n->kind = kind;
     n->ty = TY_INT;
+    n->bty = 0;
     n->l = n->r = n->a = n->b = n->next = NULL;
     n->val = n->vkind = n->vslot = n->ival = n->nargs = n->nlocals = 0;
     n->vname[0] = 0;
@@ -238,7 +246,9 @@ static int frame_patch;             /* prologue `sub esp,imm32` 的 imm 位置 *
 static void emit_mov_imm(int v) { emit1(0xB8); emit4(v); }
 static void emit_lea_ebp(int disp) { emit_op("\x8d\x85"); emit4(disp); }
 static void emit_load(void) { emit1(0x8B); emit1(0x00); }        /* mov (%eax),%eax */
+static void emit_load8(void) { emit1(0x0F); emit1(0xB6); emit1(0x00); } /* movzbl (%eax),%eax（char 无符号读；勿用 emit_op：\x00 截断） */
 static void emit_store(void) { emit_op("\x5b\x89\x03"); }        /* pop %ebx; mov %eax,(%ebx) */
+static void emit_store8(void) { emit_op("\x5b\x88\x03"); }       /* pop %ebx; mov %al,(%ebx) */
 static void emit_test(void) { emit_op("\x85\xc0"); }
 static void emit_epilogue(void) { emit_op("\x89\xec\x5d\xc3"); } /* mov %esp,%ebp; pop %ebp; ret */
 
@@ -249,20 +259,53 @@ static void emit_add_esp(int n4) {
 
 /* ================= 词法 ================= */
 
-#define TOK_MAX 64
+#define TOK_MAX 256            /* V2c：字符串字面量上限 254 字节（含解码） */
 static const unsigned char *src;
 static int src_len;
 static int src_pos;
 static char tok[TOK_MAX];
 static int tok_is_word;
 static int tok_is_num;
+static int tok_is_str;         /* V2c：字符串字面量（tok=解码字节，toklen=长度） */
+static int tok_is_char;        /* V2c：字符字面量（tok[0]=解码值 0..255） */
+static int toklen;             /* V2c：tok 解码字节数（字符串可含内嵌 \0） */
 
 static int peekc(void)  { return src_pos < src_len ? src[src_pos] : -1; }
 static int peekc2(void) { return src_pos + 1 < src_len ? src[src_pos + 1] : -1; }
 
 const char *tokbuf_current(void) { return tok; }
 
+/* 读取 src 处转义序列（src_pos 已越过 '\'），返回解码值；非法转义报错。
+ * 借鉴 cc500 已验证的 \xNN/\n/\t 解码，并补充 \\ \" \' \0。 */
+static int decode_escape(void) {
+    int e = peekc();
+    if (e < 0 || e == '\n') fail("bad escape");
+    src_pos++;
+    if (e == 'n') return 10;
+    if (e == 't') return 9;
+    if (e == '\\') return '\\';
+    if (e == '"') return '"';
+    if (e == '\'') return '\'';
+    if (e == '0') return 0;
+    if (e == 'x') {
+        int v = 0, got = 0;
+        for (int k = 0; k < 2; k++) {
+            int h = peekc();
+            if (h >= '0' && h <= '9') v = v * 16 + (h - '0');
+            else if (h >= 'a' && h <= 'f') v = v * 16 + (h - 'a' + 10);
+            else if (h >= 'A' && h <= 'F') v = v * 16 + (h - 'A' + 10);
+            else break;
+            src_pos++; got = 1;
+        }
+        if (!got) fail("bad \\x escape");
+        return v;
+    }
+    fail("bad escape");
+    return 0;
+}
+
 static void next_tok(void) {
+    tok_is_word = 0; tok_is_num = 0; tok_is_str = 0; tok_is_char = 0;
     for (;;) {
         int c = peekc();
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { src_pos++; continue; }
@@ -282,7 +325,7 @@ static void next_tok(void) {
         }
         break;
     }
-    if (peekc() < 0) { tok[0] = 0; tok_is_word = 0; tok_is_num = 0; return; }
+    if (peekc() < 0) { tok[0] = 0; toklen = 0; return; }
 
     int c = src[src_pos++];
     if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
@@ -295,7 +338,8 @@ static void next_tok(void) {
             else break;
         }
         tok[n] = 0;
-        tok_is_word = 1; tok_is_num = 0;
+        toklen = n;
+        tok_is_word = 1;
         return;
     }
     if (c >= '0' && c <= '9') {
@@ -310,7 +354,36 @@ static void next_tok(void) {
         if (peekc() == '_' || (peekc() >= 'a' && peekc() <= 'z') ||
             (peekc() >= 'A' && peekc() <= 'Z'))
             fail("bad number");
-        tok_is_word = 0; tok_is_num = 1;
+        toklen = n;
+        tok_is_num = 1;
+        return;
+    }
+    if (c == '"') {                     /* 字符串字面量（V2c）：解码入 tok，EOF/\n 守卫 */
+        int n = 0;
+        for (;;) {
+            int d = peekc();
+            if (d < 0 || d == '\n') fail("unterminated string");
+            if (d == '"') { src_pos++; break; }
+            src_pos++;
+            if (d == '\\') d = decode_escape();
+            if (n >= TOK_MAX - 2) fail("string too long");   /* 契约：≤254 字节 */
+            tok[n++] = (char)d;
+        }
+        tok[n] = 0;
+        toklen = n;
+        tok_is_str = 1;
+        return;
+    }
+    if (c == '\'') {                    /* 字符字面量（V2c）：单字节，支持转义 */
+        int d = peekc();
+        if (d < 0 || d == '\n') fail("unterminated char");
+        src_pos++;
+        if (d == '\\') d = decode_escape();
+        if (peekc() != '\'') fail("char literal too long");
+        src_pos++;
+        tok[0] = (char)d; tok[1] = 0;
+        toklen = 1;
+        tok_is_char = 1;
         return;
     }
     int d = peekc();
@@ -319,18 +392,18 @@ static void next_tok(void) {
         (c == '&' && d == '&') || (c == '|' && d == '|')) {
         tok[0] = (char)c; tok[1] = (char)d; tok[2] = 0;
         src_pos++;
-        tok_is_word = 0; tok_is_num = 0;
+        toklen = 2;
         return;
     }
     if (c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
         c == '<' || c == '>' || c == '=' || c == '!' ||
         c == '(' || c == ')' || c == '{' || c == '}' || c == ';' || c == ',') {
         tok[0] = (char)c; tok[1] = 0;
-        tok_is_word = 0; tok_is_num = 0;
+        toklen = 1;
         return;
     }
     tok[0] = (char)c; tok[1] = 0;
-    tok_is_word = 0; tok_is_num = 0;
+    toklen = 1;
 }
 
 static int peek(const char *s) { return s_eq(s, tok); }
@@ -342,18 +415,47 @@ static void expect(const char *s) {
     if (!accept(s)) fail("expected token");
 }
 
-/* 读取类型声明中 `int` 之后的 `*` 数量（int 已被入口 accept 消费）；
- * 返回 TY_INT / TY_PTR（V2b 不支持多级指针） */
-static int type_after_int(void) {
+/* 读取类型声明（int/char 已被调用方 peek，此处消费关键字与 `*` 数量）；
+ * 返回 TY_INT / TY_CHAR / TY_PTR，指针基类型经 bty 输出（V2c 不支持多级指针） */
+static int decl_type(int *bty) {
+    int base = TY_INT;          /* 初始化避免 -Wmaybe-uninitialized（fail 非 noreturn） */
+    if (accept("int")) base = TY_INT;
+    else if (accept("char")) base = TY_CHAR;
+    else fail("expected type");
     int stars = 0;
     while (accept("*")) stars++;
     if (stars > 1) fail("unsupported: multi-level pointer");
-    return stars ? TY_PTR : TY_INT;
+    if (stars) { *bty = base; return TY_PTR; }
+    *bty = 0;
+    return base;
+}
+
+/* 类型等价（契约式语义检查）：指针须基类型一致；int/char 同属整型族可互转 */
+static int type_eq(int t1, int b1, int t2, int b2) {
+    if (t1 != t2) return t1 != TY_PTR && t2 != TY_PTR;
+    if (t1 != TY_PTR) return 1;
+    return b1 == b2;
 }
 
 /* ================= 语法分析（建树） ================= */
 
 static Node *expr(void);
+
+/* 字符串池（V2c）：字面量解码字节线性累积，codegen 时整体 emit 进数据段（只读）。
+ * strpool_base：池在 code 缓冲内的起始偏移（ELF 头 95 字节之后），ND_STR 寻址用。 */
+static unsigned char *strpool;
+static int nstrpool, strpool_cap;
+static int strpool_base;
+
+static void strpool_add(int b) {
+    if (nstrpool >= strpool_cap) {
+        int nc = strpool_cap ? strpool_cap * 2 : 1024;
+        unsigned char *np = (unsigned char *)xmalloc(nc);
+        for (int i = 0; i < nstrpool; i++) np[i] = strpool[i];
+        strpool = np; strpool_cap = nc;
+    }
+    strpool[nstrpool++] = (unsigned char)b;
+}
 
 static Node *primary(void) {
     Node *n;
@@ -367,6 +469,22 @@ static Node *primary(void) {
         next_tok();
         return n;
     }
+    if (tok_is_char) {                  /* 字符字面量：无符号 0..255，值为 int */
+        n = node_new(ND_NUM);
+        n->val = (unsigned char)tok[0];
+        next_tok();
+        return n;
+    }
+    if (tok_is_str) {                   /* 字符串字面量：入池，表达式为 char* */
+        n = node_new(ND_STR);
+        n->ty = TY_PTR;
+        n->bty = TY_CHAR;
+        n->ival = nstrpool;
+        for (int i = 0; i < toklen; i++) strpool_add((unsigned char)tok[i]);
+        strpool_add(0);                 /* NUL 终止 */
+        next_tok();
+        return n;
+    }
     if (tok_is_word) {
         char name[32];
         s_cpy(name, tok);
@@ -376,7 +494,7 @@ static Node *primary(void) {
             s_cpy(n->name, name);
             int si = sym_find(name);
             if (si >= 0 && syms[si].kind != K_FUNC) fail("call to non-function");
-            if (si < 0) sym_add(name, K_FUNC, TY_INT, -1);   /* 隐式声明 */
+            if (si < 0) sym_add(name, K_FUNC, TY_INT, 0, -1);   /* 隐式声明 */
             n->val = si < 0 ? nsym - 1 : si;         /* 符号下标 */
             expect("(");
             Node *head = NULL, **tail = &head;
@@ -394,6 +512,7 @@ static Node *primary(void) {
         if (si < 0) fail("undefined variable");
         n = node_new(ND_VAR);
         n->ty = syms[si].ty;
+        n->bty = syms[si].bty;
         n->vkind = syms[si].kind;
         n->vslot = syms[si].val;
         if (n->vkind == K_GLOBAL) s_cpy(n->vname, syms[si].name);
@@ -422,16 +541,17 @@ static Node *unary(void) {
     if (accept("&")) {
         Node *n = node_new(ND_ADDR);
         n->l = unary();
-        /* & 操作数必须可寻址（变量/解引用）；类型为指向其的指针 */
+        /* & 操作数必须可寻址（变量/解引用）；类型为指向其的指针（bty=操作数类型） */
         if (n->l->kind != ND_VAR && n->l->kind != ND_DEREF) fail("cannot take address");
         n->ty = TY_PTR;
+        n->bty = n->l->ty;
         return n;
     }
     if (accept("*")) {
         Node *n = node_new(ND_DEREF);
         n->l = unary();
         if (n->l->ty != TY_PTR) fail("dereference of non-pointer");
-        n->ty = TY_INT;
+        n->ty = n->l->bty;              /* 解引用结果类型 = 指针基类型 */
         return n;
     }
     return primary();
@@ -441,10 +561,12 @@ static Node *bin(Node *l, Node *r, int kind) {
     Node *n = node_new(kind);
     n->l = l;
     n->r = r;
-    /* 指针算术只对 +/- 传播指针类型；其余运算结果为 int */
+    /* 指针算术只对 +/- 传播指针类型（bty 随指针侧）；其余运算结果为 int */
     if ((kind == ND_ADD || kind == ND_SUB) &&
-        (l->ty == TY_PTR || r->ty == TY_PTR))
+        (l->ty == TY_PTR || r->ty == TY_PTR)) {
         n->ty = TY_PTR;
+        n->bty = l->ty == TY_PTR ? l->bty : r->bty;
+    }
     return n;
 }
 
@@ -506,7 +628,8 @@ static Node *expr(void) {
         a->l = n;               /* 左值（语法层不校验，codegen 时对非地址报错） */
         a->r = expr();          /* 右结合 */
         if (a->l->kind != ND_VAR && a->l->kind != ND_DEREF) fail("assign to non-lvalue");
-        if (a->l->ty != a->r->ty) fail("type mismatch in assignment");
+        if (!type_eq(a->l->ty, a->l->bty, a->r->ty, a->r->bty))
+            fail("type mismatch in assignment");
         return a;
     }
     return n;
@@ -515,6 +638,7 @@ static Node *expr(void) {
 /* ---- 语句 ---- */
 
 static int cur_nlocals;         /* 当前函数局部变量计数（帧槽位分配，块间不回收） */
+static int bty_top;             /* 顶层声明（函数/全局）的指针基类型（非指针时无意义） */
 
 static Node *stmt(void);
 
@@ -539,21 +663,21 @@ static Node *stmt(void) {
         next_tok();
         return block_stmt();
     }
-    if (accept("int")) {
-        /* 局部声明（`int x;` / `int* p;` / `int *p;`） */
-        int ty = type_after_int();
+    if (peek("int") || peek("char")) {
+        /* 局部声明（`int x;` / `char c;` / `int* p;` / `char *s;`） */
+        n = node_new(ND_DECL);
+        n->ty = decl_type(&n->bty);
         if (!tok_is_word) fail("expected identifier");
         char name[32];
         s_cpy(name, tok);
         next_tok();
         if (cur_nlocals >= 512) fail("too many locals");
-        n = node_new(ND_DECL);
-        n->ty = ty;
         n->val = cur_nlocals++;
-        sym_add(name, K_LOCAL, ty, n->val);
+        sym_add(name, K_LOCAL, n->ty, n->bty, n->val);
         if (accept("=")) {
             n->l = expr();
-            if (n->ty != n->l->ty) fail("type mismatch in initialization");
+            if (!type_eq(n->ty, n->bty, n->l->ty, n->l->bty))
+                fail("type mismatch in initialization");
         }
         expect(";");
         return n;
@@ -597,8 +721,8 @@ static Node **gvars_tail;
 static void parse_program(void) {
     for (;;) {
         if (tok[0] == 0) return;
-        if (!accept("int")) fail("expected 'int'");
-        int ty = type_after_int();
+        if (!peek("int") && !peek("char")) fail("expected type");
+        int ty = decl_type(&bty_top);   /* 函数返回类型或全局变量类型 */
         if (!tok_is_word) fail("expected identifier");
         char name[32];
         s_cpy(name, tok);
@@ -609,7 +733,7 @@ static void parse_program(void) {
             if (si >= 0) {
                 if (syms[si].kind != K_FUNC || syms[si].val >= 0) fail("redefined");
             } else {
-                si = sym_add(name, K_FUNC, TY_INT, -1);
+                si = sym_add(name, K_FUNC, TY_INT, 0, -1);
             }
             Node *fn = node_new(ND_FUNC);
             s_cpy(fn->name, name);
@@ -619,16 +743,14 @@ static void parse_program(void) {
             Node *params = NULL, **ptail = &params;
             if (!peek(")")) {
                 for (;;) {
-                    if (!accept("int")) fail("expected 'int' in parameters");
-                    int pty = type_after_int();
-                    if (!tok_is_word) fail("expected parameter name");
                     Node *p = node_new(ND_VAR);
+                    p->ty = decl_type(&p->bty);
+                    if (!tok_is_word) fail("expected parameter name");
                     s_cpy(p->name, tok);
                     next_tok();
-                    p->ty = pty;
                     p->vkind = K_ARG;
                     p->vslot = cur_nargs;
-                    sym_add(p->name, K_ARG, pty, cur_nargs);
+                    sym_add(p->name, K_ARG, p->ty, p->bty, cur_nargs);
                     *ptail = p; ptail = &p->next;
                     cur_nargs++;
                     if (!accept(",")) break;
@@ -643,17 +765,25 @@ static void parse_program(void) {
             nsym = func_scope;
             *funcs_tail = fn; funcs_tail = &fn->next;
         } else {
-            /* ---- 全局变量 ---- */
+            /* ---- 全局变量（仅常量初始化：十进制数字或字符字面量） ---- */
             if (sym_find(name) >= 0) fail("redefined");
             Node *g = node_new(ND_GVAR);
             s_cpy(g->name, name);
-            int si = sym_add(name, K_GLOBAL, ty, 0);
+            g->ty = ty;
+            g->bty = bty_top;
+            int si = sym_add(name, K_GLOBAL, ty, bty_top, 0);
             g->val = si;
             if (accept("=")) {
-                if (!tok_is_num) fail("global init must be a constant");
-                g->ival = 0;
-                for (int i = 0; tok[i]; i++) g->ival = g->ival * 10 + (tok[i] - '0');
-                next_tok();
+                if (tok_is_num) {
+                    g->ival = 0;
+                    for (int i = 0; tok[i]; i++) g->ival = g->ival * 10 + (tok[i] - '0');
+                    next_tok();
+                } else if (tok_is_char) {
+                    g->ival = (unsigned char)tok[0];
+                    next_tok();
+                } else {
+                    fail("global init must be a constant");
+                }
             }
             expect(";");
             *gvars_tail = g; gvars_tail = &g->next;
@@ -685,9 +815,14 @@ static void gen_addr(Node *n) {
 static void gen(Node *n) {
     switch (n->kind) {
     case ND_NUM: emit_mov_imm(n->val); return;
+    case ND_STR:
+        emit_mov_imm((int)(CODE_BASE + (uint32_t)(strpool_base + n->ival))); /* char* -> 数据段 */
+        return;
     case ND_VAR:
     case ND_DEREF:
-        gen_addr(n); emit_load(); return;
+        gen_addr(n);
+        if (n->ty == TY_CHAR) emit_load8(); else emit_load();
+        return;
     case ND_ADDR:
         gen_addr(n->l); return;     /* &x：值 = x 的地址 */
     case ND_NEG: gen(n->l); emit_op("\xf7\xd8"); return;
@@ -698,19 +833,23 @@ static void gen(Node *n) {
     case ND_ASSIGN:
         gen_addr(n->l); emit1(0x50);
         gen(n->r);
-        emit_store();
+        if (n->l->ty == TY_CHAR) emit_store8(); else emit_store();
         return;
     case ND_ADD:
         gen(n->l); emit1(0x50); gen(n->r);
-        /* 指针算术：int 侧按元素尺寸（4 字节）缩放 */
-        if (n->l->ty == TY_PTR && n->r->ty != TY_PTR) emit_op("\xc1\xe0\x02");   /* shl $2,%eax */
-        else if (n->l->ty != TY_PTR && n->r->ty == TY_PTR) emit_op("\xc1\xe3\x02"); /* shl $2,%ebx */
+        /* 指针算术：按基类型缩放（int×4，char×1 不缩放） */
+        if (n->l->ty == TY_PTR && n->r->ty != TY_PTR) {
+            if (n->l->bty == TY_INT) emit_op("\xc1\xe0\x02");       /* shl $2,%eax */
+        } else if (n->l->ty != TY_PTR && n->r->ty == TY_PTR) {
+            if (n->r->bty == TY_INT) emit_op("\xc1\xe3\x02");       /* shl $2,%ebx */
+        }
         emit_op("\x5b\x01\xd8");
         return;
     case ND_SUB:
         gen(n->l); emit1(0x50); gen(n->r);
-        if (n->l->ty == TY_PTR && n->r->ty != TY_PTR) emit_op("\xc1\xe0\x02");
-        else if (n->r->ty == TY_PTR) fail("invalid pointer subtraction");
+        if (n->l->ty == TY_PTR && n->r->ty != TY_PTR) {
+            if (n->l->bty == TY_INT) emit_op("\xc1\xe0\x02");       /* shl $2,%eax */
+        } else if (n->r->ty == TY_PTR) fail("invalid pointer subtraction");
         emit_op("\x5b\x29\xc3\x89\xd8");
         return;
     case ND_MUL: gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x0f\xaf\xc3"); return;
@@ -773,7 +912,7 @@ static void gen_stmt(Node *n) {
             emit_lea_ebp(-4 * (n->val + 1));    /* 槽位地址（ND_DECL 直接算，不经 gen_addr） */
             emit1(0x50);
             gen(n->l);
-            emit_store();
+            if (n->ty == TY_CHAR) emit_store8(); else emit_store();
         }
         return;
     case ND_IF: {
@@ -903,7 +1042,7 @@ int minicc_main(char *argv, int argc) {
     code = (unsigned char *)xmalloc(8192);
     code_cap = 8192;
     code_len = 0;
-    nsym = 0; npatch = 0; nlab = 0;
+    nsym = 0; npatch = 0; nlab = 0; nstrpool = 0;
     funcs = NULL; funcs_tail = &funcs;
     gvars = NULL; gvars_tail = &gvars;
     src = in_data;
@@ -927,8 +1066,32 @@ int minicc_main(char *argv, int argc) {
         for (int i = 0; i < 95; i++) emit1(hdr[i]);
     }
     patch_add("main", 0x55, P_CALL);
+    strpool_base = code_len;
+    for (int i = 0; i < nstrpool; i++) emit1(strpool[i]);   /* V2c：字符串池（数据段，只读） */
     for (Node *g = gvars; g; g = g->next) gen_global(g);
     for (Node *f = funcs; f; f = f->next) gen_func(f);
+    /* V2c：为隐式声明的 syscall3 生成 int $0x80 包装（用户显式定义则跳过，作普通函数）。
+     * 产物因此可声明并调用 syscall3(n,a,b,c) 做可观察 I/O（sys_print/文件）。
+     * 注意：隐式声明发生在函数体内、作用域恢复后符号不可见，故以 patch 表扫描触发，
+     * 需用时重新登记符号——否则 finish() 会按"undefined function"报错。 */
+    for (int i = 0; i < npatch; i++) {
+        if (patches[i].kind != P_CALL || !s_eq(patches[i].name, "syscall3")) continue;
+        int ss = sym_find("syscall3");
+        if (ss < 0) ss = sym_add("syscall3", K_FUNC, TY_INT, 0, -1);
+        if (syms[ss].val < 0) {
+            syms[ss].val = code_len;
+            emit_op("\x55\x89\xe5");            /* push %ebp; mov %esp,%ebp */
+            emit_op("\x8b\x45\x14");            /* mov 20(%ebp),%eax  n（minicc 约定：
+                                                   参数从左到右 push，第 i 个形参在 [ebp+8+4*(n-1-i)]，
+                                                   故第 1 个参数在最深偏移 8+4*(4-1)=20） */
+            emit_op("\x8b\x5d\x10");            /* mov 16(%ebp),%ebx  a */
+            emit_op("\x8b\x4d\x0c");            /* mov 12(%ebp),%ecx  b */
+            emit_op("\x8b\x55\x08");            /* mov 8(%ebp),%edx   c */
+            emit1(0xCD); emit1(0x80);           /* int $0x80 */
+            emit_op("\x5d\xc3");                /* pop %ebp; ret */
+        }
+        break;
+    }
     finish();
 
     if (write_output(out_path) != 0) {
