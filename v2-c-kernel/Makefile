@@ -132,7 +132,7 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 #    （那会剥掉 ELF 头，内核的 elf_load 需要解析程序头）
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash
+APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash sandboxdemo
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -157,6 +157,8 @@ $(BUILD)/apps/args.elf: $(BUILD)/apps/args.o $(BUILD)/apps/crt.o
 $(BUILD)/apps/stackovf.elf: $(BUILD)/apps/stackovf.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/cansmash.elf: $(BUILD)/apps/cansmash.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+$(BUILD)/apps/sandboxdemo.elf: $(BUILD)/apps/sandboxdemo.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/deep.elf: $(BUILD)/apps/deep.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<

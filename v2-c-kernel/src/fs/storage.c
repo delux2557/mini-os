@@ -84,6 +84,7 @@ extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 extern char _binary_httpdemo_elf_start[], _binary_httpdemo_elf_end[];  /* v1.1 Step 4 虚拟 TCP */
 extern char _binary_dldemo_elf_start[],    _binary_dldemo_elf_end[];    /* v1.2 大文件下载 */
 extern char _binary_cansmash_elf_start[], _binary_cansmash_elf_end[];   /* v1.5 P2 栈金丝雀 */
+extern char _binary_sandboxdemo_elf_start[], _binary_sandboxdemo_elf_end[]; /* v0.34 BUG-058 */
 
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
     int ino = fs_create(fs_device(), name);
@@ -179,6 +180,10 @@ static void initramfs_setup(void) {
     initramfs_file("cansmash",
                    _binary_cansmash_elf_start,
                    (uint32_t)(_binary_cansmash_elf_end - _binary_cansmash_elf_start));
+    /* v0.34 BUG-058 per-process syscall 掩码演示（shell `run sandboxdemo`）*/
+    initramfs_file("sandboxdemo",
+                   _binary_sandboxdemo_elf_start,
+                   (uint32_t)(_binary_sandboxdemo_elf_end - _binary_sandboxdemo_elf_start));
 }
 
 void storage_init(void) {

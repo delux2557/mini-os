@@ -45,6 +45,7 @@
 #define SYS_NET_CLOSE   33  /* v0.20: 关闭 socket */
 #define SYS_KERN_AUDIT  34  /* v0.21: 内核自审计（帧配平/信号量守恒/PCB 状态机） */
 #define SYS_BRK         35  /* v0.26#2: 用户堆（brk/sbrk） */
+#define SYS_LIMIT       36  /* v0.34 BUG-058: per-process syscall 掩码（只收窄） */
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {
@@ -117,6 +118,29 @@ static inline uint32_t sys_sbrk(int32_t incr) {
     if (sys_brk(nbrk) == 0) return old;
     return (uint32_t)-1;
 }
+
+/* v0.34 BUG-058 per-process syscall 掩码（最小权限）：
+ * sys_limit(mask_lo, mask_hi) 只收窄（内核与当前掩码 |），无放宽。bit i = 禁用 syscall i。
+ * 掩码位以"开放面/封闭面"两类宏给出，dev 组合时勿误禁生存必需项：
+ *   exit(0) / print(1) / getpid(5) / sleep(3) / yield(4) 等不在禁用建议内。 */
+static inline uint32_t sys_limit(uint32_t mask_lo, uint32_t mask_hi) {
+    return syscall3(SYS_LIMIT, mask_lo, mask_hi, 0);
+}
+#define SC_SEN   (1ull << 31)   /* net_sendto */
+#define SC_RECV  (1ull << 32)   /* net_recvfrom */
+#define SC_NETC  (1ull << 33)   /* net_close */
+#define SC_NET   (SC_SEN | SC_RECV | SC_NETC)      /* 整条网络面 */
+#define SC_FSC   (1ull << 13)   /* fs_create */
+#define SC_FSO   (1ull << 14)   /* fs_open（写/追加口）*/
+#define SC_FSW   (1ull << 15)   /* fs_write */
+#define SC_FSR   (1ull << 16)   /* fs_read（dev 按需取舍，非必须禁）*/
+#define SC_FSD   (1ull << 19)   /* fs_delete */
+#define SC_FSM   (1ull << 27)   /* fs_mkdir */
+#define SC_FSRD  (1ull << 28)   /* fs_rmdir */
+#define SC_FSS   (1ull << 29)   /* fs_sync */
+#define SC_FS_W  (SC_FSC | SC_FSO | SC_FSW | SC_FSD | SC_FSM | SC_FSRD | SC_FSS)
+#define SC_LIMIT_LO(m) ((uint32_t)((m) & 0xFFFFFFFFull))
+#define SC_LIMIT_HI(m) ((uint32_t)(((m) >> 32) & 0xFFFFFFFFull))
 
 /* ---- 打印工具（十进制 / 十六进制） ---- */
 static inline void user_putdec(uint32_t n) {

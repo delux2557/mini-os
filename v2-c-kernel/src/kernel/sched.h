@@ -89,6 +89,10 @@ typedef struct {
     fs_file_t fd_table[FS_FDS_PER_PROC]; /* v0.31（per-process fd）：本进程打开文件表。
                                               v0.8-v0.30 为全局 fs_files[]（跨进程互污染/泄漏，
                                               BUG-031）；改造后每进程独立，fork 复制、exec/exit 清空 */
+    /* BUG-058 per-process syscall 掩码（最小权限，seccomp 教学版）：
+     * 0 = 无限制；bit i = 禁用 syscall i。语义三件套：fork 继承 / exec 保留 / 只能单向收窄
+     * （sys_limit 仅 |=，无清位/放宽路径）。uint64 以覆盖到 SYS_LIMIT(36) 的编号。 */
+    uint64_t sc_mask;
 } pcb_t;
 
 /* 由 isr.s 提供：无条件切到目标 esp 并 ret（不返回） */
