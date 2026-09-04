@@ -282,6 +282,89 @@ int main(void) {
         CHECK_EQ(fs_rmdir(&bd, "/rosec05"), 0);
     }
 
+    /* ---- RD3 红队第三轮：fs 读/写/目录遍历的块号信任（BUG-069 RD3-V2 / BUG-070 RD3-V1）----
+     * 恶意镜像篡改 inode 的 blocks[]/indirect，若把"数据区块号"直接用于 blockdev 寻址且不校验：
+     *  V2：块号指向 inode 表（如 3）→ 读/写别名作用于 inode 表，静默击穿 BUG-057 系统文件只读；
+     *  V1：越界块号（0xFFFFFFF0）→ blockdev_ptr 返 NULL → 调用方解引用崩（ASan SEGV）。
+     * 修复（blk_valid 推广到一切寻址路径）：损坏块号在读写返回 0/-1 被拒、目录遍历跳过损坏块。
+     * 注：用原始内存偏移直改 inode 槽模拟被篡改镜像；全部用例自行回收 inode，扰动下方 8) 预算。 */
+    {
+        /* ---- V2：文件名块号指向 inode 表，不得别名读写 / 击穿 BUG-057 ---- */
+        int va = fs_create(&bd, "/rd3v2_a");          /* 普通文件 A */
+        CHECK(va >= 0);
+        int vp = fs_create(&bd, "/rd3v2_p");          /* 受保护文件 P */
+        CHECK(vp >= 0);
+        CHECK_EQ(fs_write(&bd, (uint32_t)va, "OLD", 0, 3), 3);
+        CHECK_EQ(fs_write(&bd, (uint32_t)vp, "PROT", 0, 4), 4);
+        CHECK_EQ(fs_protect(&bd, "/rd3v2_p"), 0);
+        CHECK_EQ(fs_is_ro(&bd, (uint32_t)vp), 1);
+        /* 篡改 A 的 blocks[0]=3（inode 表块）：读/写须拒绝，不得落到 inode 表 */
+        fs_inode_t *avin = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)va * sizeof(fs_inode_t));
+        uint32_t v2sav = avin->blocks[0];
+        avin->blocks[0] = 3u;                          /* 指向 inode 表 */
+        memset(buf, 0, sizeof(buf));
+        CHECK(fs_read(&bd, (uint32_t)va, buf, 0, 3) < 3);       /* 拒绝/截断，不读回 inode 表 */
+        CHECK_EQ(fs_write(&bd, (uint32_t)va, "X", 0, 1), -1);   /* 首块损坏 → -1，不写 inode 表 */
+        /* P 只读位与内容未被 A 的"写 inode 表"链路击穿 */
+        CHECK_EQ(fs_is_ro(&bd, (uint32_t)vp), 1);
+        memset(buf, 0, sizeof(buf));
+        CHECK_EQ(fs_read(&bd, (uint32_t)vp, buf, 0, 4), 4);
+        CHECK(strcmp(buf, "PROT") == 0);
+        CHECK_EQ(fs_write(&bd, (uint32_t)vp, "x", 0, 1), -1);   /* P 仍只读 */
+        avin->blocks[0] = v2sav;                        /* 恢复后正常清理 */
+        CHECK_EQ(fs_delete(&bd, "/rd3v2_a"), 0);
+        CHECK_EQ(fs_delete(&bd, "/rd3v2_p"), -1);       /* P 只读不可删，清位回收 */
+        ((fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)vp * sizeof(fs_inode_t)))->mode = 0;
+        CHECK_EQ(fs_delete(&bd, "/rd3v2_p"), 0);
+    }
+
+    {
+        /* ---- V1a：文件直接块=0xFFFFFFF0：读截断为 0、写返 -1，不崩 ---- */
+        int f1 = fs_create(&bd, "/rd3v1_f");
+        CHECK(f1 >= 0);
+        CHECK_EQ(fs_write(&bd, (uint32_t)f1, "hello", 0, 5), 5);
+        fs_inode_t *f1in = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)f1 * sizeof(fs_inode_t));
+        uint32_t v1sav = f1in->blocks[0];
+        f1in->blocks[0] = 0xFFFFFFF0u;
+        memset(buf, 0, sizeof(buf));
+        CHECK_EQ(fs_read(&bd, (uint32_t)f1, buf, 0, 5), 0);     /* 损坏点截断 */
+        CHECK_EQ(fs_write(&bd, (uint32_t)f1, "X", 0, 1), -1);   /* 首块损坏 → -1 */
+        f1in->blocks[0] = v1sav;
+        CHECK_EQ(fs_delete(&bd, "/rd3v1_f"), 0);
+
+        /* ---- V1b：间接块指针=0xFFFFFFF0：间接区读截断为 0、写返 -1，不崩 ---- */
+        int f2 = fs_create(&bd, "/rd3v1_i");
+        CHECK(f2 >= 0);
+        uint32_t cap2 = FS_DIRECT_BLOCKS * BLOCK_SIZE;
+        CHECK_EQ(fs_write(&bd, (uint32_t)f2, "tail", (int)cap2, 4), 4);  /* 分配间接块区 */
+        CHECK(fs_size(&bd, (uint32_t)f2) > cap2);
+        fs_inode_t *f2in = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)f2 * sizeof(fs_inode_t));
+        uint32_t v2sid = f2in->indirect;
+        f2in->indirect = 0xFFFFFFF0u;
+        memset(buf, 0, sizeof(buf));
+        CHECK_EQ(fs_read(&bd, (uint32_t)f2, buf, (int)cap2, 4), 0);    /* 间接区读截断 */
+        CHECK_EQ(fs_write(&bd, (uint32_t)f2, "X", (int)cap2, 1), -1);  /* 首块(间接)损坏 → -1 */
+        f2in->indirect = v2sid;
+        CHECK_EQ(fs_delete(&bd, "/rd3v1_i"), 0);
+
+        /* ---- V1c：目录直接块=0xFFFFFFF0：lookup/list 跳过损坏块、不崩 ---- */
+        int d1 = fs_mkdir(&bd, "/rd3v1_d");
+        CHECK(d1 >= 0);
+        int de = fs_create(&bd, "/rd3v1_d/x.txt");
+        CHECK(de >= 0);
+        fs_inode_t *din = (fs_inode_t *)(mem + (3u * BLOCK_SIZE) + (uint32_t)d1 * sizeof(fs_inode_t));
+        uint32_t dv[FS_DIRECT_BLOCKS];
+        for (int k = 0; k < FS_DIRECT_BLOCKS; k++) dv[k] = din->blocks[k];
+        for (int k = 0; k < FS_DIRECT_BLOCKS; k++) din->blocks[k] = 0xFFFFFFF0u; /* 全损 */
+        fs_dir_entry_t sub[8];
+        CHECK_EQ(fs_lookup_in(&bd, (uint32_t)d1, "x.txt"), -1);  /* 损坏块被跳过 → 找不到 */
+        CHECK_EQ(fs_list_dir(&bd, (uint32_t)d1, sub, 8), 0);     /* 全损 → 空列表，不崩 */
+        for (int k = 0; k < FS_DIRECT_BLOCKS; k++) din->blocks[k] = dv[k];  /* 恢复 */
+        CHECK_EQ(fs_lookup_in(&bd, (uint32_t)d1, "x.txt"), de);  /* 正常对照：校验不误伤 */
+        CHECK_EQ(fs_delete(&bd, "/rd3v1_d/x.txt"), 0);
+        CHECK_EQ(fs_rmdir(&bd, "/rd3v1_d"), 0);
+    }
+
     /* 8) inode 耗尽：用完剩余 inode 后创建失败（x.txt/y.txt 已占 2 个 + 3a) 的只读
      *   /sys.txt 占 1 个，加上根目录共 4 个已占用，故最多再建 FS_MAX_INODES-4 个） */
     int created = 0;
