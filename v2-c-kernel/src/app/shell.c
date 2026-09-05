@@ -47,6 +47,55 @@ static int tokenize(char *line, char *tok[], uint32_t max) {
     return (int)n;
 }
 
+/* ---- syscall#37 动态自发现：盘点文件系统，列出"在机程序/工具文件/目录" ----
+ * 用 sys_fs_readdir 枚举根目录（条目 \n 分隔、目录尾带 /），open+读 4 字节判 ELF 魔数，
+ * 标 [run]/[file]/[dir]。嵌入新 ELF 即自动出现在 help，无需手改——替掉原来只举例演示的
+ * 静态 run 列表，对齐 Unix `ls /bin` 发现式帮助（工具是文件、不是命令，help 盘点它们）。 */
+static void help_inventory(void) {
+    char buf[1024];
+    int n = sys_fs_readdir("/", buf, (uint32_t)sizeof(buf));
+    if (n < 0) { sys_print("  (readdir fail)\n"); return; }
+    sys_print("== 在机程序 / 工具文件（ls / 自发现）==\n");
+    int runs = 0, files = 0;
+    uint32_t i = 0;
+    while (i < (uint32_t)n) {
+        uint32_t s = i;
+        while (i < (uint32_t)n && buf[i] != '\n') i++;
+        uint32_t e = i;
+        if (i < (uint32_t)n) i++;                 /* 跳过 \n */
+        if (e <= s) continue;
+        int isdir = (buf[e - 1] == '/');
+        if (isdir) {
+            sys_print("  [dir]  ");
+        } else {
+            /* 用全路径 open+读 4 字节判 ELF（"文件即程序"盘点） */
+            char path[32];
+            uint32_t k = 1, j = s;
+            path[0] = '/';
+            for (; j < e && k < 31; j++) path[k++] = buf[j];
+            path[k] = 0;
+            int iself = 0;
+            if ((int)syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 0) == 0) {
+                char hdr[4];
+                int rn = (int)syscall3(SYS_FS_READ, 1, (uint32_t)hdr, 4);
+                syscall3(SYS_FS_CLOSE, 1, 0, 0);
+                if (rn >= 4 && hdr[0] == 0x7f && hdr[1] == 'E' &&
+                    hdr[2] == 'L' && hdr[3] == 'F') iself = 1;
+            }
+            sys_print(iself ? "  [run]  " : "  [file] ");
+            if (iself) runs++; else files++;
+        }
+        uint32_t j;
+        for (j = s; j < e; j++) { char c[2] = { buf[j], 0 }; sys_print(c); }
+        sys_print("\n");
+    }
+    sys_print("  (runable  ");
+    user_putdec((uint32_t)runs);
+    sys_print(" | file  ");
+    user_putdec((uint32_t)files);
+    sys_print(")\n");
+}
+
 static void cmd_help(void) {
     sys_print("mini-os shell commands:\n");
     sys_print("  help            show this help\n");
@@ -55,18 +104,20 @@ static void cmd_help(void) {
     sys_print("  mkdir <path>    create directory\n");
     sys_print("  rmdir <path>    remove empty directory\n");
     sys_print("  rm <path>       delete file\n");
-    sys_print("  run <prog>      load and run ELF app (hello/echo/crash/isol/forkdemo)\n");
-    sys_print("  exec <prog> [a] fork + exec app with argv (forkdemo/args)\n");
+    sys_print("  run <prog>      load+run ELF app (see in-machine programs below)\n");
+    sys_print("  exec <prog> [a] fork + exec app with argv (see below)\n");
     sys_print("  save            write FS back to disk (v0.16 persist)\n");
     sys_print("  netping [ip][p] UDP ping to host echo (v0.22, default 10.0.2.2:7777)\n");
     sys_print("  ccboot          self-host bootstrap: cc500 compiles itself twice (v0.27)\n");
     sys_print("  writefile <p> <c> write file (content = rest of line, v0.27b)\n");
     sys_print("  writefile <<D <p> multi-line write until lone D line (heredoc, v1.4)\n");
+    sys_print("  patch <p> <ln> <txt>  replace line ln of file, in-guest edit (v1.9)\n");
     sys_print("  ccrun <src> <out> cc500 compile then run (write-compile-run, v0.27b)\n");
     sys_print("  micc <src> <out>  minicc compile then run (V1 int-only self-host)\n");
     sys_print("  miccboot        minicc self-host: P1 compiles itself -> P2, verify P1==P2 (V3)\n");
     sys_print("  selftest        run all demos, print one-line PASS/FAIL (agent-verifiable)\n");
     sys_print("  exit            quit shell\n");
+    help_inventory();
 }
 
 static void cmd_save(void) {
@@ -524,6 +575,107 @@ static void cmd_writefile(char *args) {
     nl_end();
 }
 
+/* ---- v1.9: patch —— 按行替换（自含开发：改已落盘源码一行，无需整文件重写）----
+ * 用法: patch <path> <lineno> <newtext>
+ * 语义: 读整文件到缓冲，将第 lineno 行替换为 newtext（保留行尾换行结构），写回。
+ * 与 writefile heredoc 互补：heredoc 重写整文件，patch 增量改一行。 */
+#define PATCH_MAX_FILE 65536
+#define PATCH_MAX_LINE 256
+static char patch_in[PATCH_MAX_FILE];     /* 读入缓冲（文件原始内容） */
+static char patch_out[PATCH_MAX_FILE];    /* 重建缓冲（替换后内容） */
+
+static uint32_t parse_u32(const char *s, int *ok) {
+    uint32_t v = 0; int got = 0;
+    for (; *s >= '0' && *s <= '9'; s++) { v = v * 10 + (uint32_t)(*s - '0'); got = 1; }
+    if (ok) *ok = got;
+    return v;
+}
+
+static void cmd_patch(char *args) {
+    char path[64];
+    uint32_t i = 0, j = 0;
+    while (args[i] == ' ') i++;
+    while (args[i] && args[i] != ' ' && j < 63) path[j++] = args[i++];
+    path[j] = 0;
+    while (args[i] == ' ') i++;
+    int ok_line = 0;
+    uint32_t lineno = parse_u32(&args[i], &ok_line);
+    while (args[i] && args[i] != ' ') i++;
+    while (args[i] == ' ') i++;
+    char *newtext = &args[i];
+    if (!path[0] || !ok_line || lineno < 1) {
+        sys_print("usage: patch <path> <lineno> <newtext>\n"); return;
+    }
+
+    /* ---- 读整个文件到缓冲 ---- */
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 0) != 0) {
+        sys_print("[patch] cannot open '"); sys_print(path); sys_print("'\n"); return;
+    }
+    uint32_t flen = 0;
+    for (;;) {
+        uint32_t room = PATCH_MAX_FILE - flen;   /* 余量：读入不得超过缓冲末尾 */
+        uint32_t req = room > 512 ? 512 : room;
+        if (req == 0) break;
+        int n = (int)syscall3(SYS_FS_READ, 1, (uint32_t)(patch_in + flen), req);
+        if (n <= 0) break;
+        flen += (uint32_t)n;
+        if (flen >= PATCH_MAX_FILE) {
+            sys_print("[patch] file too big\n"); syscall3(SYS_FS_CLOSE, 1, 0, 0); return;
+        }
+    }
+    syscall3(SYS_FS_CLOSE, 1, 0, 0);
+
+    /* ---- 重建：逐行复制，第 lineno 行替换为 newtext ---- */
+    uint32_t o = 0, p = 0, ln = 1;
+    int replaced = 0;
+    for (;;) {
+        if (p >= flen) break;
+        uint32_t line_start = p;
+        while (p < flen && patch_in[p] != '\n') p++;
+        int has_nl = (p < flen);              /* 该行是否以 \n 结尾 */
+        uint32_t line_end = p;                /* 不含 \n */
+        if (!replaced && ln == lineno) {
+            for (j = 0; newtext[j]; j++) {
+                if (o >= PATCH_MAX_FILE - 1) { sys_print("[patch] output too big\n"); return; }
+                patch_out[o++] = newtext[j];
+            }
+            if (has_nl) patch_out[o++] = '\n';
+            replaced = 1;
+        } else {
+            uint32_t k;
+            for (k = line_start; k <= line_end; k++) {
+                if (o >= PATCH_MAX_FILE) { sys_print("[patch] output too big\n"); return; }
+                if (k < flen) patch_out[o++] = patch_in[k];
+            }
+        }
+        if (has_nl) p++;                      /* 跳过 \n，进入下一行 */
+        ln++;
+    }
+
+    /* 无换行结尾且未命中：追加 newtext 作为最后一行 */
+    (void)0;
+    if (!replaced) {
+        sys_print("[patch] line not found (file has ");
+        user_putdec(ln - 1); sys_print(" lines)\n");
+        return;
+    }
+
+    /* ---- 写回（沿用 writefile 的 delete+create+write 原子重建模式） ---- */
+    syscall3(SYS_FS_DELETE, (uint32_t)path, 0, 0);
+    if ((int)syscall3(SYS_FS_CREATE, (uint32_t)path, 0, 0) < 0) {
+        sys_print("[patch] create fail '"); sys_print(path); sys_print("'\n"); return;
+    }
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 1) != 0) {
+        sys_print("[patch] open fail '"); sys_print(path); sys_print("'\n"); return;
+    }
+    if ((int)syscall3(SYS_FS_WRITE, 1, (uint32_t)patch_out, o) != (int)o) {
+        sys_print("[patch] write fail\n");
+    }
+    syscall3(SYS_FS_CLOSE, 1, 0, 0);
+    sys_print("[patch] '"); sys_print(path);
+    sys_print("' line "); user_putdec(lineno); sys_print(" <- "); sys_print(newtext); sys_print("\n");
+}
+
 /* B1/B4 工具：轻量字符串拼接（无 libc）。B4 把判据行先拼入缓冲再单次 sys_print，
  * 避免多次 sys_print 之间被其它串口输出插入，导致 wait_for 的 grep 判据匹配失败（F-0a 撕裂族）。 */
 static int cc_append(char *buf, int k, const char *s) {
@@ -622,6 +774,7 @@ void app_main(int argc, char **argv) {
         else if (user_strcmp(cmd, "netping") == 0) cmd_netping(arg);
         else if (user_strcmp(cmd, "ccboot") == 0)  cmd_ccboot();
         else if (user_strcmp(cmd, "writefile") == 0) cmd_writefile(arg);
+        else if (user_strcmp(cmd, "patch") == 0)  cmd_patch(arg);
         else if (user_strcmp(cmd, "ccrun") == 0)  cmd_ccrun(arg);
         else if (user_strcmp(cmd, "micc") == 0)   cmd_minicc(arg);
         else if (user_strcmp(cmd, "miccboot") == 0) cmd_miccboot();
