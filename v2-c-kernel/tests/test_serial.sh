@@ -336,6 +336,21 @@ wait_for "writefile heredoc 写多行" "\[writefile\] '/multi.c' wrote [1-9][0-9
 send "ccrun /multi.c /multi.elf"
 wait_for "heredoc 源码可编译"      "cc500: compiled OK"
 wait_for "heredoc 源码可运行 PASS" "\[ccrun\] '/multi.elf' exited code=0 PASS"
+# ---- P1(.rc)：source <rcfile> 逐行执行脚本（纯用户态，无内核改动）----
+# 用 heredoc 写一个含注释/空行的 rc 脚本，source 它应逐行执行（mkdir+ls），
+# 注释行 `#` 与空行必须被跳过（不得当作 unknown command 报错）。
+send 'writefile <<EOF /test.rc'
+send '# test rc script（注释行应被跳过）'
+send 'mkdir /rc_dir'
+send ''
+send 'ls /rc_dir'
+send 'EOF'
+wait_for "rc 脚本入账"     "\[writefile\] '/test.rc' wrote .* (heredoc)"
+send 'source /test.rc'
+wait_for "rc 执行 mkdir"   "\[shell\] mkdir '/rc_dir' -> "   # mkdir 返回 inode（非 0），只断言命令已执行
+wait_for "rc 执行 ls"      "\[ls\] /rc_dir:"
+send 'rmdir /rc_dir'
+wait_for "rc 清理 rmdir"   "\[shell\] rmdir '/rc_dir' -> 0"
 # ---- v0.14 文件系统增强 ----
 send "mkdir /sd1"
 wait_for "mkdir 返回"          "\[shell\] mkdir '/sd1' -> "
