@@ -125,6 +125,14 @@
 
 **验收**：P1==P2 仍逐字节一致；44+guest 全绿；全局可变状态数量有可核对的下降。
 
+**进度（阶段 1 已完成，2026-09-05）**：
+- 方案：**单结构体 `CC` + 单实例 `static CC cc;` + `#define` 别名**（Option A）。
+- 把 **33 处文件级可变全局**按 6 组收进 `cc_t`（输入/词法、Token、输出码流、符号表、补丁/标签、codegen 态、字符串池、AST 链、输入文件）。
+- **关键决策**：只收敛 `minicc.c`；`minicc_self.c` 完全未动 → 完美规避"struct 在 minicc 子集不可用"的约束，两版行为一致性不变（miccboot 证明）。
+- 类型前置：CC 结构需要 `Sym/Patch/Lab/Node` + `SYM_MAX/PATCH_MAX/LAB_MAX/TOK_MAX`，且 `src` 等在 `fail()`（首个使用点）之前就用，故把 4 个类型定义 + 容量宏 + CC 结构 + 别名整体前置到 include 之后；`s_cpy` 形参 `src` 改名 `sp` 避开别名冲突。
+- **验证**：miccboot P1==P2 逐字节一致 ✓；test_minicc 宿主 51 全绿 ✓；`gcc -m32 -Wall -Wextra -Werror` 编译零告警 ✓。
+- **阶段 2（后续切片）**：视需要逐组摘除 `#define`、把 `cc` 显式穿针进 lexer/parser/codegen 签名（真正类成 `cc_t*` 注入点），或据此为 `minicc.c` 引入 Mock 单测注入。
+
 ***
 
 ## 任务 6（P3，单独立项）：cc500 退役路线（F6）
