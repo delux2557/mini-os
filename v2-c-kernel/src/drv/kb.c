@@ -65,6 +65,19 @@ static void kb_report_drops(void) {
     }
 }
 
+/* ---- F10/task3b：行溢出（静默截断）告警 ----
+ * readline 行缓冲上限 KB_LINE_MAX=128：可打印字符在行已满仍被丢弃 -> 整行在 128B 处被
+ * 静默截断，外部 agent 源码写入会莫名失败（如 micc input open fail）。与 OBS-R1 同款：
+ * 只在"行已满再收到可打印字符"置位、行结束打印一次提示，对纯短行零影响（无新输出）。 */
+static int kb_line_overlong = 0;
+static void kb_report_overlong(void) {
+    if (kb_line_overlong) {
+        serial_printf("[kb] warning: input line >%dB truncated; use writefile <<DELIM heredoc for long content\n",
+                      KB_LINE_MAX);
+        kb_line_overlong = 0;
+    }
+}
+
 static void kb_cb(registers_t *r) {
     (void)r;
     kb_feed_scan(inb(0x60));
@@ -72,7 +85,7 @@ static void kb_cb(registers_t *r) {
 
 void kb_set_line_hook(kb_line_hook_t fn) { line_hook = fn; }
 
-void kb_line_reset(void) { line_len = 0; line_ready = 0; }
+void kb_line_reset(void) { line_len = 0; line_ready = 0; kb_line_overlong = 0; }
 
 int kb_line_ready(void) { return line_ready; }
 
@@ -86,6 +99,7 @@ int kb_line_take(char *out, uint32_t max) {
     line_ready = 0;
     line_len = 0;
     kb_report_drops();   /* OBS-R1: 取行后同样兜底上报（换行上报已重置，此处恒零或补报） */
+    kb_report_overlong(); /* F10: 取行后兜底上报截断提示（同 OBS-R1，已重置则恒零） */
     return (int)n;
 }
 
@@ -101,12 +115,16 @@ int kb_feed_char(char c) {
             line_buf[line_len] = 0;
             line_ready = 1;
             kb_report_drops();      /* OBS-R1: 行结束即上报本行丢弃的非 ASCII 字节数 */
+            kb_report_overlong();   /* F10: 行结束上报本行是否被 128B 截断（如超长应提示用 heredoc） */
             if (line_hook) line_hook();
         }
     } else if ((unsigned char)c >= 0x80u) {
         kb_nonascii_dropped++;      /* OBS-R1: 非 ASCII 高位字节不入行缓冲，累计计数 */
     } else if (c >= 32) {      /* 可打印字符：行未就绪才入行缓冲（v0.30 防两行合并） */
-        if (!line_ready && line_len < KB_LINE_MAX) line_buf[line_len++] = c;
+        if (!line_ready) {
+            if (line_len < KB_LINE_MAX) line_buf[line_len++] = c;
+            else kb_line_overlong = 1;   /* 行满：丢弃本字符、标记本行被截断（KB_LINE_MAX 上限） */
+        }
     }
     /* 字符环形缓冲，供 idle 实时回显（含退格/回车） */
     int next = (head + 1) % KB_BUF;
