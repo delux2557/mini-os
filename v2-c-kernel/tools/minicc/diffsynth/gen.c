@@ -21,8 +21,8 @@ static int rbool(void){ return (int)(rnd()&1u); }
 
 enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
        F_LOGIC=1<<4, F_IF=1<<5, F_WHILE=1<<6, F_FOR=1<<7, F_BIT=1<<8,
-       F_GLOBAL=1<<9, F_ARRAY=1<<10, F_PTR=1<<11 };
-#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR)
+       F_GLOBAL=1<<9, F_ARRAY=1<<10, F_PTR=1<<11, F_FUNC=1<<12 };
+#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC)
 /* cc500 保守基座（2026-09-05 实测校准：hostcc 探测 rc——global/array/ptr/for/~/^ 全部拒，
  * 支持 & | << 与 char；故不给 cc500 开 F_GLOBAL/F_ARRAY/F_PTR/F_FOR/F_BIT，与实测一致） */
 #define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE)
@@ -36,7 +36,7 @@ static int has(int f){ return g_caps & f; }
 #define MAXP 2
 #define ASZ  5                 /* 数组容量（下标 0..ASZ-1，指针解引用不越界） */
 static char varnames[MAXV][4];
-static int nvars, ng, na, npa;
+static int nvars, ng, na, npa, nf;
 
 #define CLAMP_MAX (1<<28)
 static void clamp_iv(long *lo,long *hi){ if(*lo<-CLAMP_MAX)*lo=-CLAMP_MAX; if(*hi>CLAMP_MAX)*hi=CLAMP_MAX; }
@@ -54,7 +54,7 @@ static void build_lvals(void){
 static const char *pick_lval(void){ return lvals[rndi(0,nlv-1)]; }
 
 static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
-    enum { E_CON,E_VAR,E_GVAR,E_IDX,E_DREF,
+    enum { E_CON,E_VAR,E_GVAR,E_IDX,E_DREF,E_CALL,
            E_ADD,E_SUB,E_MUL,E_DIV,E_CMP,E_LOG,E_AND,E_OR,E_XOR,E_SHR,E_NOT };
     enum { MAXDEPTH=4 };
     if(depth>=MAXDEPTH){
@@ -66,6 +66,7 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
     if(has(F_GLOBAL)&&ng>0)    picks[np++]=E_GVAR;
     if(has(F_ARRAY)&&na>0)      picks[np++]=E_IDX;
     if(has(F_PTR)  && npa>0)    picks[np++]=E_DREF;
+    if(has(F_FUNC) && nf>0)     picks[np++]=E_CALL;
     if(has(F_ARITH)){ picks[np++]=E_ADD; picks[np++]=E_SUB; if(nvars>0)picks[np++]=E_MUL; }
     if(has(F_ARITH)&&!suppress_div&&nvars>0) picks[np++]=E_DIV;
     if(has(F_CMP))    picks[np++]=E_CMP;
@@ -78,6 +79,9 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
     case E_GVAR:{ int i=rndi(0,ng-1); sprintf(dst,"G%d",i); *lo=0;*hi=100; return; }
     case E_IDX:{ int i=rndi(0,na-1),j=rndi(0,ASZ-1); sprintf(dst,"a%d[%d]",i,j); *lo=0;*hi=100; return; }
     case E_DREF:{ int i=rndi(0,npa-1),k=rndi(0,ASZ-1); sprintf(dst,"*(p%d+%d)",i,k); *lo=0;*hi=100; return; }
+    case E_CALL:{ int i=rndi(0,nf-1),a=rndi(0,6);
+        /* 递归参数喂 0..6 小字面量 → 深度有界、值域有界（sum≤21 / fib≤13），确定终止且无 UB */
+        sprintf(dst,"h%d(%d)",i,a); *lo=0; *hi=100; return; }
     case E_ADD: case E_SUB: case E_MUL: case E_DIV:{
         const char *op="+-*/"; char l[128],r[128]; long ll,lh;
         expr_gen(l,depth+1,&ll,&lh,1); const char *opc=&op[k-E_ADD];
@@ -123,12 +127,22 @@ static void stmt_gen(int depth){
     else{ printf("  {int _i; for(_i=0;_i<8;_i=_i+1){ %s=%s+1; }}\n",lv,lv); }
 }
 
+/* 递归辅助函数：固定安全模板，纯函数、参数作深度界限。
+ * h0 = sum(n)=n<=0?0:n+h0(n-1)（线性递归，深压栈帧）；h1 = fib(n)=n<=1?1:h1(n-1)+h1(n-2)。
+ * 只用 int/if-else/return/本地声明/算术/递归——minicc 子集可编，且无副作用、确定终止。 */
+static void emit_funcs(void){
+    nf = has(F_FUNC)?2:0;
+    if(nf>=1) printf("int h0(int n){ int r; if(n<=0){ r=0; } else { r=n+h0(n-1); } return r; }\n");
+    if(nf>=2) printf("int h1(int n){ int r; if(n<=1){ r=1; } else { r=h1(n-1)+h1(n-2); } return r; }\n");
+}
+
 static void emit_program(int nv,int nstmts){
     nvars = nv<1?1:(nv>MAXV?MAXV:nv);
     ng  = has(F_GLOBAL)?MAXG:0;
     na  = has(F_ARRAY)?MAXA:0;
     npa = has(F_PTR)&&na>0?MAXP:0;
     for(int i=0;i<nvars;i++) sprintf(varnames[i],"v%d",i);
+    emit_funcs();
     if(ng>0){ printf("int G0;\n"); if(ng>1) printf("int G1;\n"); }
     printf("int main(){\n");
     for(int i=0;i<nvars;i++) printf("  int %s;\n",varnames[i]);
