@@ -79,9 +79,13 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
     case E_GVAR:{ int i=rndi(0,ng-1); sprintf(dst,"G%d",i); *lo=0;*hi=100; return; }
     case E_IDX:{ int i=rndi(0,na-1),j=rndi(0,ASZ-1); sprintf(dst,"a%d[%d]",i,j); *lo=0;*hi=100; return; }
     case E_DREF:{ int i=rndi(0,npa-1),k=rndi(0,ASZ-1); sprintf(dst,"*(p%d+%d)",i,k); *lo=0;*hi=100; return; }
-    case E_CALL:{ int i=rndi(0,nf-1),a=rndi(0,6);
-        /* 递归参数喂 0..6 小字面量 → 深度有界、值域有界（sum≤21 / fib≤13），确定终止且无 UB */
-        sprintf(dst,"h%d(%d)",i,a); *lo=0; *hi=100; return; }
+    case E_CALL:{ int i=rndi(0,nf-1); char a[128]; long l0,h0v;
+        /* 递归参数 = 任意窄值表达式，再按位掩码限幅到非负窄区间 (e & m)：
+         * e 由生成器保证无 UB；m ∈ {3,7} ⇒ 结果 ∈ [0,3]/[0,7]，深度/值域有界（sum≤28/fib≤21），
+         * 对负 e 仍得非负（& 高位置 0）——深度有界纪律不破。让调用参数多样化以增覆盖。 */
+        expr_gen(a,depth+1,&l0,&h0v,0);
+        int m=(rbool()?7:3);
+        sprintf(dst,"h%d(((%s)&%d))",i,a,m); *lo=0; *hi=100; return; }
     case E_ADD: case E_SUB: case E_MUL: case E_DIV:{
         const char *op="+-*/"; char l[128],r[128]; long ll,lh;
         expr_gen(l,depth+1,&ll,&lh,1); const char *opc=&op[k-E_ADD];
