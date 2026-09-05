@@ -92,6 +92,25 @@ extern char _binary_sandboxdemo_elf_start[], _binary_sandboxdemo_elf_end[]; /* v
 extern char _binary_badinsn_elf_start[], _binary_badinsn_elf_end[];   /* SEC-01 回归: ring3 ud2 (#UD) */
 extern char _binary_chaos_elf_start[], _binary_chaos_elf_end[];       /* 加固 A-1 ④: ring3 随机坏指令探针 */
 
+/* ---- V4 mini-Csmith guest 差分（方案 B，仅 GUEST_DIFF=1 时启用） ----
+ * 差分对拍把 minicc 编译的随机样本 .elf 嵌入 initramfs，guest 内 `run dsXX` 拿语义退码
+ * 与 gcc 参考差分。默认构建不 -DGUEST_DIFF ⇒ 零侵入（这些符号/文件不存在也不引用）。
+ * 样本 .elf 由 tools/minicc/diffsynth/gen_guest_elfs.sh 构建期生成（ds00..ds11）。 */
+#ifdef GUEST_DIFF
+extern char _binary_ds00_elf_start[], _binary_ds00_elf_end[];
+extern char _binary_ds01_elf_start[], _binary_ds01_elf_end[];
+extern char _binary_ds02_elf_start[], _binary_ds02_elf_end[];
+extern char _binary_ds03_elf_start[], _binary_ds03_elf_end[];
+extern char _binary_ds04_elf_start[], _binary_ds04_elf_end[];
+extern char _binary_ds05_elf_start[], _binary_ds05_elf_end[];
+extern char _binary_ds06_elf_start[], _binary_ds06_elf_end[];
+extern char _binary_ds07_elf_start[], _binary_ds07_elf_end[];
+extern char _binary_ds08_elf_start[], _binary_ds08_elf_end[];
+extern char _binary_ds09_elf_start[], _binary_ds09_elf_end[];
+extern char _binary_ds10_elf_start[], _binary_ds10_elf_end[];
+extern char _binary_ds11_elf_start[], _binary_ds11_elf_end[];
+#endif
+
 static void initramfs_file(const char *name, const void *data, uint32_t len) {
     int ino = fs_create(fs_device(), name);
     if (ino < 0) {
@@ -212,6 +231,21 @@ static void initramfs_setup(void) {
     initramfs_file("chaos",
                    _binary_chaos_elf_start,
                    (uint32_t)(_binary_chaos_elf_end - _binary_chaos_elf_start));
+#ifdef GUEST_DIFF
+    /* V4 mini-Csmith guest 差分：批量嵌入随机样本，shell `run dsXX` 取语义退码 */
+    initramfs_file("ds00", _binary_ds00_elf_start, (uint32_t)(_binary_ds00_elf_end - _binary_ds00_elf_start));
+    initramfs_file("ds01", _binary_ds01_elf_start, (uint32_t)(_binary_ds01_elf_end - _binary_ds01_elf_start));
+    initramfs_file("ds02", _binary_ds02_elf_start, (uint32_t)(_binary_ds02_elf_end - _binary_ds02_elf_start));
+    initramfs_file("ds03", _binary_ds03_elf_start, (uint32_t)(_binary_ds03_elf_end - _binary_ds03_elf_start));
+    initramfs_file("ds04", _binary_ds04_elf_start, (uint32_t)(_binary_ds04_elf_end - _binary_ds04_elf_start));
+    initramfs_file("ds05", _binary_ds05_elf_start, (uint32_t)(_binary_ds05_elf_end - _binary_ds05_elf_start));
+    initramfs_file("ds06", _binary_ds06_elf_start, (uint32_t)(_binary_ds06_elf_end - _binary_ds06_elf_start));
+    initramfs_file("ds07", _binary_ds07_elf_start, (uint32_t)(_binary_ds07_elf_end - _binary_ds07_elf_start));
+    initramfs_file("ds08", _binary_ds08_elf_start, (uint32_t)(_binary_ds08_elf_end - _binary_ds08_elf_start));
+    initramfs_file("ds09", _binary_ds09_elf_start, (uint32_t)(_binary_ds09_elf_end - _binary_ds09_elf_start));
+    initramfs_file("ds10", _binary_ds10_elf_start, (uint32_t)(_binary_ds10_elf_end - _binary_ds10_elf_start));
+    initramfs_file("ds11", _binary_ds11_elf_start, (uint32_t)(_binary_ds11_elf_end - _binary_ds11_elf_start));
+#endif
 }
 
 /* ---- BUG-057 P3（审计跟进）：持久化老盘的只读补齐 ----
