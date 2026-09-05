@@ -112,6 +112,7 @@ static void cmd_help(void) {
     sys_print("  writefile <p> <c> write ONE line (<=128B; longer use <<DELIM below)\n");
     sys_print("  writefile <<D <p> multi-line write until lone D line (heredoc, v1.4)\n");
     sys_print("  patch <p> <ln> <txt>  replace line ln of file, in-guest edit (v1.9)\n");
+    sys_print("  source <rcfile>  run command file line-by-line (P1 .rc; auto /init.rc)\n");
     sys_print("  ccrun <src> <out> cc500 compile then run (write-compile-run, v0.27b)\n");
     sys_print("  micc <src> <out>  minicc compile then run (V1 int-only self-host)\n");
     sys_print("  miccboot        minicc self-host: P1 compiles itself -> P2, verify P1==P2 (V3)\n");
@@ -679,6 +680,68 @@ static void cmd_patch(char *args) {
     sys_print("' line "); user_putdec(lineno); sys_print(" <- "); sys_print(newtext); sys_print("\n");
 }
 
+/* ---- P1(.rc)：source <rcfile> —— 逐行执行脚本文件（纯用户态，无需内核改动）----
+ * 设计要点：
+ *  - 复用现有 SYS_FS_OPEN/READ 读整文件到 RC_MAX 缓冲（仿 cmd_patch 的读入模式）。
+ *  - 逐行处理：去首尾空白、跳过空行与 `#` 注释、去尾 `\r`（兼容 CRLF），每行交给
+ *    复用式命令行分发 run_command_line 执行——与交互主循环共用一套解析，杜绝两套漂移。
+ *  - silent=1 供启动自动源读：/init.rc 不存在时静默（无 rc 的可干净开机），仅打印执行中命令。
+ * RC_MAX 上限：ramdisk 极为有限，脚本仅用于轻量初始化（mount/save/run 等），4KB 足够。 */
+#define RC_MAX 4096
+static char rc_buf[RC_MAX];
+static int rc_read_file(const char *path) {
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 0) != 0) return -1;
+    int off = 0;
+    for (;;) {
+        int room = RC_MAX - off;
+        if (room <= 0) break;
+        int n = (int)syscall3(SYS_FS_READ, 1, (uint32_t)(rc_buf + off), room);
+        if (n <= 0) break;
+        off += n;
+    }
+    syscall3(SYS_FS_CLOSE, 1, 0, 0);
+    rc_buf[off] = 0;
+    return off;
+}
+
+static int run_command_line(char *line);      /* 定义于本文件尾：与交互主循环共用 */
+
+static void do_source(const char *path, int silent) {
+    int n = rc_read_file(path);
+    if (n < 0) {
+        if (!silent) { sys_print("[rc] cannot open '"); sys_print(path); sys_print("'\n"); }
+        return;
+    }
+    int pi = 0;
+    while (pi < n) {
+        int s = pi;
+        while (pi < n && rc_buf[pi] != '\n') pi++;
+        int e = pi;
+        if (pi < n) pi++;                                 /* 跳过 \n */
+        while (s < e && (rc_buf[s] == ' ' || rc_buf[s] == '\t')) s++;   /* 去首空白 */
+        while (e > s && (rc_buf[e - 1] == ' ' || rc_buf[e - 1] == '\t' ||
+                         rc_buf[e - 1] == '\r')) e--;                    /* 去尾空白/CR */
+        if (e == s) continue;                             /* 空行 */
+        if (rc_buf[s] == '#') continue;                   /* 注释行 */
+        char line[CMD_MAX + 1];
+        uint32_t len = (uint32_t)(e - s);
+        if (len > CMD_MAX) len = CMD_MAX;                 /* 防溢出：超长截断到 CMD_MAX */
+        for (uint32_t k = 0; k < len; k++) line[k] = rc_buf[s + k];
+        line[len] = 0;
+        if (run_command_line(line)) return;               /* 遇 exit 行（返回1）：停止执行 */
+    }
+}
+
+static void cmd_source(char *args) {
+    char path[64];
+    uint32_t i = 0, j = 0;
+    while (args[i] == ' ') i++;
+    while (args[i] && args[i] != ' ' && j < 63) path[j++] = args[i++];
+    path[j] = 0;
+    if (!path[0]) { sys_print("usage: source <rcfile>\n"); return; }
+    do_source(path, 0);
+}
+
 /* B1/B4 工具：轻量字符串拼接（无 libc）。B4 把判据行先拼入缓冲再单次 sys_print，
  * 避免多次 sys_print 之间被其它串口输出插入，导致 wait_for 的 grep 判据匹配失败（F-0a 撕裂族）。 */
 static int cc_append(char *buf, int k, const char *s) {
@@ -747,48 +810,58 @@ static void ccrun_compiler(const char *comp, const char *tag, char *args) {
 static void cmd_ccrun(char *args) { ccrun_compiler("cc500", "ccrun", args); }
 static void cmd_minicc(char *args) { ccrun_compiler("minicc", "micc", args); }
 
+/* ---- P1(.rc)：命令行分发（交互主循环与 source 脚本共用）----
+ * 传入整行，拆出命令与参数后分发给对应处理函数。
+ * 返回 1 = 命令要求退出 shell（exit）；0 = 继续。 */
+static int run_command_line(char *line) {
+    char cmd[ARG_MAX];
+    char arg[ARG_MAX];
+    if (!split_cmd(line, cmd)) return 0;
+    split_arg(line, arg);
+
+    if (user_strcmp(cmd, "help") == 0)            cmd_help();
+    else if (user_strcmp(cmd, "ls") == 0)         cmd_ls(arg);
+    else if (user_strcmp(cmd, "cat") == 0)        cmd_cat(arg);
+    else if (user_strcmp(cmd, "mkdir") == 0)      cmd_mkdir(arg);
+    else if (user_strcmp(cmd, "rmdir") == 0)      cmd_rmdir(arg);
+    else if (user_strcmp(cmd, "rm") == 0)         cmd_rm(arg);
+    else if (user_strcmp(cmd, "run") == 0)        cmd_run(arg);
+    else if (user_strcmp(cmd, "exec") == 0)       cmd_exec(arg);
+    else if (user_strcmp(cmd, "save") == 0)       cmd_save();
+    else if (user_strcmp(cmd, "netping") == 0)    cmd_netping(arg);
+    else if (user_strcmp(cmd, "ccboot") == 0)     cmd_ccboot();
+    else if (user_strcmp(cmd, "writefile") == 0)  cmd_writefile(arg);
+    else if (user_strcmp(cmd, "patch") == 0)      cmd_patch(arg);
+    else if (user_strcmp(cmd, "source") == 0)     cmd_source(arg);
+    else if (user_strcmp(cmd, "ccrun") == 0)      cmd_ccrun(arg);
+    else if (user_strcmp(cmd, "micc") == 0)       cmd_minicc(arg);
+    else if (user_strcmp(cmd, "miccboot") == 0)   cmd_miccboot();
+    else if (user_strcmp(cmd, "selftest") == 0)   cmd_selftest();
+    else if (user_strcmp(cmd, "exit") == 0) { sys_print("bye\n"); return 1; }
+    else {
+        sys_print("unknown command: ");
+        sys_print(cmd);
+        sys_print("  (try 'help')\n");
+    }
+    return 0;
+}
+
 void app_main(int argc, char **argv) {
     (void)argc; (void)argv;
     char line[CMD_MAX];
-    char cmd[ARG_MAX];
-    char arg[ARG_MAX];
 
     sys_print("\n=== Mini-OS " MINI_OS_VERSION " shell ===\n");
     sys_print("type 'help' for commands\n");
+
+    /* P1(.rc)：开机自动执行 /init.rc（不存在则静默），随后进入交互提示。
+     * 让 agent 能"开机即跑"预置初始化（如自动 save/run），无需逐条手敲。 */
+    do_source("/init.rc", 1);
 
     for (;;) {
         sys_print("mini-os$ ");
         int n = sys_readline(line, CMD_MAX);
         if (n < 0) continue;                    /* 无行可用（正常不应发生） */
         if (n == 0) continue;                   /* 空行：重新提示 */
-
-        if (!split_cmd(line, cmd)) continue;
-        split_arg(line, arg);
-
-        if (user_strcmp(cmd, "help") == 0)      cmd_help();
-        else if (user_strcmp(cmd, "ls") == 0)   cmd_ls(arg);
-        else if (user_strcmp(cmd, "cat") == 0)  cmd_cat(arg);
-        else if (user_strcmp(cmd, "mkdir") == 0) cmd_mkdir(arg);
-        else if (user_strcmp(cmd, "rmdir") == 0) cmd_rmdir(arg);
-        else if (user_strcmp(cmd, "rm") == 0)   cmd_rm(arg);
-        else if (user_strcmp(cmd, "run") == 0)  cmd_run(arg);
-        else if (user_strcmp(cmd, "exec") == 0) cmd_exec(arg);
-        else if (user_strcmp(cmd, "save") == 0) cmd_save();
-        else if (user_strcmp(cmd, "netping") == 0) cmd_netping(arg);
-        else if (user_strcmp(cmd, "ccboot") == 0)  cmd_ccboot();
-        else if (user_strcmp(cmd, "writefile") == 0) cmd_writefile(arg);
-        else if (user_strcmp(cmd, "patch") == 0)  cmd_patch(arg);
-        else if (user_strcmp(cmd, "ccrun") == 0)  cmd_ccrun(arg);
-        else if (user_strcmp(cmd, "micc") == 0)   cmd_minicc(arg);
-        else if (user_strcmp(cmd, "miccboot") == 0) cmd_miccboot();
-        else if (user_strcmp(cmd, "selftest") == 0) cmd_selftest();
-        else if (user_strcmp(cmd, "exit") == 0) {
-            sys_print("bye\n");
-            sys_exit(0);
-        } else {
-            sys_print("unknown command: ");
-            sys_print(cmd);
-            sys_print("  (try 'help')\n");
-        }
+        if (run_command_line(line)) { sys_exit(0); break; }
     }
 }
