@@ -84,6 +84,11 @@ echo "== [3/3] agent 逐命令交互 =="
 send "help"
 wait_for "命令回显 help"       "help"
 wait_for "help 输出"           "mini-os shell commands:"
+# syscall#37 动态自发现：help 盘点在机程序/工具文件（工具是文件、非命令）。断言：
+#  - [run] minicc-self：自举编译器 ELF 是文件，非 shell 命令——此前 help 不可见，属盲区
+#  - [file] minicc.c：编译器源码按普通文件盘点
+wait_for "help 自发现 run 工具"  "\[run\]  minicc-self"
+wait_for "help 自发现 file 工具" "\[file\] minicc.c"
 send "ls"
 wait_for "ls 输出"             "\[ls\] /:"
 send "cat motd"

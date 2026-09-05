@@ -47,6 +47,55 @@ static int tokenize(char *line, char *tok[], uint32_t max) {
     return (int)n;
 }
 
+/* ---- syscall#37 动态自发现：盘点文件系统，列出"在机程序/工具文件/目录" ----
+ * 用 sys_fs_readdir 枚举根目录（条目 \n 分隔、目录尾带 /），open+读 4 字节判 ELF 魔数，
+ * 标 [run]/[file]/[dir]。嵌入新 ELF 即自动出现在 help，无需手改——替掉原来只举例演示的
+ * 静态 run 列表，对齐 Unix `ls /bin` 发现式帮助（工具是文件、不是命令，help 盘点它们）。 */
+static void help_inventory(void) {
+    char buf[1024];
+    int n = sys_fs_readdir("/", buf, (uint32_t)sizeof(buf));
+    if (n < 0) { sys_print("  (readdir fail)\n"); return; }
+    sys_print("== 在机程序 / 工具文件（ls / 自发现）==\n");
+    int runs = 0, files = 0;
+    uint32_t i = 0;
+    while (i < (uint32_t)n) {
+        uint32_t s = i;
+        while (i < (uint32_t)n && buf[i] != '\n') i++;
+        uint32_t e = i;
+        if (i < (uint32_t)n) i++;                 /* 跳过 \n */
+        if (e <= s) continue;
+        int isdir = (buf[e - 1] == '/');
+        if (isdir) {
+            sys_print("  [dir]  ");
+        } else {
+            /* 用全路径 open+读 4 字节判 ELF（"文件即程序"盘点） */
+            char path[32];
+            uint32_t k = 1, j = s;
+            path[0] = '/';
+            for (; j < e && k < 31; j++) path[k++] = buf[j];
+            path[k] = 0;
+            int iself = 0;
+            if ((int)syscall3(SYS_FS_OPEN, 1, (uint32_t)path, 0) == 0) {
+                char hdr[4];
+                int rn = (int)syscall3(SYS_FS_READ, 1, (uint32_t)hdr, 4);
+                syscall3(SYS_FS_CLOSE, 1, 0, 0);
+                if (rn >= 4 && hdr[0] == 0x7f && hdr[1] == 'E' &&
+                    hdr[2] == 'L' && hdr[3] == 'F') iself = 1;
+            }
+            sys_print(iself ? "  [run]  " : "  [file] ");
+            if (iself) runs++; else files++;
+        }
+        uint32_t j;
+        for (j = s; j < e; j++) { char c[2] = { buf[j], 0 }; sys_print(c); }
+        sys_print("\n");
+    }
+    sys_print("  (runable  ");
+    user_putdec((uint32_t)runs);
+    sys_print(" | file  ");
+    user_putdec((uint32_t)files);
+    sys_print(")\n");
+}
+
 static void cmd_help(void) {
     sys_print("mini-os shell commands:\n");
     sys_print("  help            show this help\n");
@@ -55,8 +104,8 @@ static void cmd_help(void) {
     sys_print("  mkdir <path>    create directory\n");
     sys_print("  rmdir <path>    remove empty directory\n");
     sys_print("  rm <path>       delete file\n");
-    sys_print("  run <prog>      load and run ELF app (hello/echo/crash/isol/forkdemo)\n");
-    sys_print("  exec <prog> [a] fork + exec app with argv (forkdemo/args)\n");
+    sys_print("  run <prog>      load+run ELF app (see in-machine programs below)\n");
+    sys_print("  exec <prog> [a] fork + exec app with argv (see below)\n");
     sys_print("  save            write FS back to disk (v0.16 persist)\n");
     sys_print("  netping [ip][p] UDP ping to host echo (v0.22, default 10.0.2.2:7777)\n");
     sys_print("  ccboot          self-host bootstrap: cc500 compiles itself twice (v0.27)\n");
@@ -68,6 +117,7 @@ static void cmd_help(void) {
     sys_print("  miccboot        minicc self-host: P1 compiles itself -> P2, verify P1==P2 (V3)\n");
     sys_print("  selftest        run all demos, print one-line PASS/FAIL (agent-verifiable)\n");
     sys_print("  exit            quit shell\n");
+    help_inventory();
 }
 
 static void cmd_save(void) {

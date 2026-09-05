@@ -53,6 +53,9 @@ void app_main(int argc, char **argv) {
         sys_print("[abuse] open /abuse.tmp failed\n");
     } else {
         report("write buf@0xB8000", syscall3(SYS_FS_WRITE, 1, 0xB8000u, 8));
+        /* syscall#37 readdir：非法 path/buf/cap=0 必须 -1（buf@0x100000 非法内核地址） */
+        report("readdir buf@0x100000",  syscall3(SYS_FS_READDIR, 0, 0x100000u, 64));
+        report("readdir cap=0",         syscall3(SYS_FS_READDIR, 0, 0, 0));
         /* [gate] 区间内空洞页：write/read 走纯 user_ptr_valid(区间) -> 直接解引用。
          * 修复前内核替用户写/读到空洞页 -> 自身缺页 [FATAL] cli;hlt 整机停 */
         report("write buf@hole 0x80500000", syscall3(SYS_FS_WRITE, 1, 0x80500000u, 8));
