@@ -278,6 +278,26 @@ else
 fi
 
 echo
+echo "== [3.5/4] Mock 白盒单测（任务4/5） =="
+# 白盒：#include minicc.c + -DMINICC_MOCK，setjmp 就地捕获 fail 错误路径。
+# 断言宿主层测不到的词法分类 / 算术优先级 AST 形状 / fail 错误消息（共 35 断言）。
+# 32 位执行方式与 hostminicc 一致（宿主 ia32 或 qemu-i386 兜底）。
+MOCK="$VD/minicc_mock"
+if ! gcc -m32 -std=gnu99 -O0 -w -DMINICC_MOCK -o "$MOCK" "tests/test_minicc_mock.c" 2>"$VD/mock_build.log"; then
+    echo "[ERR]  Mock 构建失败"; tail -8 "$VD/mock_build.log"; exit 2
+fi
+MOCK_RUN=("$MOCK")
+if ! timeout 5 "$MOCK" >/dev/null 2>&1; then
+    if command -v qemu-i386 >/dev/null 2>&1; then MOCK_RUN=("qemu-i386" "$MOCK"); echo "      Mock 经 qemu-i386 运行"; else echo "[SKIP] 无 ia32/qemu 跑 Mock"; exit 0; fi
+else
+    echo "      Mock 宿主 ia32 直跑"
+fi
+mout=$(timeout 20 "${MOCK_RUN[@]}" 2>&1); mrc=$?
+echo "      ${mout}" | sed 's/^/      mock| /'
+if [ "$mrc" -ne 0 ]; then echo "[FAIL] Mock 单测未全绿 (rc=$mrc，输出见上)"; exit 1; fi
+echo "      Mock 白盒单测全绿"
+
+echo
 echo "== [4/4] 汇总 =="
 echo "宿主: PASS=$HOST_PASS FAIL=$HOST_FAIL"
 if [ "$HOST_FAIL" -gt 0 ]; then echo "[FAIL] test_minicc 宿主层未全绿"; exit 1; fi

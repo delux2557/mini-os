@@ -47,6 +47,14 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#if defined(MINICC_MOCK)
+/* 仅宿主白盒 Mock 单测（tests/test_minicc_mock.c 以 -DMINICC_MOCK 编入）：
+ * fail 本为 noreturn（sys_exit），"返回式回调"会让错误路径调用方继续空转拼出越界态；
+ * 故 Mock 注入改为 setjmp/longjmp 就地捕获——fail 走 longjmp 回测试现场，minicc 停摆。
+ * 正式（host_crt/minicc_crt/guest/自举）构建不定义 MINICC_MOCK，此项不编入 → 布局零变化。 */
+#include <setjmp.h>
+#endif
+
 /* ============ 编译器上下文 CC：把分散的编译期可变全局收拢成单例（任务 5） ============
  * 收敛 33 个文件级全局到 cc_t（结构体即"注入点"，给 Mock 单测留缝）。
  * 第 1 阶段用 #define 别名让既有调用点零改动解析进 cc.field（P1==P2 零行为变化）；
@@ -111,6 +119,14 @@ typedef struct {
     Node *funcs; Node **funcs_tail; Node *gvars; Node **gvars_tail;
     /* 输入文件 */
     unsigned char *in_data; int in_len;
+#if defined(MINICC_MOCK)
+    /* Mock 测试注入（仅 -DMINICC_MOCK 的宿主白盒单测编译时存在；正式构建无此字段，布局零变化）：
+     * 测试先 setjmp(cc.fail_jb) 并置 fail_jmp_on=1 → fail 改走 longjmp 回到测试现场，
+     * 经 cc.fail_msg 就地捕获错误消息而不 sys_exit 退进程（任务4/5 Mock 规划）。 */
+    jmp_buf fail_jb;
+    const char *fail_msg;
+    int fail_jmp_on;
+#endif
 } CC;
 
 static CC cc;
@@ -161,8 +177,13 @@ static void sys_print(const char *s) {
 const char *tokbuf_current(void);       /* 定义在词法章节 */
 /* （src / src_len / src_pos 已收进顶部 CC 上下文，见文件头） */
 
-/* 编译错误：打印上下文 token 后以 1 退出（host/guest 均由 sys_exit 兜底） */
+/* 编译错误：打印上下文 token 后以 1 退出（host/guest 均由 sys_exit 兜底）。
+ * Mock 注入：-DMINICC_MOCK 且测试置 cc.fail_jmp_on 时，改走 longjmp 回测试现场（就地捕获，
+ * 不退进程；fail 本 noreturn，"返回式回调"会让错误路径调用方继续空转出越界态，故必须 longjmp）。 */
 static void fail(const char *msg) {
+#if defined(MINICC_MOCK)
+    if (cc.fail_jmp_on) { cc.fail_msg = msg; longjmp(cc.fail_jb, 1); }
+#endif
     sys_print("minicc: error: ");
     sys_print(msg);
     sys_print(" [");
