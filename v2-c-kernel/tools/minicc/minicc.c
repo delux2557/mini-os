@@ -39,6 +39,109 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* ============ 编译器上下文 CC：把分散的编译期可变全局收拢成单例（任务 5） ============
+ * 收敛 33 个文件级全局到 cc_t（结构体即"注入点"，给 Mock 单测留缝）。
+ * 第 1 阶段用 #define 别名让既有调用点零改动解析进 cc.field（P1==P2 零行为变化）；
+ * 后续阶段逐类摘除 #define、把 cc 显式穿针（见 docs/design/minicc-v3-后续任务.md 任务5）。
+ * 依赖类型（Sym/Patch/Lab/Node）与容量宏前置到本处，使别名先于首个使用点（fail() 用到 src）。 */
+
+#define SYM_MAX 512
+#define PATCH_MAX 4096              /* V3：自举需 ~2K 引用（函数调用+全局地址），1024 溢出 */
+#define LAB_MAX 4096
+#define TOK_MAX 256                 /* V2c：字符串字面量上限 254 字节（含解码） */
+
+typedef struct {
+    char name[32];
+    int kind;
+    int ty;                     /* TY_INT / TY_CHAR / TY_PTR / TY_ARRAY */
+    int bty;                    /* 指针基类型 / 数组元素类型（非指针数组时无意义） */
+    int len;                    /* V2d：数组元素个数（非数组=0） */
+    int val;                    /* FUNC: 代码偏移(未定义=-1)；GLOBAL: 数据偏移；
+                                   LOCAL: 帧字节偏移；ARG: 参数序号 */
+} Sym;
+
+typedef struct { char name[32]; int pos; int kind; } Patch;
+typedef struct { int pos; int kind; int target; } Lab;
+
+typedef struct Node Node;
+struct Node {
+    int kind;
+    int ty;             /* TY_INT / TY_CHAR / TY_PTR / TY_ARRAY：表达式类型 */
+    int bty;            /* V2c：指针基类型/数组元素类型（DEREF/INDEX 结果的类型来源） */
+    int len;            /* V2d：数组元素个数（DECL/GVAR 用） */
+    Node *l, *r;        /* 二元操作数；ASSIGN: l=左值 r=右值；IF: l=cond r=then；
+                           WHILE: l=cond r=body；RET: l=表达式；NOT/NEG/ADDR/DEREF: l=操作数；
+                           INDEX: l=数组 VAR r=下标 */
+    Node *a, *b;        /* FUNCALL: a=实参链表；FUNC: a=形参链表 b=函数体；
+                           IF: b=else 分支（可空）；BLOCK: a=语句链表 */
+    Node *next;         /* 语句/实参/形参链表的后继 */
+    int val;            /* NUM: 数值；STR: 无；DECL: 帧字节偏移；FUNC/GVAR: 符号下标；VAR: 无 */
+    int vkind, vslot;   /* VAR: 变量类别（K_LOCAL/K_ARG/K_GLOBAL）与偏移/序号（local 字节偏移）——
+                           节点脱离符号表自携带，作用域恢复丢弃符号后仍可正确生成 */
+    char vname[32];     /* VAR: 全局变量名（patch 用） */
+    int ival;           /* STR: 字符串池偏移；GVAR: 常量初始化值（无初始化=0） */
+    int nargs, nlocals; /* FUNC: 形参个数 / 帧大小（字节）；FUNCALL: 实参个数 */
+    char name[32];      /* FUNC/GVAR/FUNCALL: 名字 */
+};
+
+typedef struct {
+    /* 输入 / 词法 */
+    const unsigned char *src;  int src_len, src_pos;
+    char tok[TOK_MAX]; int tok_is_word, tok_is_num, tok_is_str, tok_is_char, toklen;
+    /* 输出码流 */
+    unsigned char *code; int code_len, code_cap;
+    /* 符号表 */
+    Sym syms[SYM_MAX]; int nsym;
+    /* 补丁 / 标签 */
+    Patch patches[PATCH_MAX]; int npatch;
+    Lab labs[LAB_MAX]; int nlab;
+    /* codegen 译状态 */
+    int cur_nargs, frame_patch, cur_frame, bty_top, len_top;
+    /* 字符串池 */
+    unsigned char *strpool; int nstrpool, strpool_cap, strpool_base;
+    /* AST 链表 */
+    Node *funcs; Node **funcs_tail; Node *gvars; Node **gvars_tail;
+    /* 输入文件 */
+    unsigned char *in_data; int in_len;
+} CC;
+
+static CC cc;
+
+/* 收敛别名：既有调用点一律按旧名解析进 cc.field */
+#define src       cc.src
+#define src_len   cc.src_len
+#define src_pos   cc.src_pos
+#define tok       cc.tok
+#define tok_is_word cc.tok_is_word
+#define tok_is_num cc.tok_is_num
+#define tok_is_str cc.tok_is_str
+#define tok_is_char cc.tok_is_char
+#define toklen    cc.toklen
+#define code      cc.code
+#define code_len  cc.code_len
+#define code_cap  cc.code_cap
+#define syms      cc.syms
+#define nsym      cc.nsym
+#define patches   cc.patches
+#define npatch    cc.npatch
+#define labs      cc.labs
+#define nlab      cc.nlab
+#define cur_nargs cc.cur_nargs
+#define frame_patch cc.frame_patch
+#define cur_frame cc.cur_frame
+#define bty_top   cc.bty_top
+#define len_top   cc.len_top
+#define strpool   cc.strpool
+#define nstrpool  cc.nstrpool
+#define strpool_cap cc.strpool_cap
+#define strpool_base cc.strpool_base
+#define funcs     cc.funcs
+#define funcs_tail cc.funcs_tail
+#define gvars     cc.gvars
+#define gvars_tail cc.gvars_tail
+#define in_data   cc.in_data
+#define in_len    cc.in_len
+
 /* ================= 系统调用与运行时基础 ================= */
 
 int syscall3(int n, int a, int b, int c);   /* 由 CRT 提供 */
@@ -48,9 +151,7 @@ static void sys_print(const char *s) {
 }
 
 const char *tokbuf_current(void);       /* 定义在词法章节 */
-static int src_pos;                     /* fail 调试定位用（词法区定义，前向声明） */
-static int src_len;
-static const unsigned char *src;
+/* （src / src_len / src_pos 已收进顶部 CC 上下文，见文件头） */
 
 /* 编译错误：打印上下文 token 后以 1 退出（host/guest 均由 sys_exit 兜底） */
 static void fail(const char *msg) {
@@ -93,8 +194,8 @@ static int s_eq(const char *a, const char *b) {
     return *a == *b;
 }
 
-static void s_cpy(char *dst, const char *src) {
-    while (*src) *dst++ = *src++;
+static void s_cpy(char *dst, const char *sp) {
+    while (*sp) *dst++ = *sp++;
     *dst = 0;
 }
 
@@ -110,10 +211,7 @@ static void *xmalloc(int n) {
 }
 
 /* ================= 输出码流缓冲 ================= */
-
-static unsigned char *code;
-static int code_len;
-static int code_cap;
+/* （code / code_len / code_cap 已收进顶部 CC 上下文，见文件头） */
 
 static void emit1(int b) {
     if (code_len >= code_cap) {
@@ -143,22 +241,9 @@ static void save32(int pos, int v) {
 
 /* ================= 符号表 ================= */
 
-#define SYM_MAX 512
 enum { K_FUNC, K_GLOBAL, K_LOCAL, K_ARG };
 enum { TY_INT, TY_CHAR, TY_PTR, TY_ARRAY };  /* V2c：char（无符号）；V2d：数组 */
-
-typedef struct {
-    char name[32];
-    int kind;
-    int ty;                     /* TY_INT / TY_CHAR / TY_PTR / TY_ARRAY */
-    int bty;                    /* 指针基类型 / 数组元素类型（非指针数组时无意义） */
-    int len;                    /* V2d：数组元素个数（非数组=0） */
-    int val;                    /* FUNC: 代码偏移(未定义=-1)；GLOBAL: 数据偏移；
-                                   LOCAL: 帧字节偏移；ARG: 参数序号 */
-} Sym;
-
-static Sym syms[SYM_MAX];
-static int nsym;
+/* （Sym 类型 / syms / nsym 已收进顶部 CC 上下文，见文件头"编译器上下文 CC"） */
 
 static int sym_find(const char *name) {
     /* V3：从后往前查找（最近声明优先）——局部变量遮蔽同名的全局函数/变量
@@ -181,12 +266,8 @@ static int sym_add(const char *name, int kind, int ty, int bty, int len, int val
 
 /* ================= 补丁（符号引用 / 控制流标签） ================= */
 
-#define PATCH_MAX 4096         /* V3：自举需 ~2K 引用（函数调用+全局地址），1024 溢出 */
 enum { P_CALL, P_ADDR };
-typedef struct { char name[32]; int pos; int kind; } Patch;
-static Patch patches[PATCH_MAX];
-static int npatch;
-
+/* （Patch 类型 / patches / npatch 已收进顶部 CC 上下文，见文件头） */
 static void patch_add(const char *name, int pos, int kind) {
     if (npatch >= PATCH_MAX) fail("too many references");
     s_cpy(patches[npatch].name, name);
@@ -195,12 +276,8 @@ static void patch_add(const char *name, int pos, int kind) {
     npatch++;
 }
 
-#define LAB_MAX 4096
 enum { L_COND, L_JMP };
-typedef struct { int pos; int kind; int target; } Lab;
-static Lab labs[LAB_MAX];
-static int nlab;
-
+/* （Lab 类型 / labs / nlab 已收进顶部 CC 上下文，见文件头） */
 static int new_lab(void) {
     if (nlab >= LAB_MAX) fail("too many labels");
     return nlab++;
@@ -243,27 +320,7 @@ enum {
     ND_EXPR_STMT, ND_BLOCK, ND_IF, ND_WHILE, ND_FOR, ND_RET,
     ND_DECL, ND_FUNC, ND_GVAR
 };
-
-typedef struct Node Node;
-struct Node {
-    int kind;
-    int ty;             /* TY_INT / TY_CHAR / TY_PTR / TY_ARRAY：表达式类型 */
-    int bty;            /* V2c：指针基类型/数组元素类型（DEREF/INDEX 结果的类型来源） */
-    int len;            /* V2d：数组元素个数（DECL/GVAR 用） */
-    Node *l, *r;        /* 二元操作数；ASSIGN: l=左值 r=右值；IF: l=cond r=then；
-                           WHILE: l=cond r=body；RET: l=表达式；NOT/NEG/ADDR/DEREF: l=操作数；
-                           INDEX: l=数组 VAR r=下标 */
-    Node *a, *b;        /* FUNCALL: a=实参链表；FUNC: a=形参链表 b=函数体；
-                           IF: b=else 分支（可空）；BLOCK: a=语句链表 */
-    Node *next;         /* 语句/实参/形参链表的后继 */
-    int val;            /* NUM: 数值；STR: 无；DECL: 帧字节偏移；FUNC/GVAR: 符号下标；VAR: 无 */
-    int vkind, vslot;   /* VAR: 变量类别（K_LOCAL/K_ARG/K_GLOBAL）与偏移/序号（local 字节偏移）——
-                           节点脱离符号表自携带，作用域恢复丢弃符号后仍可正确生成 */
-    char vname[32];     /* VAR: 全局变量名（patch 用） */
-    int ival;           /* STR: 字符串池偏移；GVAR: 常量初始化值（无初始化=0） */
-    int nargs, nlocals; /* FUNC: 形参个数 / 帧大小（字节）；FUNCALL: 实参个数 */
-    char name[32];      /* FUNC/GVAR/FUNCALL: 名字 */
-};
+/* （Node 类型已收进顶部 CC 上下文，见文件头"编译器上下文 CC"） */
 
 static Node *node_new(int kind) {
     Node *n = (Node *)xmalloc(sizeof(Node));
@@ -281,9 +338,7 @@ static Node *node_new(int kind) {
 /* ================= 代码生成辅助 ================= */
 
 #define CODE_BASE 0x800A0000u       /* APP_LINK：与内核 ELF 加载器一致 */
-
-static int cur_nargs;               /* 当前函数形参个数（生成 arg 地址用） */
-static int frame_patch;             /* prologue `sub esp,imm32` 的 imm 位置 */
+/* （cur_nargs / frame_patch 已收进顶部 CC 上下文，见文件头） */
 
 static void emit_mov_imm(int v) { emit1(0xB8); emit4(v); }
 static void emit_lea_ebp(int disp) { emit_op("\x8d\x85"); emit4(disp); }
@@ -300,14 +355,7 @@ static void emit_add_esp(int n4) {
 }
 
 /* ================= 词法 ================= */
-
-#define TOK_MAX 256            /* V2c：字符串字面量上限 254 字节（含解码） */
-static char tok[TOK_MAX];
-static int tok_is_word;
-static int tok_is_num;
-static int tok_is_str;         /* V2c：字符串字面量（tok=解码字节，toklen=长度） */
-static int tok_is_char;        /* V2c：字符字面量（tok[0]=解码值 0..255） */
-static int toklen;             /* V2c：tok 解码字节数（字符串可含内嵌 \0） */
+/* （tok / tok_is_word 等 / toklen 已收进顶部 CC 上下文，见文件头） */
 
 static int peekc(void)  { return src_pos < src_len ? src[src_pos] : -1; }
 static int peekc2(void) { return src_pos + 1 < src_len ? src[src_pos + 1] : -1; }
@@ -538,10 +586,8 @@ static int type_eq(int t1, int b1, int t2, int b2) {
 static Node *expr(void);
 
 /* 字符串池（V2c）：字面量解码字节线性累积，codegen 时整体 emit 进数据段（只读）。
- * strpool_base：池在 code 缓冲内的起始偏移（ELF 头 95 字节之后），ND_STR 寻址用。 */
-static unsigned char *strpool;
-static int nstrpool, strpool_cap;
-static int strpool_base;
+ * strpool_base：池在 code 缓冲内的起始偏移（ELF 头 95 字节之后），ND_STR 寻址用。
+ * （strpool / nstrpool / strpool_cap / strpool_base 已收进顶部 CC 上下文，见文件头） */
 
 static void strpool_add(int b) {
     if (nstrpool >= strpool_cap) {
@@ -794,10 +840,7 @@ static Node *expr(void) {
 }
 
 /* ---- 语句 ---- */
-
-static int cur_frame;           /* 当前函数已用帧字节（局部变量偏移分配，块间不回收） */
-static int bty_top;             /* 顶层声明（函数/全局）的指针基类型（非指针时无意义） */
-static int len_top;             /* 顶层声明（函数/全局）的数组元素个数（非数组=0） */
+/* （cur_frame / bty_top / len_top 已收进顶部 CC 上下文，见文件头） */
 
 static Node *stmt(void);
 
@@ -891,11 +934,7 @@ static Node *stmt(void) {
 }
 
 /* ---- 程序（全局声明 + 函数定义） ---- */
-
-static Node *funcs;             /* 函数节点链表（codegen 顺序） */
-static Node **funcs_tail;
-static Node *gvars;             /* 全局变量节点链表 */
-static Node **gvars_tail;
+/* （funcs / funcs_tail / gvars / gvars_tail 已收进顶部 CC 上下文，见文件头） */
 
 static void parse_program(void) {
     for (;;) {
@@ -1220,8 +1259,7 @@ static void finish(void) {
  * SYS_PRINT=1 SYS_FS_CREATE=13 SYS_FS_OPEN=14 SYS_FS_WRITE=15 SYS_FS_READ=16
  * SYS_FS_CLOSE=17 SYS_FS_DELETE=19 SYS_BRK=35 SYS_EXIT=0 */
 
-static unsigned char *in_data;
-static int in_len;
+/* （in_data / in_len 已收进顶部 CC 上下文，见文件头） */
 
 static int open_input(const char *path) {
     if (syscall3(14, 1, (int)path, 0) != 0) return -1;
