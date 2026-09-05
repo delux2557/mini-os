@@ -100,7 +100,8 @@
 - **对比口径**：mini-os `exit_code` 是完整 uint32（负 `return` 显示巨大数如 4294967295），与宿主 gcc/qemu 的 `&0xff` 编码不同 —— 差分统一按 **return 值低 8 位语义**对齐（`&0xff`），故 `return -1` 时 guest=255、宿主 ref=255 判定一致。
 - **特性推进**：生成器 minicc 能力集已纳入**位运算** `& | ^ >> ~`（`F_BIT`；刻意避开 `<<`，因有符号左移溢出是 UB）。host/guest 两层差分全绿（位运算样本与 gcc 语义一致）。**动态子集生效**：加特性 = 能力集表加一个 flag + 一段生成函数，核心/runner/比对零改动。
 - **覆盖度扩展**：minicc 能力集再纳入**全局变量**（`F_GLOBAL`）/ **数组**（`F_ARRAY`，全元素初始化防读未初始化）/ **指针**（`F_PTR`，bind 数组基址后 `*(p+k)` 解引用，k∈0..ASZ-1 不越界）——保持无UB三纪律。host/guest 两层差分全绿，真实运行语义与 gcc 一致。
-- **函数/递归**（`F_FUNC`）：predicate 前插入纯函数`h0=sum(n)`（线性递归，至多 7 层栈帧）与`h1=fib(n)`（双支递归），调用表达式 `h{0,1}(arg)`，**arg 喂 0..6 小字面量** → 深度/值域有界（sum≤21/fib≤13）、确定终止、无副作用。host 差分 + **guest 运行语义**双双验证 minicc 递归码生与 gcc 逐退码一致（12/12）——真翻到栈帧/调用约定层面。cc500 不给 `F_FUNC`。
+- **函数/递归**（`F_FUNC`)：predicate 前插入纯函数`h0=sum(n)`（线性递归，至多 7 层栈帧）与`h1=fib(n)`（双支递归），调用参数=任意窄值表达式再按位掩码 `(e & m)`（m∈{3,7}）限幅到非负窄区间 → 深度/值域有界（sum≤28/fib≤21）、确定终止、无副作用（对负 e 仍得非负）。host 差分 + **guest 运行语义**双双验证 minicc 递归码生与 gcc 逐退码一致（12/12）——真翻到栈帧/调用约定层面。cc500 不给 `F_FUNC`。
+- **小结（差分对拍暂告段落）**：特性表驱动 + 动态子集机制已定型——**以后加特性 = 能力集表加一行 + 一个生成函数**，核心/runner/比对零改动；host acceptance + guest 运行语义两层差分已纳入 CI 常跑回归网。差分对拍自此转入"常驻资产"：不设专人追新，遇新特性/重构尾声再往里加特性行即可。
 - **cc500 能力集实测校准**：hostcc 探测——cc500 支持 `& | <<` 与 `char`，拒绝 global/array/ptr/`for`/`^`/`~`；据此 `CAPS_CC500` 复认保守正确（不给 `F_GLOBAL/F_ARRAY/F_PTR/F_FOR/F_BIT`）。
 - **薄 ddmin**：`tools/minicc/diffsynth/ddmin.sh` 行级 delta debugging，宿主 acceptance 谓词（gcc 接受 & hostminicc 拒绝 ⇒ 误拒 bug）把失败样例缩到最小触发子集（自检：multi-level pointer 样例 12 行 → 3 行）。
 
