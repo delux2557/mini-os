@@ -109,7 +109,7 @@ static void cmd_help(void) {
     sys_print("  save            write FS back to disk (v0.16 persist)\n");
     sys_print("  netping [ip][p] UDP ping to host echo (v0.22, default 10.0.2.2:7777)\n");
     sys_print("  ccboot          self-host bootstrap: cc500 compiles itself twice (v0.27)\n");
-    sys_print("  writefile <p> <c> write file (content = rest of line, v0.27b)\n");
+    sys_print("  writefile <p> <c> write ONE line (<=128B; longer use <<DELIM below)\n");
     sys_print("  writefile <<D <p> multi-line write until lone D line (heredoc, v1.4)\n");
     sys_print("  patch <p> <ln> <txt>  replace line ln of file, in-guest edit (v1.9)\n");
     sys_print("  ccrun <src> <out> cc500 compile then run (write-compile-run, v0.27b)\n");
@@ -552,7 +552,10 @@ static void cmd_writefile(char *args) {
         return;
     }
 
-    /* ---- 单行模式（v0.27b） ---- */
+    /* ---- 单行模式（v0.27b） ----
+     * 限制（F10/task3）：content 取"命令 剩余 整行"，而上游 readline 行缓冲上限 128B（KB_LINE_MAX），
+     * 超长字符被内核直接丢弃、静默截断到 128B。**长内容（>~128B）请用 heredoc 模式**
+     * `writefile <<DELIM <path>`（逐行 SYS_FS_WRITE，绕开单行天线，见上方分支）。 */
     char *content;
     while (args[i] == ' ') i++;
     while (args[i] && args[i] != ' ' && j < 63) path[j++] = args[i++];

@@ -30,7 +30,7 @@
  *       call main ; mov %eax,%ebx ; xor %eax,%eax ; int $0x80
  *     （main 返回值作 sys_exit 退出码：mini-os ABI eax=号 ebx=a 返回 ebx）。
  *   - char 值无符号（movzbl 读 / mov %al 写）；指针算术按基类型缩放（int×4，char×1）；
- *     局部帧按字节偏移分配（数组紧凑，char 标量 4 字节对齐）。
+ *     局部帧按**纯字节偏移**分配（数组紧凑 len×元素尺寸，标量不保证 4 对齐，x86 未对齐访问允许）。
  *
  * 运行环境：guest 由 minicc_crt.c 提供 syscall3（int $0x80）；host 由
  *   tools/minicc/host_crt.c 提供（Linux 文件模拟）。仅依赖 syscall3(0/1/13/14/15/16/17/19/35)。
@@ -832,7 +832,7 @@ static Node *stmt(void) {
         next_tok();
         if (array_suffix(n->ty, &n->len)) { n->bty = n->ty; n->ty = TY_ARRAY; }
         if (n->ty == TY_ARRAY && peek("=")) fail("array init not supported");
-        /* V2d：帧按字节偏移分配（数组紧凑 len×元素尺寸，标量 4 字节对齐） */
+        /* V2d：帧按纯字节偏移分配（数组紧凑 len×元素尺寸，标量不保证 4 对齐） */
         int size = size_of(n->ty, n->bty, n->len);
         cur_frame += size;
         if (cur_frame > 4096) fail("frame too big");
