@@ -133,7 +133,20 @@
 - **关键决策**：只收敛 `minicc.c`；`minicc_self.c` 完全未动 → 完美规避"struct 在 minicc 子集不可用"的约束，两版行为一致性不变（miccboot 证明）。
 - 类型前置：CC 结构需要 `Sym/Patch/Lab/Node` + `SYM_MAX/PATCH_MAX/LAB_MAX/TOK_MAX`，且 `src` 等在 `fail()`（首个使用点）之前就用，故把 4 个类型定义 + 容量宏 + CC 结构 + 别名整体前置到 include 之后；`s_cpy` 形参 `src` 改名 `sp` 避开别名冲突。
 - **验证**：miccboot P1==P2 逐字节一致 ✓；test_minicc 宿主 51 全绿 ✓；`gcc -m32 -Wall -Wextra -Werror` 编译零告警 ✓。
-- **阶段 2（后续切片）**：视需要逐组摘除 `#define`、把 `cc` 显式穿针进 lexer/parser/codegen 签名（真正类成 `cc_t*` 注入点），或据此为 `minicc.c` 引入 Mock 单测注入。
+- **任务 4（Mock 单测）规划与阶段 2 决策（2026-09-05，dev 休假期间由 AI 决策）**：
+
+  **阶段 2"真穿针 cc_t*"——决定缓做。** 理由：`static CC cc;` 单实例**本身就是** Mock 单测的注入点（重置 `cc` 字段即可喂任意上下文）；全量穿针（把 `CC*` 穿过 lexer/parser/codegen 全部签名）只买到"重入/多编译器实例"——而 minicc 每进程只编一个程序，重入是伪需求。用上千处签名改动的 P1==P2 风险换无实际收益，不划算。**唯一值得真穿针的触发条件**：未来出现"一个进程内并发编译多个程序"（如作库/后台服务）才复评。
+
+  **Mock 单测（任务 4 后半）：已落地（2026-09-05，dev 休假期间由 AI 实现 + CI 验证）。** 实现即 `v2-c-kernel/tests/test_minicc_mock.c`。
+  - **注入缝（已验证）**：`static CC cc;` + `#define` 别名即入口——测词法则设 `src/src_len/src_pos` 后调 `next_tok()` 断言 `tok/tok_is_*`；测语法则 `next_tok()` 预备后调 `expr()` 断言 Node 树形状（`1+2*3` 根=ADD 且右=MUL，`8-5-2` 左结合=(8-5)-2，`(1+2)*3` 括号提权根=MUL，`0xff`→val 255）。
+  - **错误路径注入（关键修正）**：最初设想"返回式钩子 `minicc_fail_hook` 回调后 return"被实测否决——`fail()` 本 noreturn（`sys_exit`），回调返回会让 `next_tok()` 的 `for(;;)` 继续空转、`tok` 越界拼出越界态。**正确做法：`-DMINICC_MOCK` 时在 `cc` 内加 `jmp_buf fail_jb / const char *fail_msg / int fail_jmp_on` 三字段，`fail()` 开头 `if (cc.fail_jmp_on){ cc.fail_msg=msg; longjmp(cc.fail_jb,1); }`**；测试 `setjmp(cc.fail_jb)` 后调 `next_tok()/expr()`，经 `cc.fail_msg` 就地断言错误消息。`#if defined(MINICC_MOCK)` 守卫 ⇒ 正式（host_crt/minicc_crt/guest/自举）构建**布局与行为零变化**（实测 `-Wall -Wextra -Werror` 零告警 + miccboot P1==P2 逐字节一致仍绿）。
+  - **摩擦 3 条的实际解法**：
+    1. `static` 未引用告警 → 无需处理：`minicc.c` 里非静态入口 `minicc_main` 引用了整套 parser/codegen，include 后无未用 static 函数；构建仍加 `-w` 兜底；
+    2. `fail()` 退进程 → 上层承上补：setjmp/longjmp 就地捕获（见上），停摆不越界；
+    3. 链接方式 → 测试驱动**自建 `syscall3` shim**（exit/print/brk 静态竞技场 64MB），`#include minicc.c` 白盒，不 include host_crt.c。
+  - **新发现的一条摩擦（宏碰撞）**：收敛别名 `#define src cc.src` 等会把驱动里的 `cc.src` 展开成 `cc.cc.src`（编译报 `'CC' has no member named 'cc'`）。解法：被别名收编的字段一律用**别名宏**读写（`src/tok/toklen/tok_is_num/...`）；只有未被收编的字段（`fail_jb/fail_msg/fail_jmp_on`）才写 `cc.xxx`。
+  - **覆盖与验收**：词法分类（num/word/双字符符/str/char/块注/行注/hex + EOF）9 例 + 优先级/结合/括号 AST 形状 + hex 值 5 例 + 错误消息捕获 4 例（unterminated string / bad number / bad escape / bad expression）共 **35 断言全绿**；已接入 `tests/test_minicc.sh` 宿主层（[3.5/4] Mock 层），`test_minicc` 主机 51 全过 + Mock 35 + guest 端到端全绿。
+  - **验收口径达成**：原则 6 的 Mock 半兑现 ✓（成功路径词法/优先级建树 + 错误路径消息；"声明分配"仍留待后续，非阻塞）。
 
 ***
 
