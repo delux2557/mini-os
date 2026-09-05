@@ -99,6 +99,8 @@
 - **guest 运行语义差分**：`tests/test_diffsynth_guest.sh`（方案 B，`GUEST_DIFF=1` 把随机样本 ds00..ds11 批量嵌入 initramfs，QEMU `run dsXX` 取**运行退码**与 gcc 参考比对；默认构建零侵入，独立 build 子目录）。
 - **对比口径**：mini-os `exit_code` 是完整 uint32（负 `return` 显示巨大数如 4294967295），与宿主 gcc/qemu 的 `&0xff` 编码不同 —— 差分统一按 **return 值低 8 位语义**对齐（`&0xff`），故 `return -1` 时 guest=255、宿主 ref=255 判定一致。
 - **特性推进**：生成器 minicc 能力集已纳入**位运算** `& | ^ >> ~`（`F_BIT`；刻意避开 `<<`，因有符号左移溢出是 UB）。host/guest 两层差分全绿（位运算样本与 gcc 语义一致）。**动态子集生效**：加特性 = 能力集表加一个 flag + 一段生成函数，核心/runner/比对零改动。
+- **覆盖度扩展**：minicc 能力集再纳入**全局变量**（`F_GLOBAL`）/ **数组**（`F_ARRAY`，全元素初始化防读未初始化）/ **指针**（`F_PTR`，bind 数组基址后 `*(p+k)` 解引用，k∈0..ASZ-1 不越界）——保持无UB三纪律。host/guest 两层差分全绿，真实运行语义与 gcc 一致。
+- **cc500 能力集实测校准**：hostcc 探测——cc500 支持 `& | <<` 与 `char`，拒绝 global/array/ptr/`for`/`^`/`~`；据此 `CAPS_CC500` 复认保守正确（不给 `F_GLOBAL/F_ARRAY/F_PTR/F_FOR/F_BIT`）。
 - **薄 ddmin**：`tools/minicc/diffsynth/ddmin.sh` 行级 delta debugging，宿主 acceptance 谓词（gcc 接受 & hostminicc 拒绝 ⇒ 误拒 bug）把失败样例缩到最小触发子集（自检：multi-level pointer 样例 12 行 → 3 行）。
 
 **验收**：原则 6 名实相符（有单测，或文档如实描述现状与计划）。
