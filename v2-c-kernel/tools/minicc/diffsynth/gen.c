@@ -29,6 +29,10 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
 
 static int g_caps;
 static int has(int f){ return g_caps & f; }
+/* 自覆盖探针：累计本 run 实际生成的特性位，末尾对比声明(CAPS)之未触发者告警。
+ * 防"声明了 F_* 但 pick 逻辑够不到(被别的关闭特性 gate 住)"的静默盲区。
+ * 注：无法借此探测"minicc 新增语法"——生成器是消费者，探不出生产者能力；见 docs。 */
+static unsigned used_flags;
 
 #define MAXV 16
 #define MAXG 2
@@ -74,18 +78,18 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
     if(has(F_BIT)){ picks[np++]=E_AND; picks[np++]=E_OR; picks[np++]=E_XOR; picks[np++]=E_SHR; picks[np++]=E_NOT; }
     int k=picks[rndi(0,np-1)];
     switch(k){
-    case E_CON:{ int c=rndi(1,100); sprintf(dst,"%d",c); *lo=*hi=c; return; }
-    case E_VAR:{ int i=rndi(0,nvars-1); sprintf(dst,"%s",varnames[i]); *lo=0;*hi=100; return; }
-    case E_GVAR:{ int i=rndi(0,ng-1); sprintf(dst,"G%d",i); *lo=0;*hi=100; return; }
-    case E_IDX:{ int i=rndi(0,na-1),j=rndi(0,ASZ-1); sprintf(dst,"a%d[%d]",i,j); *lo=0;*hi=100; return; }
-    case E_DREF:{ int i=rndi(0,npa-1),k=rndi(0,ASZ-1); sprintf(dst,"*(p%d+%d)",i,k); *lo=0;*hi=100; return; }
+    case E_CON:{ int c=rndi(1,100); sprintf(dst,"%d",c); *lo=*hi=c; used_flags|=F_CONST; return; }
+    case E_VAR:{ int i=rndi(0,nvars-1); sprintf(dst,"%s",varnames[i]); *lo=0;*hi=100; used_flags|=F_VAR; return; }
+    case E_GVAR:{ int i=rndi(0,ng-1); sprintf(dst,"G%d",i); *lo=0;*hi=100; used_flags|=F_GLOBAL; return; }
+    case E_IDX:{ int i=rndi(0,na-1),j=rndi(0,ASZ-1); sprintf(dst,"a%d[%d]",i,j); *lo=0;*hi=100; used_flags|=F_ARRAY; return; }
+    case E_DREF:{ int i=rndi(0,npa-1),k=rndi(0,ASZ-1); sprintf(dst,"*(p%d+%d)",i,k); *lo=0;*hi=100; used_flags|=F_PTR; return; }
     case E_CALL:{ int i=rndi(0,nf-1); char a[128]; long l0,h0v;
         /* 递归参数 = 任意窄值表达式，再按位掩码限幅到非负窄区间 (e & m)：
          * e 由生成器保证无 UB；m ∈ {3,7} ⇒ 结果 ∈ [0,3]/[0,7]，深度/值域有界（sum≤28/fib≤21），
          * 对负 e 仍得非负（& 高位置 0）——深度有界纪律不破。让调用参数多样化以增覆盖。 */
         expr_gen(a,depth+1,&l0,&h0v,0);
         int m=(rbool()?7:3);
-        sprintf(dst,"h%d(((%s)&%d))",i,a,m); *lo=0; *hi=100; return; }
+        sprintf(dst,"h%d(((%s)&%d))",i,a,m); *lo=0; *hi=100; used_flags|=F_FUNC; return; }
     case E_ADD: case E_SUB: case E_MUL: case E_DIV:{
         const char *op="+-*/"; char l[128],r[128]; long ll,lh;
         expr_gen(l,depth+1,&ll,&lh,1); const char *opc=&op[k-E_ADD];
@@ -96,12 +100,12 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
         else if(k==E_SUB)*lo=ll-atol(r),*hi=lh-atol(r);
         else if(k==E_MUL){ long c=atol(r); *lo=(ll<0?ll:0)*c; *hi=(lh>0?lh:0)*c; }
         else { long c=atol(r); *lo=ll/c; *hi=lh/c; }
-        clamp_iv(lo,hi); return;
+        clamp_iv(lo,hi); used_flags|=F_ARITH; return;
     }
     case E_CMP:{ char l[128],r[128]; long ll,lh,rl,rh;
         static const char *cop[]={"<",">","<=",">=","==","!="};
         expr_gen(l,depth+1,&ll,&lh,1); expr_gen(r,depth+1,&rl,&rh,1);
-        sprintf(dst,"((%s)%s(%s))",l,cop[rndi(0,5)],r); *lo=0;*hi=1; return; }
+        sprintf(dst,"((%s)%s(%s))",l,cop[rndi(0,5)],r); *lo=0;*hi=1; used_flags|=F_CMP; return; }
     case E_AND: case E_OR: case E_XOR: case E_SHR: case E_NOT:{
         char l[128],r[128]; long ll,lh;
         expr_gen(l,depth+1,&ll,&lh,0);
@@ -109,13 +113,13 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
         else if(k==E_SHR){ sprintf(r,"%d",rndi(1,3)); sprintf(dst,"((%s)>>%s)",l,r); }
         else { const char *op=(k==E_AND)?"&":(k==E_OR)?"|":"^";
                long rl,rh; expr_gen(r,depth+1,&rl,&rh,0); sprintf(dst,"((%s)%s(%s))",l,op,r); }
-        *lo=-CLAMP_MAX; *hi=CLAMP_MAX; clamp_iv(lo,hi); return; }
+        *lo=-CLAMP_MAX; *hi=CLAMP_MAX; clamp_iv(lo,hi); used_flags|=F_BIT; return; }
     default:{ char l[128],r[128]; long ll,lh,rl,rh;
         static const char *lop[]={"&&","||"};
         expr_gen(l,depth+1,&ll,&lh,1);
         if(rbool()){ expr_gen(r,depth+1,&rl,&rh,1); sprintf(dst,"((%s)%s(%s))",l,lop[rbool()],r); }
         else { sprintf(dst,"(!(%s))",l); }
-        *lo=0;*hi=1; return; }
+        *lo=0;*hi=1; used_flags|=F_LOGIC; return; }
     }
 }
 
@@ -124,11 +128,11 @@ static void stmt_gen(int depth){
     int kind=rndi(0,3);
     const char *lv=pick_lval();
     if(kind==0){ expr_gen(b,depth+1,&lo,&hi,0); printf("  %s=(%s);\n",lv,b); }
-    else if(kind==1){ expr_gen(b,depth+1,&lo,&hi,1);
+    else if(kind==1){ used_flags|=F_IF; expr_gen(b,depth+1,&lo,&hi,1);
         printf("  if((%s)){ %s=1; } else { %s=0; }\n",b,lv,pick_lval()); }
-    else if(kind==2){ expr_gen(b,depth+1,&lo,&hi,1);
+    else if(kind==2){ used_flags|=F_WHILE; expr_gen(b,depth+1,&lo,&hi,1);
         printf("  {int _g; _g=0; while((%s)&&_g<20){ _g=_g+1; %s=%s+1; }}\n",b,lv,lv); }
-    else{ printf("  {int _i; for(_i=0;_i<8;_i=_i+1){ %s=%s+1; }}\n",lv,lv); }
+    else{ used_flags|=F_FOR; printf("  {int _i; for(_i=0;_i<8;_i=_i+1){ %s=%s+1; }}\n",lv,lv); }
 }
 
 /* 递归辅助函数：固定安全模板，纯函数、参数作深度界限。
@@ -145,6 +149,9 @@ static void emit_program(int nv,int nstmts){
     ng  = has(F_GLOBAL)?MAXG:0;
     na  = has(F_ARRAY)?MAXA:0;
     npa = has(F_PTR)&&na>0?MAXP:0;
+    if(ng>0)  used_flags|=F_GLOBAL;      /* 声明即强制发射的顶层特性：计数即可证被产出 */
+    if(na>0)  used_flags|=F_ARRAY;
+    if(npa>0) used_flags|=F_PTR;
     for(int i=0;i<nvars;i++) sprintf(varnames[i],"v%d",i);
     emit_funcs();
     if(ng>0){ printf("int G0;\n"); if(ng>1) printf("int G1;\n"); }
@@ -162,23 +169,41 @@ static void emit_program(int nv,int nstmts){
     printf("}\n");
 }
 
+/* 自覆盖探针：声明过的 F_* 若本 run 从未被产出 → stderr 告警（不中断）。
+ * 保"声明了但 pick 够不到"不静默；count 过小可能误报，diffsynth 默认 count≥10 大多全触发。 */
+static void coverage_probe(int count){
+    static const struct { const char *n; unsigned f; } feats[] = {
+        {"F_CONST",F_CONST},{"F_VAR",F_VAR},{"F_ARITH",F_ARITH},{"F_CMP",F_CMP},
+        {"F_LOGIC",F_LOGIC},{"F_IF",F_IF},{"F_WHILE",F_WHILE},{"F_FOR",F_FOR},
+        {"F_BIT",F_BIT},{"F_GLOBAL",F_GLOBAL},{"F_ARRAY",F_ARRAY},{"F_PTR",F_PTR},{"F_FUNC",F_FUNC}
+    };
+    unsigned nsz=sizeof(feats)/sizeof(feats[0]);
+    for(unsigned i=0;i<nsz;i++)
+        if((g_caps & feats[i].f) && !(used_flags & feats[i].f))
+            fprintf(stderr,"[diffsynth WARN] CAPS 声明 %s 但本 run(count=%d) 从未被产出——检查 pick 是否被关闭特性 gate 住\n",
+                    feats[i].n,count);
+}
+
 int main(int argc,char **argv){
     unsigned seed=1; int count=1,target=1,nv=4,nstmts=6; const char *out=NULL;
-    for(int i=1;i<argc;i++){
+    {int i=1; while(i<argc){
         if(!strcmp(argv[i],"--seed")&&i+1<argc) seed=(unsigned)atoi(argv[++i]);
         else if(!strcmp(argv[i],"--count")&&i+1<argc) count=atoi(argv[++i]);
         else if(!strcmp(argv[i],"--vars")&&i+1<argc) nv=atoi(argv[++i]);
         else if(!strcmp(argv[i],"--stmts")&&i+1<argc) nstmts=atoi(argv[++i]);
         else if(!strcmp(argv[i],"--target")&&i+1<argc) target=(!strcmp(argv[++i],"cc500"))?2:1;
         else if(!strcmp(argv[i],"--out")&&i+1<argc) out=argv[++i];
-    }
+        i++;
+    }}
     g_caps=(target==2)?CAPS_CC500:CAPS_MINIC;
     if(count<1) count=1;
+    used_flags=0;
     for(int n=1;n<=count;n++){
         rng_state=seed*1000003u+(unsigned)n*2654435761u;
         if(out){ char p[512]; snprintf(p,sizeof p,"%s/prog_%03d.c",out,n);
             if(!freopen(p,"w",stdout)){ fprintf(stderr,"[gen] %s\n",p); return 2; } }
         emit_program(nv,nstmts); fflush(stdout);
     }
+    coverage_probe(count);
     return 0;
 }

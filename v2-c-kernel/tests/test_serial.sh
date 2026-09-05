@@ -57,7 +57,9 @@ pop_ts() {  # pop_ts <tsv> <断言名> <耗时ms> <ok|timeout>
     printf '%s\t%s\t%s\n' "$pdesc" "$3" "$4" >> "$1"
 }
 wait_for() {   # wait_for <说明> <正则> [超时秒]
-    local desc="$1" re="$2" tmo="${3:-8}" i t0 t1
+    # 时序对策：默认 20s（曾在 CI 负载下 8s 偶发超时 flake——`sbrk 扩 16KB`/`help 自发现`）。
+    # grep 作用在整个累计 LOG，命中即提前返回；仅原先超时的项耗时变长，RR 时序基线(P50/P95 of ok)不受扰。
+    local desc="$1" re="$2" tmo="${3:-20}" i t0 t1
     t0=$(date +%s%3N 2>/dev/null || echo 0)          # GNU date；mac 兜底 0
     for ((i = 0; i < tmo * 4; i++)); do
         grep -aq "$re" "$LOG" 2>/dev/null && break
