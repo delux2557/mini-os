@@ -36,8 +36,8 @@ static int rbool(void) { return (int)(rnd() & 1u); }
  * minicc 支持 int 子集全部；cc500 保守子集（缺 for，MVP 演示"按能力集裁剪"）。
  */
 enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
-       F_LOGIC=1<<4, F_IF=1<<5, F_WHILE=1<<6, F_FOR=1<<7 };
-#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR)
+       F_LOGIC=1<<4, F_IF=1<<5, F_WHILE=1<<6, F_FOR=1<<7, F_BIT=1<<8 };
+#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT)
 #define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE)   /* 保守；待查证 cc500 实子集 */
 
 static int g_caps;                        /* 当前目标能力集：数据非代码 */
@@ -55,7 +55,7 @@ static void clamp_iv(long *lo, long *hi) {
 
 /* 表达式生成：写入 dst（足够大缓冲），返回值域区间。suppress_div：右子树禁用除法以控分母来源。 */
 static void expr_gen(char *dst, int depth, long *lo, long *hi, int suppress_div) {
-    enum { E_CON, E_VAR, E_ADD, E_SUB, E_MUL, E_DIV, E_CMP, E_LOG };
+    enum { E_CON, E_VAR, E_ADD, E_SUB, E_MUL, E_DIV, E_CMP, E_LOG, E_AND, E_OR, E_XOR, E_SHR, E_NOT };
     enum { MAXDEPTH = 4 };
     if (depth >= MAXDEPTH) {              /* 深度基例：只产叶子 ⇒ 终止递归（防栈溢出） */
         if (has(F_VAR) && nvars > 0 && rbool()) {
@@ -67,13 +67,14 @@ static void expr_gen(char *dst, int depth, long *lo, long *hi, int suppress_div)
         }
         return;
     }
-    int np = 0, picks[16];
+    int np = 0, picks[18];
     picks[np++] = E_CON;
     if (has(F_VAR) && nvars > 0) picks[np++] = E_VAR;
     if (has(F_ARITH)) { picks[np++] = E_ADD; picks[np++] = E_SUB; if (nvars > 0) picks[np++] = E_MUL; }
     if (has(F_ARITH) && !suppress_div && nvars > 0) picks[np++] = E_DIV;
     if (has(F_CMP)) picks[np++] = E_CMP;
     if (has(F_LOGIC)) picks[np++] = E_LOG;
+    if (has(F_BIT)) { picks[np++] = E_AND; picks[np++] = E_OR; picks[np++] = E_XOR; picks[np++] = E_SHR; picks[np++] = E_NOT; }
     int k = picks[rndi(0, np - 1)];
 
     switch (k) {
@@ -114,6 +115,23 @@ static void expr_gen(char *dst, int depth, long *lo, long *hi, int suppress_div)
         expr_gen(r, depth + 1, &rl, &rh, 1);
         sprintf(dst, "((%s)%s(%s))", l, cops[rndi(0, 5)], r);
         *lo = 0; *hi = 1;
+        return;
+    }
+    case E_AND: case E_OR: case E_XOR: case E_SHR: case E_NOT: {   /* 位运算（子集：& | ^ >> ~）
+                                                                   * 经典保守：右移/取反/与或异或均非 UB 或实现一致可比；
+                                                                   * 不生成 `<<`（有符号左移溢出是 UB）。值域按宽区间保守
+                                                                   * 覆盖（clamp 兜底防后续算术溢出，维持无UB纪律）。 */
+        char l[128], r[128]; long ll, lh;
+        expr_gen(l, depth + 1, &ll, &lh, 0);
+        if (k == E_NOT)      sprintf(dst, "(~(%s))", l);
+        else if (k == E_SHR) { sprintf(r, "%d", rndi(1, 3)); sprintf(dst, "((%s)>>%s)", l, r); }
+        else {
+            const char *op = (k == E_AND) ? "&" : (k == E_OR) ? "|" : "^";
+            long rl, rh; expr_gen(r, depth + 1, &rl, &rh, 0);
+            sprintf(dst, "((%s)%s(%s))", l, op, r);
+        }
+        *lo = -CLAMP_MAX; *hi = CLAMP_MAX;   /* 位运算结果区间保守（无UB兜底） */
+        clamp_iv(lo, hi);
         return;
     }
     default: {                              /* E_LOG：窄布尔子表达式 ⇒ 结果恒 0/1 */
