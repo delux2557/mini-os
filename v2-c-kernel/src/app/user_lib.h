@@ -46,6 +46,7 @@
 #define SYS_KERN_AUDIT  34  /* v0.21: 内核自审计（帧配平/信号量守恒/PCB 状态机） */
 #define SYS_BRK         35  /* v0.26#2: 用户堆（brk/sbrk） */
 #define SYS_LIMIT       36  /* v0.34 BUG-058: per-process syscall 掩码（只收窄） */
+#define SYS_FS_READDIR  37  /* syscall#37: 把目录条目名枚举进用户缓冲（动态盘点，help 自发现） */
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {
@@ -107,6 +108,10 @@ static inline int sys_fs_read(uint32_t fd, void *buf, uint32_t len) {
     return (int)syscall3(SYS_FS_READ, fd, (uint32_t)buf, len);
 }
 static inline int sys_fs_close(uint32_t fd) { return (int)syscall3(SYS_FS_CLOSE, fd, 0, 0); }
+static inline int sys_fs_readdir(const char *path, char *buf, uint32_t cap) {
+    /* 目录条目枚举到 buf（条目名 \n 分隔，目录尾带 /）；返回写入字节数，-1=失败 */
+    return (int)syscall3(SYS_FS_READDIR, (uint32_t)path, (uint32_t)buf, cap);
+}
 static inline int sys_fs_seek(uint32_t fd, uint32_t pos) {
     return (int)syscall3(SYS_FS_SEEK, fd, pos, 0);
 }

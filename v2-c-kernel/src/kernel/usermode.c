@@ -428,6 +428,37 @@ static __attribute__((noinline)) void sys_fs_ls_case(registers_t *r, uint32_t a)
     r->eax = (uint32_t)n;
 }
 
+/* case 37 sys_fs_readdir(path, buf, cap)：把目录条目名枚举进用户缓冲（目录尾带 /，\n 分隔）。
+ * 返回写入字节数；cap=0 / 缓冲越界 / path 非法 → -1。
+ * 与 sys_fs_ls_case 同构的 2048B ents[64] 帧 -> 独立 noinline（栈预算总账）。
+ * 语义 syscall#37：为 shell help 提供"动态自发现"——嵌入新 ELF 即自动出现在清单，无需手改 help。 */
+static __attribute__((noinline)) void sys_fs_readdir_case(registers_t *r,
+                                                          uint32_t pa, uint32_t buf, uint32_t cap) {
+    char path[64];
+    const char *pp;
+    if (pa == 0) { pp = ""; }
+    else if (copyin_str((const char *)pa, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
+    else { pp = path; }
+    /* v0.36 BUG-067 ①/②/③：cap=0 非"未指定"哨兵（同 readline），且整区指针预检后才写 */
+    if (cap == 0 || !user_ptr_valid((const void *)buf, cap)) { r->eax = (uint32_t)-1; return; }
+    fs_dir_entry_t ents[FS_MAX_INODES];
+    int n = fs_list(fs_device(), pp, ents, FS_MAX_INODES);
+    if (n < 0) { r->eax = (uint32_t)-1; return; }
+    uint32_t pos = 0;
+    for (int i = 0; i < n; i++) {
+        const char *nm = ents[i].name;
+        int isdir = (ents[i].type == FS_TYPE_DIR);
+        uint32_t len = 0;
+        while (nm[len] && len < FS_MAX_NAME - 1) len++;
+        uint32_t need = len + (uint32_t)isdir + 1u;      /* name [+ /] +\n */
+        if (pos + need > cap) break;                      /* 空间不足：截断返回已写 */
+        copyout(nm, (char *)buf + pos, len); pos += len;
+        if (isdir) { copyout("/", (char *)buf + pos, 1); pos += 1; }
+        copyout("\n", (char *)buf + pos, 1); pos += 1;
+    }
+    r->eax = pos;
+}
+
 void syscall_dispatch(registers_t *r) {
     /* 只允许来自用户态（ring3）的触发 */
     if ((r->cs & 3) != 3) {
@@ -965,6 +996,9 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
+    case 37:  /* sys_fs_readdir(path, buf, cap)：目录条目枚举到用户缓冲（v0.37 动态盘点） */
+        sys_fs_readdir_case(r, a, b, c);
+        return;
     default:
         serial_printf("[user] unknown syscall %u\n", num);
         r->eax = (uint32_t)-1;

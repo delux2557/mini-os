@@ -64,6 +64,7 @@ mini-os 的开发文档遵循三条铁律：
 | design.md 落后 ~10 版（停 v0.27/v0.28，缺 v0.29~v1.x） | ✅ 已补写（20~22 章：加固收口 / RR 确定性 / 并发不变量，见 PR #51） |
 | docs 目录四象限重组（explanation/ / reference/ 分层） | ✅ 已落地（PR #52：design/roadmap → explanation/，changelog/bugs → reference/；契约与 history/ 留根，不设空 guides/） |
 | external-reviews 命名统一（部分缺审计对象 sha） | ✅ 已闭环（P2 迁移 history/，规则明文化：sha 可考才带后缀） |
+| **CI 健壮性债：`test` job 失败只报 `exit code 2`、原因不可见**（2026-09-05，PR #91 首跑 flake，annotation 无有效输出）| ⏳ 待办：失败自动归档 TEST_LAYERS 逐层日志 / 定位 exit 2 出处，避免"只见红、不明因" |
 
 ---
 
