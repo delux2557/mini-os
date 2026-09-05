@@ -104,6 +104,12 @@ hrun t_fornorestep 'int main(){int i;i=0;for(i=0;i<3;){i=i+1;}return 0;}' 0 'com
 hrun t_fornested 'int main(){int i;int j;int s;s=0;for(i=0;i<3;i=i+1)for(j=0;j<3;j=j+1)s=s+1;return 0;}' 0 'compiled OK' ''
 hrun t_logic 'int main(){int a;a=1;if(a==1&&!(a==0)||0==1)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_global 'int g=7;int main(){int x;x=g;return 0;}' 0 'compiled OK' ''
+# 任务1（锁 BUG-039）：GVAR hex 初始化器——0x800a0000 == 2148139008（此前把 x/a 当数字位得垃圾值，
+# 自举 CODE_BASE 崩坏源头）。宿主完整版本写后代码；运行语义断言（非仅 compiled OK）。
+hrun t_ghex 'int G=0x800a0000;int main(){if(G==2148139008)return 0;return 1;}' 0 'compiled OK' ''
+# 0X 大写前缀 + hex 回绕边界（0xFFFFFFFF -> -1）
+hrun t_ghexU 'int G=0X1F;int main(){if(G==31)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_ghexWrap 'int G=0xFFFFFFFF;int main(){if(G==-1)return 0;return 1;}' 0 'compiled OK' ''
 # 指针（V2b）：取地址/解引用/指针参数/指针算术
 hrun t_ptr 'int main(){int x;x=5;int* p;p=&x;if(*p==5)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_ptrwrite 'int main(){int a;int* p;p=&a;*p=7;if(a==7)return 0;return 1;}' 0 'compiled OK' ''
