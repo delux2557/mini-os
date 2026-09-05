@@ -78,6 +78,29 @@ MINICC_SELF_ELFOBJ = $(BUILD)/apps/minicc_self_elf.o
 MINICC_SELF_CSRC   = $(BUILD)/apps/minicc_self_csrc.o
 OBJS += $(MINICC_SELF_ELFOBJ) $(MINICC_SELF_CSRC)
 
+# ---- V4 mini-Csmith guest 差分（方案 B）：仅 GUEST_DIFF=1 启用，默认零侵入 ----
+# 思路：默认构建不 -DGUEST_DIFF ⇒ storage.c 不引用 dsXX，零侵入；当 GUEST_DIFF=1（且一般配
+# 独立 BUILD）时，把随机样本 .elf 内嵌进 initramfs，guest `run dsXX` 拿语义退码与 gcc 差分。
+ifdef GUEST_DIFF
+DS_DIR       = $(BUILD)/diffsynth
+DS_BIN       = $(DS_DIR)/gen
+DS_NAMES     = ds00 ds01 ds02 ds03 ds04 ds05 ds06 ds07 ds08 ds09 ds10 ds11
+DS_ELFOBJS   = $(addprefix $(DS_DIR)/,$(addsuffix _elf.o,$(DS_NAMES)))
+CFLAGS      += -DGUEST_DIFF=1
+OBJS        += $(DS_ELFOBJS)
+
+$(DS_BIN): tools/minicc/diffsynth/gen.c
+	@mkdir -p $(DS_DIR)
+	gcc -O2 -Wall -Wextra -Werror -o $@ $<
+
+# 一次性生成全部样本 .elf + _elf.o（哨兵 .done 防 make 对每个 target 重复跑脚本）
+$(DS_DIR)/.done: $(DS_BIN) tools/minicc/diffsynth/gen_guest_elfs.sh
+	@mkdir -p $(DS_DIR)
+	bash tools/minicc/diffsynth/gen_guest_elfs.sh $(DS_DIR) $(DS_BIN) 12
+	touch $@
+$(DS_ELFOBJS): $(DS_DIR)/.done
+endif
+
 # ---- 加固 A-1 ③：panic 调用栈回溯符号表（两阶段链接） ----
 # phase-1 先链出无符号表内核，经 nm 抽函数符号生成 ksym_tab.c，编成 ksym_tab.o，
 # phase-2 连同符号表重链出最终 kernel.elf。避免 kernel.elf -> ksym_tab.o 的循环依赖。
@@ -335,6 +358,11 @@ test-minicc:
 test-diffsynth:
 	bash tests/test_diffsynth.sh
 
+# V4 mini-Csmith 差分对拍（guest 运行语义差分）：GUEST_DIFF=1 独立子树内嵌随机样本，
+# QEMU 里 `run dsXX` 取运行退码与 gcc 参考比（脚本内部独立 build 子目录，不污染共享 build/）
+test-diffsynth-guest:
+	bash tests/test_diffsynth_guest.sh
+
 # v1.1 Step 2 串口网卡回归：COM2 + SLIP（RFC 1055）UDP 数据报与宿主对端往返一致
 test-slip:
 	bash tests/test_slip_net.sh
@@ -407,9 +435,9 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host qemu serial persist net socket cc500 minicc diffsynth slip tcp det tr rp stack
+TEST_LAYERS       = host qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp stack
 TEST_LAYERS_FAST  = host stack
-TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc diffsynth slip tcp det tr rp
+TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp
 
 test: $(addprefix test-,$(TEST_LAYERS))
 test-fast: $(addprefix test-,$(TEST_LAYERS_FAST))
@@ -466,4 +494,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-diffsynth test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean

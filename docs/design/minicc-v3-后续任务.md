@@ -94,6 +94,11 @@
 
 4. **C-Reduce 缓做**：受限生成器产出的样例本身小、且无 UB 纪律让定位容易；先上一个很薄的 ddmin（delta debugging）缩减器，失败样例真攒成"不小看不了"再上全套 creduce。
 
+**实现进度**（2026-09-05）：两层差分均已落地——
+- 宿主 acceptance 差分：`tests/test_diffsynth.sh`（gcc 哨兵 + minicc 接受 + determinism/不挂）；
+- **guest 运行语义差分**：`tests/test_diffsynth_guest.sh`（方案 B，`GUEST_DIFF=1` 把随机样本 ds00..ds11 批量嵌入 initramfs，QEMU `run dsXX` 取**运行退码**与 gcc 参考比对；默认构建零侵入，独立 build 子目录）。
+- **对比口径**：mini-os `exit_code` 是完整 uint32（负 `return` 显示巨大数如 4294967295），与宿主 gcc/qemu 的 `&0xff` 编码不同 —— 差分统一按 **return 值低 8 位语义**对齐（`&0xff`），故 `return -1` 时 guest=255、宿主 ref=255 判定一致。
+
 **验收**：原则 6 名实相符（有单测，或文档如实描述现状与计划）。
 
 ***
