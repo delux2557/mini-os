@@ -181,6 +181,21 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "for 求和 0..9 编译" "minicc: compiled OK" 40
     gwait "for 求和 0..9==45 运行" "\[micc\] '/mfo.elf' exited code=0 PASS" 40
     gsend "rm /mfo.c"; gsend "rm /mfo.elf"
+    # 任务9：patch 原语 —— 多行源文件按行替换后 micc 重编
+    #   heredoc 先写"错"（return 1）得 FAIL 基线，patch 改第 2 行成 return 0 后重编应 PASS
+    #   （源码 <128B 每行，绕开 writefile 单行截断；验证"增行编辑 → 重编"闭环）
+    gsend "writefile <<M /mpt.c"
+    gsend "int main(){"
+    gsend "return 1;}"
+    gsend "M"
+    gwait "patch 源 heredoc 写入" "\[writefile\] '/mpt.c' wrote 23 bytes" 40
+    gsend "micc /mpt.c /mpt.elf"
+    gwait "patch 前 FAIL 基线" "\[micc\] '/mpt.elf' exited code=1 FAIL" 40
+    gsend "patch /mpt.c 2 return 0;}"
+    gwait "patch 改第 2 行" "\[patch\] '/mpt.c' line 2 <- return 0;}" 40
+    gsend "micc /mpt.c /mpt.elf"
+    gwait "patch 后重编 PASS" "\[micc\] '/mpt.elf' exited code=0 PASS" 40
+    gsend "rm /mpt.c"; gsend "rm /mpt.elf"
     # 非零退出码语义：return 1 -> micc 必须报 FAIL（证明退出码真实传回，非恒 0）
     gsend "writefile /m1.c int main(){return 1;}"
     gsend "micc /m1.c /m1.elf"

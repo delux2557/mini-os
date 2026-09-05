@@ -78,6 +78,18 @@ wait_for "$LOG1" "writefile 写持久化源码" "\[writefile\] '/persist/p.c' wr
 send "ccrun /persist/p.c /persist/p.elf"
 wait_for "$LOG1" "cc500 编译持久化源码"   "cc500: compiled OK"
 wait_for "$LOG1" "编译产物落盘前可运行"    "\[ccrun\] '/persist/p.elf' exited code=0 PASS"
+# ---- 任务9：patch 原语 + 持久化（改一行源码 → micc 重编 → save 落盘，重启后仍在） ----
+send 'writefile <<PP /persist/patch.c'
+send 'int main(){'
+send 'return 1;}'
+send 'PP'
+wait_for "$LOG1" "patch 源 heredoc 写入"    "\[writefile\] '/persist/patch.c' wrote 23 bytes"
+send "micc /persist/patch.c /persist/patch.elf"
+wait_for "$LOG1" "patch 前 FAIL 基线"       "\[micc\] '/persist/patch.elf' exited code=1 FAIL"
+send "patch /persist/patch.c 2 return 0;}"
+wait_for "$LOG1" "patch 改第 2 行"          "\[patch\] '/persist/patch.c' line 2 <- return 0;}"
+send "micc /persist/patch.c /persist/patch.elf"
+wait_for "$LOG1" "patch 后重编 PASS"        "\[micc\] '/persist/patch.elf' exited code=0 PASS"
 send "save"
 wait_for "$LOG1" "save 写回磁盘"       "\[shell\] save -> 0"
 wait_for "$LOG1" "storage 保存日志"    "\[storage\] saved "
@@ -99,6 +111,11 @@ send "run /persist/p.elf"
 wait_for "$LOG2" "重启后编译产物被加载"  "\[elf\] '/persist/p.elf' loaded"
 wait_for "$LOG2" "重启后编译产物可运行"   "persist: hello"
 wait_for "$LOG2" "重启后编译产物退出码"   "'/persist/p.elf' exited code=0"
+# ---- 任务9：重启后 patch 改动仍在（cat 需见 return 0;}，且可重编译） ----
+send "cat /persist/patch.c"
+wait_for "$LOG2" "重启后 patch 改动仍在"  "return 0;}"
+send "micc /persist/patch.c /persist/patch2.elf"
+wait_for "$LOG2" "重启后 patch 源可重编译" "\[micc\] '/persist/patch2.elf' exited code=0 PASS"
 shutdown
 
 echo
