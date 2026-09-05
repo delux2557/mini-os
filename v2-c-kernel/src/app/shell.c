@@ -64,6 +64,7 @@ static void cmd_help(void) {
     sys_print("  writefile <<D <p> multi-line write until lone D line (heredoc, v1.4)\n");
     sys_print("  ccrun <src> <out> cc500 compile then run (write-compile-run, v0.27b)\n");
     sys_print("  micc <src> <out>  minicc compile then run (V1 int-only self-host)\n");
+    sys_print("  miccboot        minicc self-host: P1 compiles itself -> P2, verify P1==P2 (V3)\n");
     sys_print("  selftest        run all demos, print one-line PASS/FAIL (agent-verifiable)\n");
     sys_print("  exit            quit shell\n");
 }
@@ -378,6 +379,7 @@ static int file_equal(const char *a, const char *b) {
     if (syscall3(SYS_FS_OPEN, 1, (uint32_t)a, 0) != 0) return 0;
     if (syscall3(SYS_FS_OPEN, 2, (uint32_t)b, 0) != 0) { syscall3(SYS_FS_CLOSE, 1, 0, 0); return 0; }
     int eq = 1;
+    uint32_t off = 0;
     for (;;) {
         char ba[64], bb[64];
         int na = (int)syscall3(SYS_FS_READ, 1, (uint32_t)ba, 64);
@@ -385,8 +387,16 @@ static int file_equal(const char *a, const char *b) {
         if (na != nb) { eq = 0; break; }
         if (na <= 0) break;                 /* 两文件同时到 EOF */
         for (int i = 0; i < na; i++)
-            if (ba[i] != bb[i]) { eq = 0; break; }
+            if (ba[i] != bb[i]) {
+                eq = 0;
+                nl_reset();
+                nl_s("[diff] off="); nl_u(off + (uint32_t)i);
+                nl_s(" a="); nl_u((unsigned char)ba[i]);
+                nl_s(" b="); nl_u((unsigned char)bb[i]); nl_end();
+                break;
+            }
         if (!eq) break;
+        off += (uint32_t)na;
     }
     syscall3(SYS_FS_CLOSE, 1, 0, 0);
     syscall3(SYS_FS_CLOSE, 2, 0, 0);
@@ -411,6 +421,24 @@ static void cmd_ccboot(void) {
     nl_s("[ccboot] ");
     if (file_equal("/p1.elf", "/out.elf"))
         nl_s("byte-identical PASS\n");
+    else
+        nl_s("P1 != P2 FAIL\n");
+    nl_end();
+}
+
+/* V3 自举不动点（ccboot 的 minicc 对应物）：
+ *  - P1 = /minicc-self（宿主 minicc 编译 minicc_self.c 的产物，initramfs 嵌入）
+ *  - P1 硬编码编译 /minicc.c（= minicc_self.c 源码）-> /out.elf = P2
+ *  - 比对 P1 与 P2 逐字节一致 => 自举不动点（比 ccboot 差分更强的正确性证明） */
+static void cmd_miccboot(void) {
+    int pid = sys_spawn_file("minicc-self");
+    if (pid <= 0) { sys_print("[miccboot] cannot spawn minicc-self\n"); return; }
+    int code = 0;
+    (void)sys_wait((uint32_t)pid, &code);
+    nl_reset();
+    nl_s("[miccboot] ");
+    if (file_equal("/minicc-self", "/out.elf"))
+        nl_s("byte-identical PASS (P1 == P2)\n");
     else
         nl_s("P1 != P2 FAIL\n");
     nl_end();
@@ -596,6 +624,7 @@ void app_main(int argc, char **argv) {
         else if (user_strcmp(cmd, "writefile") == 0) cmd_writefile(arg);
         else if (user_strcmp(cmd, "ccrun") == 0)  cmd_ccrun(arg);
         else if (user_strcmp(cmd, "micc") == 0)   cmd_minicc(arg);
+        else if (user_strcmp(cmd, "miccboot") == 0) cmd_miccboot();
         else if (user_strcmp(cmd, "selftest") == 0) cmd_selftest();
         else if (user_strcmp(cmd, "exit") == 0) {
             sys_print("bye\n");

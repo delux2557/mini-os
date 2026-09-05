@@ -50,8 +50,7 @@ hrun() { # hrun <name> <src> <expect_rc> <must> <mustn't>
 echo "== [2/4] 宿主错误路径 =="
 # 未定义函数 -> 必须 FAIL + undefined function，不得 compiled OK
 hrun t_undef 'int main(){return f();}' 1 'undefined function' 'compiled OK'
-# 坏数字：0x10 / 123abc -> 必须 FAIL + bad number
-hrun t_hex 'int main(){return 0x10;}' 1 'bad number' 'compiled OK'
+# 坏数字：0x10 自 V3a 起为合法十六进制（成功路径见下）；123abc -> 必须 FAIL + bad number
 hrun t_mixnum 'int main(){int a;a=123abc;return a;}' 1 'bad number' 'compiled OK'
 # 未闭合块注释 -> 必须 FAIL + unterminated comment
 hrun t_comment 'int main(){/* x' 1 'unterminated comment' 'compiled OK'
@@ -67,7 +66,9 @@ hrun t_derefni 'int main(){int x;x=5;int y;y=*x;return y;}' 1 'dereference of no
 # 对非左值取地址 -> 必须 FAIL + cannot take address
 hrun t_badaddr 'int main(){int* p;p=&(1+2);return 0;}' 1 'cannot take address' 'compiled OK'
 # 指针/整型赋值不匹配 -> 必须 FAIL + type mismatch
-hrun t_ptrmism 'int main(){int x;int* p;p=5;return 0;}' 1 'type mismatch' 'compiled OK'
+# （V3a 放宽"右值 int 可赋给指针"以支撑 xmalloc int 地址赋 char*——t_ptrmism 原
+#   用例 `p=5` 已合法；改测取地址基类型不匹配：&c 是 char*，赋给 int* 仍必须拒绝）
+hrun t_ptrmism 'int main(){char c;c=65;int* p;p=&c;return 0;}' 1 'type mismatch' 'compiled OK'
 hrun t_ptrmism2 'int main(){int x;int* p;x=p;return 0;}' 1 'type mismatch' 'compiled OK'
 echo "== [2a2] 宿主字符串/char 错误路径（V2c） =="
 # 未闭合字符串（EOF/\n 守卫，cc500 F-3 教训）-> 必须 FAIL + unterminated string
@@ -90,6 +91,11 @@ hrun t_aparam 'int f(int a[3]){return 0;}int main(){return 0;}' 1 'array paramet
 echo "== [2b] 宿主成功路径 =="
 # 成功：变量/四则/if/else/while/递归/全局/逻辑，编译层全过
 hrun t_arith 'int main(){int a;a=1+2*3-4;return 0;}' 0 'compiled OK' ''
+# V3a：十六进制字面量 + 位运算（& | ^ << >> ~）
+hrun t_hex 'int main(){int a;a=0x10;if(a==16&&0xff==255&&0x0a==10)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_bitops 'int main(){int a;a=6;if((a&3)==2&&(a|1)==7&&(a^2)==4)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_shift 'int main(){int a;a=1;if((a<<4)==16&&(48>>4)==3)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_bnot 'int main(){int a;a=0;if((~a)==-1)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_rec 'int fact(int n){if(n<=1)return 1;return n*fact(n-1);}int main(){return 0;}' 0 'compiled OK' ''
 hrun t_logic 'int main(){int a;a=1;if(a==1&&!(a==0)||0==1)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_global 'int g=7;int main(){int x;x=g;return 0;}' 0 'compiled OK' ''
@@ -150,66 +156,89 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "micc /mt.c /mt.elf"
     gwait "变量四则编译" "minicc: compiled OK" 40
     gwait "a=1+2==3 return 0" "\[micc\] '/mt.elf' exited code=0 PASS" 40
+    # 清理用例文件（FS inode 表 64 项单块：不 rm 会随用例累计耗尽，致后续 create 失败）
+    gsend "rm /mt.c"; gsend "rm /mt.elf"
     # 递归 + 参数 + 乘法
     gsend "writefile /mf.c int fact(int n){if(n<=1)return 1;return n*fact(n-1);}int main(){if(fact(5)==120)return 0;return 1;}"
     gsend "micc /mf.c /mf.elf"
     gwait "fact(5)==120 编译" "minicc: compiled OK" 40
     gwait "fact(5)==120 运行" "\[micc\] '/mf.elf' exited code=0 PASS" 40
+    gsend "rm /mf.c"; gsend "rm /mf.elf"
     # 全局 + while + 除法/取模 + &&（源码 <128B 避开 writefile 单行截断，同 test_cc500 F-6）
     gsend "writefile /mg.c int g;int main(){int i;i=0;while(i<10){g=g+i;i=i+1;}if(g==45&&17/5==3&&17%5==2)return 0;return 1;}"
     gsend "micc /mg.c /mg.elf"
     gwait "while+div/mod 编译" "minicc: compiled OK" 40
     gwait "g==45 && 17/5==3 && 17%5==2" "\[micc\] '/mg.elf' exited code=0 PASS" 40
+    gsend "rm /mg.c"; gsend "rm /mg.elf"
     # 非零退出码语义：return 1 -> micc 必须报 FAIL（证明退出码真实传回，非恒 0）
     gsend "writefile /m1.c int main(){return 1;}"
     gsend "micc /m1.c /m1.elf"
     gwait "return 1 -> FAIL 语义" "\[micc\] '/m1.elf' exited code=1 FAIL" 40
+    gsend "rm /m1.c"; gsend "rm /m1.elf"
     # 编译错误路径：未定义函数 -> compile FAIL（编译器自身 rc=1 传回 shell）
     gsend "writefile /me.c int main(){return g();}"
     gsend "micc /me.c /me.elf"
     gwait "undefined 编译报错" "\[micc\] compile FAIL" 40
+    gsend "rm /me.c"; gsend "rm /me.elf"
     # 指针（V2b）：取地址/解引用读写/指针参数/指针算术/多级指针拒绝
     gsend "writefile /pa.c int main(){int x;x=5;int* p;p=&x;if(*p==5)return 0;return 1;}"
     gsend "micc /pa.c /pa.elf"
     gwait "指针取地址解引用" "\[micc\] '/pa.elf' exited code=0 PASS" 40
+    gsend "rm /pa.c"; gsend "rm /pa.elf"
     gsend "writefile /pb.c int main(){int a;int* p;p=&a;*p=7;if(a==7)return 0;return 1;}"
     gsend "micc /pb.c /pb.elf"
     gwait "指针解引用写" "\[micc\] '/pb.elf' exited code=0 PASS" 40
+    gsend "rm /pb.c"; gsend "rm /pb.elf"
     gsend "writefile /pc.c int f(int* p){return *p;}int main(){int a;a=3;if(f(&a)==3)return 0;return 1;}"
     gsend "micc /pc.c /pc.elf"
     gwait "指针参数 f(&a)" "\[micc\] '/pc.elf' exited code=0 PASS" 40
+    gsend "rm /pc.c"; gsend "rm /pc.elf"
     gsend "writefile /pd.c int main(){int a;a=10;int* p;p=&a;if(*(p+0)==10)return 0;return 1;}"
     gsend "micc /pd.c /pd.elf"
     gwait "指针算术 p+0" "\[micc\] '/pd.elf' exited code=0 PASS" 40
+    gsend "rm /pd.c"; gsend "rm /pd.elf"
     gsend "writefile /pe.c int main(){int* p;int** q;return 0;}"
     gsend "micc /pe.c /pe.elf"
     gwait "多级指针编译拒绝" "\[micc\] compile FAIL" 40
+    gsend "rm /pe.c"; gsend "rm /pe.elf"
     # 字符串/char（V2c）：char 变量、字符串字面量解引用
     gsend "writefile /s1.c int main(){char c;c=65;if(c==65)return 0;return 1;}"
     gsend "micc /s1.c /s1.elf"
     gwait "char 变量" "\[micc\] '/s1.elf' exited code=0 PASS" 40
+    gsend "rm /s1.c"; gsend "rm /s1.elf"
     gsend "writefile /s2.c int main(){char* s;s=\"hi\";if(*s==104)return 0;return 1;}"
     gsend "micc /s2.c /s2.elf"
     gwait "字符串解引用" "\[micc\] '/s2.elf' exited code=0 PASS" 40
+    gsend "rm /s2.c"; gsend "rm /s2.elf"
     # 可观察 I/O（V2c）：产物经 syscall3 stub 调 SYS_PRINT 输出 "ZY"（源码用 \x 转义，
     # 源码回显/minicc 自身输出均不含 "ZY"，该串只来自产物运行期输出 -> 证明写-编-跑闭环）
     gsend "writefile /s3.c int main(){syscall3(1,\"\\x5a\\x59\",0,0);return 0;}"
     gsend "micc /s3.c /s3.elf"
     gwait "产物输出 ZY（I/O）" "ZY" 40
     gwait "sys_print I/O 运行" "\[micc\] '/s3.elf' exited code=0 PASS" 40
+    gsend "rm /s3.c"; gsend "rm /s3.elf"
     # 数组（V2d）：局部读写求和、char 数组、全局数组、&a[0] 指针
     gsend "writefile /a1.c int main(){int a[3];a[0]=1;a[1]=2;a[2]=3;return a[0]+a[1]+a[2]-6;}"
     gsend "micc /a1.c /a1.elf"
     gwait "数组读写求和" "\[micc\] '/a1.elf' exited code=0 PASS" 40
+    gsend "rm /a1.c"; gsend "rm /a1.elf"
     gsend "writefile /a2.c int main(){char s[3];s[0]=104;s[1]=105;s[2]=0;if(s[0]==104)return 0;return 1;}"
     gsend "micc /a2.c /a2.elf"
     gwait "char 数组" "\[micc\] '/a2.elf' exited code=0 PASS" 40
+    gsend "rm /a2.c"; gsend "rm /a2.elf"
     gsend "writefile /a3.c int a[2];int main(){a[0]=7;a[1]=8;return a[0]+a[1]-15;}"
     gsend "micc /a3.c /a3.elf"
     gwait "全局数组" "\[micc\] '/a3.elf' exited code=0 PASS" 40
+    gsend "rm /a3.c"; gsend "rm /a3.elf"
     gsend "writefile /a4.c int main(){int a[2];a[0]=9;int* p;p=&a[0];return *p-9;}"
     gsend "micc /a4.c /a4.elf"
     gwait "数组 &a[0] 指针" "\[micc\] '/a4.elf' exited code=0 PASS" 40
+    gsend "rm /a4.c"; gsend "rm /a4.elf"
+    # 位运算（V3a）：& | << 混合（含十六进制 0x30）
+    gsend "writefile /b1.c int main(){int a;a=6;if((a&3)==2&&(a|1)==7&&(a<<4)==96&&0x30==48)return 0;return 1;}"
+    gsend "micc /b1.c /b1.elf"
+    gwait "位运算+hex 运行" "\[micc\] '/b1.elf' exited code=0 PASS" 40
+    gsend "rm /b1.c"; gsend "rm /b1.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest micc 端到端通过"
 else

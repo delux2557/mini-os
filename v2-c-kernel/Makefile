@@ -71,6 +71,12 @@ OBJS += $(CC500_CSRC)
 # minicc 编译器 ELF blob（嵌入 initramfs 作 /minicc，V1 int-only 自研编译器）
 MINICC_ELFOBJ = $(BUILD)/apps/minicc_elf.o
 OBJS += $(MINICC_ELFOBJ)
+# V3 自举：minicc-self（P1，宿主 minicc 编译 minicc_self.c 的产物，嵌入作 /minicc-self）
+# 与 minicc_self.c 源码 blob（嵌入作 /minicc.c，P1 在 guest 内编译它的输入）。
+# 必须在 $(KERNEL): $(OBJS) 规则之前 append（同 CC500_CSRC 的时序约束）。
+MINICC_SELF_ELFOBJ = $(BUILD)/apps/minicc_self_elf.o
+MINICC_SELF_CSRC   = $(BUILD)/apps/minicc_self_csrc.o
+OBJS += $(MINICC_SELF_ELFOBJ) $(MINICC_SELF_CSRC)
 
 # ---- 加固 A-1 ③：panic 调用栈回溯符号表（两阶段链接） ----
 # phase-1 先链出无符号表内核，经 nm 抽函数符号生成 ksym_tab.c，编成 ksym_tab.o，
@@ -247,6 +253,21 @@ $(BUILD)/apps/minicc_crt.o: src/app/minicc_crt.c
 $(BUILD)/apps/minicc.elf: $(BUILD)/apps/minicc.o $(BUILD)/apps/minicc_crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/minicc_crt.o $<
 # ELF 原始字节内嵌走既有 %_elf.o 模式规则（符号 _binary_minicc_elf_start/end）
+
+# ---- V3 自举：minicc-self（P1）----
+#  P1 = 宿主 minicc（gcc 构建）编译 minicc_self.c 的产物；P2 = P1 在 guest 内编译
+#  minicc_self.c（/minicc.c）的产物；miccboot 验证 P1 == P2 逐字节一致（自举不动点）。
+#  - hostminicc 走宿主 gcc（32 位，host_crt.c 模拟 Linux 文件 I/O），不落于 freestanding 门禁
+#  - P1 用 qemu-i386 运行宿主版（32 位 PIE，无 ia32 用户空间）；产物即嵌入 initramfs 的 ELF
+$(BUILD)/hostminicc: tools/minicc/minicc.c tools/minicc/host_crt.c
+	$(CC) -m32 -O2 -o $@ tools/minicc/minicc.c tools/minicc/host_crt.c
+$(BUILD)/apps/minicc_self.elf: $(BUILD)/hostminicc tools/minicc/minicc_self.c
+	qemu-i386 $(BUILD)/hostminicc tools/minicc/minicc_self.c $@
+$(BUILD)/apps/minicc_self.c: tools/minicc/minicc_self.c
+	cp $< $@
+$(BUILD)/apps/minicc_self_csrc.o: $(BUILD)/apps/minicc_self.c
+	cd $(BUILD)/apps && $(OBJCOPY) -I binary -O elf32-i386 -B i386 minicc_self.c minicc_self_csrc.o
+# minicc_self.elf 的 %_elf.o 内嵌走既有模式规则（符号 _binary_minicc_self_elf_start/end）
 
 # ---- netif Step 4：httpdemo（虚拟 TCP 薄包装演示）。薄包装 lib（src/app/tcp.c）
 # 与演示共享同一套 CFLAGS（-Isrc/net 已含 tcp_proto.h），链接进 httpdemo.elf ----

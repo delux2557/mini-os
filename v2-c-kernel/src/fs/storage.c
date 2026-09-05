@@ -16,7 +16,8 @@
 #include "version.h"   /* v0.30（评估 L-4）：motd 版本串单一来源 */
 #include <stdint.h>
 
-#define RAMDISK_BLOCKS 256            /* 1MB：数据块 252 个，足够多文件/跨块写 */
+#define RAMDISK_BLOCKS 768           /* 3MB：initramfs（含 V3 自举 minicc-self 686KB + minicc.c 40KB）
+                                      * + 运行时 /out.elf(686KB) 峰值 ~1.8MB；256(1MB) 会写穿失败（shell 缺） */
 #define SECTORS_PER_BLOCK (BLOCK_SIZE / ATA_SECTOR_SIZE)   /* 4096/512 = 8 */
 
 static blockdev_t ramdisk;
@@ -81,6 +82,8 @@ extern char _binary_bigdemo_elf_start[], _binary_bigdemo_elf_end[];
 extern char _binary_cc500_elf_start[],  _binary_cc500_elf_end[];     /* v0.27 编译器 ELF */
 extern char _binary_cc500_c_start[],    _binary_cc500_c_end[];       /* v0.27 编译器源码 */
 extern char _binary_minicc_elf_start[], _binary_minicc_elf_end[];    /* V1 自研编译器 ELF */
+extern char _binary_minicc_self_elf_start[], _binary_minicc_self_elf_end[]; /* V3 自举 P1 ELF */
+extern char _binary_minicc_self_c_start[], _binary_minicc_self_c_end[];     /* V3 自举源码（/minicc.c） */
 extern char _binary_shell_elf_start[], _binary_shell_elf_end[];
 extern char _binary_httpdemo_elf_start[], _binary_httpdemo_elf_end[];  /* v1.1 Step 4 虚拟 TCP */
 extern char _binary_dldemo_elf_start[],    _binary_dldemo_elf_end[];    /* v1.2 大文件下载 */
@@ -174,6 +177,13 @@ static void initramfs_setup(void) {
     initramfs_file("minicc",
                    _binary_minicc_elf_start,
                    (uint32_t)(_binary_minicc_elf_end - _binary_minicc_elf_start));
+    /* V3 自举：P1（minicc-self）+ 其源码（minicc.c）——shell `miccboot` 验证 P1==P2 */
+    initramfs_file("minicc-self",
+                   _binary_minicc_self_elf_start,
+                   (uint32_t)(_binary_minicc_self_elf_end - _binary_minicc_self_elf_start));
+    initramfs_file("minicc.c",
+                   _binary_minicc_self_c_start,
+                   (uint32_t)(_binary_minicc_self_c_end - _binary_minicc_self_c_start));
     initramfs_file("shell",
                    _binary_shell_elf_start,
                    (uint32_t)(_binary_shell_elf_end - _binary_shell_elf_start));
@@ -215,6 +225,7 @@ static const char *const sysfiles[] = {
     "hello", "echo", "crash", "isol", "forkdemo", "args", "stackovf",
     "deep", "deepfork", "deepexec", "heapdemo", "fsdemo", "waitdemo",
     "abuse", "sockdemo", "zbig", "bigdemo", "cc500", "cc500.c",
+    "minicc", "minicc-self", "minicc.c",
     "shell", "httpdemo", "dldemo", "cansmash", "sandboxdemo",
 };
 #define SYSFILES_COUNT (sizeof(sysfiles) / sizeof(sysfiles[0]))
@@ -264,9 +275,9 @@ void storage_init(void) {
     /* 无盘：纯内存盘（v0.8 原行为，重启丢失） */
     fs_mount(&ramdisk);
     int rc = fs_init(&ramdisk);
-    serial_printf("[storage] ramdisk %u blocks @%x (1MB), format %s\n",
-                  RAMDISK_BLOCKS, phys, rc == 0 ? "ok" : "FAIL");
-    vga_printf("[storage] ramdisk %u blocks @%x (1MB), format %s\n",
-               RAMDISK_BLOCKS, phys, rc == 0 ? "ok" : "FAIL");
+    serial_printf("[storage] ramdisk %u blocks @%x (%uKB), format %s\n",
+                  RAMDISK_BLOCKS, phys, RAMDISK_BLOCKS * 4u, rc == 0 ? "ok" : "FAIL");
+    vga_printf("[storage] ramdisk %u blocks @%x (%uKB), format %s\n",
+               RAMDISK_BLOCKS, phys, RAMDISK_BLOCKS * 4u, rc == 0 ? "ok" : "FAIL");
     initramfs_setup();
 }
