@@ -23,28 +23,30 @@
 int sys_print(char* s) { syscall3(1, s, 0, 0); return 0; }
 
 /* ---- 内存池（全部静态并行数组；code/in 经 brk 动态分配） ---- */
+/* V4 arena 瘦身：小枚举字段用 char[N] 压缩（nkind/nty/nbty/nvkind/nnargs/nnlocals
+ * 值恒 <256；其余节点句柄/偏移仍须 int）。 */
 int NMAX = 8192;            /* AST 节点池上限 */
-int nkind[8192]; int nty[8192]; int nbty[8192]; int nlen[8192];
+char nkind[8192]; char nty[8192]; char nbty[8192]; int nlen[8192];
 int nl[8192]; int nr[8192]; int na[8192]; int nb[8192]; int nnext[8192];
-int nval[8192]; int nvkind[8192]; int nvslot[8192]; int nival[8192];
-int nnargs[8192]; int nnlocals[8192];
+int nval[8192]; char nvkind[8192]; int nvslot[8192]; int nival[8192];
+char nnargs[8192]; char nnlocals[8192];
 int nn;                     /* 当前节点数（0 保留为 NULL） */
 
-char strtab[32768];         /* 名字池（str_add 追加，NUL 终止） */
+char strtab[20480];         /* 名字池（str_add 追加，NUL 终止） */
 int nstr;
 
-char strpool[8192];         /* 字符串字面量池（只读数据段） */
+char strpool[4096];         /* 字符串字面量池（只读数据段） */
 int nstrpool; int strpool_base;
 
 char tok[256];              /* 当前 token 缓冲 */
 int toklen; int tok_is_word; int tok_is_num; int tok_is_str; int tok_is_char;
 
-int SYM_MAX = 512; int PATCH_MAX = 4096; int LAB_MAX = 4096;
-int skind[512]; int sty[512]; int sbty[512]; int slen[512]; int sval[512]; int sname[512];
+int SYM_MAX = 256; int PATCH_MAX = 2048; int LAB_MAX = 2048;
+int skind[256]; int sty[256]; int sbty[256]; int slen[256]; int sval[256]; int sname[256];
 int nsym;
-int pk[4096]; int ppos[4096]; int pname[4096];
+int pk[2048]; int ppos[2048]; int pname[2048];
 int npatch;
-int lpos[4096]; int lkind[4096]; int ltarget[4096];
+int lpos[2048]; int lkind[2048]; int ltarget[2048];
 int nlab;
 
 int CODE_BASE = 0x800a0000; /* APP_LINK（hex 字面量，int 可载） */
