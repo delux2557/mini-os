@@ -60,8 +60,8 @@ echo "== [1/4] 构建内核 =="
 make BUILD="$BUILD" >/dev/null 2>&1 || { echo "[FAIL] 内核构建失败"; exit 1; }
 echo "      构建完成"
 
-echo "== [2/4] 生成 1MB 空白磁盘镜像 =="
-dd if=/dev/zero of="$IMG" bs=1024 count=1024 2>/dev/null
+echo "== [2/4] 生成 3MB 空白磁盘镜像 =="
+dd if=/dev/zero of="$IMG" bs=1024 count=3072 2>/dev/null
 echo "      镜像: $(stat -c%s "$IMG") bytes"
 
 echo "== [3/4] 第 1 次运行：格式化 + 建目录 + save =="
