@@ -8,7 +8,7 @@
  *   P1 与 P2 逐字节一致 => 自举不动点（ccboot 模式，比差分更强的正确性证明）。
  *
  * 子集纪律（本文件必须完全落于 minicc 支持的子集，任何违规都是 bug）：
- *   - 无 struct/enum/typedef/static/include/宏；无 for/switch/+=/++/--/?:/多级指针
+ *   - 无 struct/enum/typedef/static/include/宏；无 switch/+=/++/--/?:/多级指针
  *   - 无函数原型声明（minicc 隐式声明 + patch 收集，函数可任意顺序定义）
  *   - 无返回指针的函数（函数返回 int）；AST 用"并行数组 + int 句柄"表达
  *   - 常量用全局 int 变量初始化（数字/字符字面量）；数组大小须为数字字面量
@@ -69,8 +69,8 @@ int ND_AND = 20; int ND_OR = 21; int ND_NEG = 22; int ND_NOT = 23; int ND_BNOT =
 int ND_ASSIGN = 25;
 int ND_ADDR = 26; int ND_DEREF = 27;
 int ND_INDEX = 28;
-int ND_EXPR_STMT = 29; int ND_BLOCK = 30; int ND_IF = 31; int ND_WHILE = 32; int ND_RET = 33;
-int ND_DECL = 34; int ND_FUNC = 35; int ND_GVAR = 36;
+int ND_EXPR_STMT = 29; int ND_BLOCK = 30; int ND_IF = 31; int ND_WHILE = 32; int ND_FOR = 33; int ND_RET = 34;
+int ND_DECL = 35; int ND_FUNC = 36; int ND_GVAR = 37;
 
 int print_num(int v) {
     char buf[16]; int bi = 0; int i;
@@ -755,6 +755,18 @@ int stmt() {
         nr[n] = stmt();
         return n;
     }
+    if (accept_s("for")) {
+        expect_s("(");
+        n = node_new(ND_FOR);
+        if (peek_s(";") == 0) nl[n] = expr();
+        expect_s(";");
+        if (peek_s(";") == 0) nr[n] = expr();
+        expect_s(";");
+        if (peek_s(")") == 0) na[n] = expr();
+        expect_s(")");
+        nb[n] = stmt();
+        return n;
+    }
     if (accept_s("return")) {
         n = node_new(ND_RET);
         if (peek_s(";") == 0) nl[n] = expr();
@@ -1022,6 +1034,17 @@ int gen_stmt(int n) {
         int en = new_lab();
         gen(nl[n]); emit_test(); emit_cond(0x84, en);
         gen_stmt(nr[n]);
+        emit_jmp_to(top);
+        patch_lab(en, code_len);
+        return 0;
+    }
+    if (nkind[n] == ND_FOR) {
+        if (nl[n] != 0) gen(nl[n]);
+        int top = code_len;
+        int en = new_lab();
+        if (nr[n] != 0) { gen(nr[n]); emit_test(); emit_cond(0x84, en); }
+        gen_stmt(nb[n]);
+        if (na[n] != 0) gen(na[n]);
         emit_jmp_to(top);
         patch_lab(en, code_len);
         return 0;

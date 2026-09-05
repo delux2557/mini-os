@@ -97,6 +97,11 @@ hrun t_bitops 'int main(){int a;a=6;if((a&3)==2&&(a|1)==7&&(a^2)==4)return 0;ret
 hrun t_shift 'int main(){int a;a=1;if((a<<4)==16&&(48>>4)==3)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_bnot 'int main(){int a;a=0;if((~a)==-1)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_rec 'int fact(int n){if(n<=1)return 1;return n*fact(n-1);}int main(){return 0;}' 0 'compiled OK' ''
+# for（V4）：标准三表达式 + 空条件/空步进 + 嵌套，编译层全过（运行语义见 guest）
+hrun t_for 'int main(){int i;int s;s=0;for(i=0;i<10;i=i+1)s=s+i;return 0;}' 0 'compiled OK' ''
+hrun t_forempty 'int main(){int i;i=0;for(;;){i=i+1;if(i>3)return 0;}}' 0 'compiled OK' ''
+hrun t_fornorestep 'int main(){int i;i=0;for(i=0;i<3;){i=i+1;}return 0;}' 0 'compiled OK' ''
+hrun t_fornested 'int main(){int i;int j;int s;s=0;for(i=0;i<3;i=i+1)for(j=0;j<3;j=j+1)s=s+1;return 0;}' 0 'compiled OK' ''
 hrun t_logic 'int main(){int a;a=1;if(a==1&&!(a==0)||0==1)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_global 'int g=7;int main(){int x;x=g;return 0;}' 0 'compiled OK' ''
 # 指针（V2b）：取地址/解引用/指针参数/指针算术
@@ -170,6 +175,12 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "while+div/mod 编译" "minicc: compiled OK" 40
     gwait "g==45 && 17/5==3 && 17%5==2" "\[micc\] '/mg.elf' exited code=0 PASS" 40
     gsend "rm /mg.c"; gsend "rm /mg.elf"
+    # for（V4）：三表达式求 0..9 和 ==45，运行语义（<128B 避开 writefile 单行截断）
+    gsend "writefile /mfo.c int main(){int i;int s;s=0;for(i=0;i<10;i=i+1)s=s+i;if(s==45)return 0;return 1;}"
+    gsend "micc /mfo.c /mfo.elf"
+    gwait "for 求和 0..9 编译" "minicc: compiled OK" 40
+    gwait "for 求和 0..9==45 运行" "\[micc\] '/mfo.elf' exited code=0 PASS" 40
+    gsend "rm /mfo.c"; gsend "rm /mfo.elf"
     # 非零退出码语义：return 1 -> micc 必须报 FAIL（证明退出码真实传回，非恒 0）
     gsend "writefile /m1.c int main(){return 1;}"
     gsend "micc /m1.c /m1.elf"

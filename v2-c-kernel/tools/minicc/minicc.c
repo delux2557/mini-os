@@ -19,7 +19,7 @@
  *   字面量十进制 + 字符串 + 字符；字符串字面量（\n \t \\ \" \' \0 \xNN 转义，
  *   ≤254 字节，入只读数据段，隐式 char*）；局部/参数/全局变量（全局仅常量初始化）；
  *   + - * / % < <= > >= == != && || ! 一元负号、赋值；& 取地址、* 解引用、a[i] 下标
- *   （下标边界不检查，UB 由用户负责）；{} if/else while return 表达式语句；
+ *   （下标边界不检查，UB 由用户负责）；{} if/else while for return 表达式语句；
  *   多参数函数、递归、前向调用；块注释与 // 行注释；隐式声明并调用
  *   syscall3(n,a,b,c)（编译器生成机器码 stub）。
  *
@@ -240,7 +240,7 @@ enum {
     ND_ASSIGN,
     ND_ADDR, ND_DEREF,         /* V2b：& 取地址 / * 解引用 */
     ND_INDEX,                  /* V2d：a[i] 下标（l=数组 VAR，r=下标表达式，左值） */
-    ND_EXPR_STMT, ND_BLOCK, ND_IF, ND_WHILE, ND_RET,
+    ND_EXPR_STMT, ND_BLOCK, ND_IF, ND_WHILE, ND_FOR, ND_RET,
     ND_DECL, ND_FUNC, ND_GVAR
 };
 
@@ -863,6 +863,21 @@ static Node *stmt(void) {
         n->r = stmt();
         return n;
     }
+    if (accept("for")) {
+        expect("(");
+        n = node_new(ND_FOR);
+        /* 空初始化 -> NULL；否则解析表达式语句（不消费分号的 expr） */
+        if (!is_sym(";")) n->l = expr();
+        expect(";");
+        /* 条件可空（无限循环） */
+        if (!is_sym(";")) n->r = expr();
+        expect(";");
+        /* 步进可空 */
+        if (!is_sym(")")) n->a = expr();
+        expect(")");
+        n->b = stmt();
+        return n;
+    }
     if (accept("return")) {
         n = node_new(ND_RET);
         if (!is_sym(";")) n->l = expr();
@@ -1129,6 +1144,19 @@ static void gen_stmt(Node *n) {
         int en = new_lab();
         gen(n->l); emit_test(); emit_cond(0x84, en);
         gen_stmt(n->r);
+        emit_jmp_to(top);
+        patch_lab(en, code_len);
+        return;
+    }
+    case ND_FOR: {
+        /* for(init;cond;step)body：l=init, r=cond(可空), a=step(可空), b=body
+         * 空 init 时需额外跳过一个空语句（node_new 生 ND_EXPR_STMT(0) 亦可空跑） */
+        if (n->l) gen(n->l);
+        int top = code_len;
+        int en = new_lab();
+        if (n->r) { gen(n->r); emit_test(); emit_cond(0x84, en); }
+        gen_stmt(n->b);
+        if (n->a) gen(n->a);
         emit_jmp_to(top);
         patch_lab(en, code_len);
         return;
