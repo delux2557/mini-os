@@ -81,6 +81,11 @@ send() { printf '%s\n' "$1" >&9; sleep 0.3; }
 wait_for "shell 提示符"        "mini-os\$ " 20
 
 echo "== [3/3] agent 逐命令交互 =="
+# F10/3b：超长单行应触发内核截断告警（提示用 heredoc）。send 一条 >128B 无空格垃圾串，
+# 内核行缓冲 128B 截断 -> shell 收到截断行当命令（unknown command），且应见 [kb] 告警。
+longline=$(printf 'a%.0s' $(seq 1 150))
+send "$longline"
+wait_for "超长行截断告警" "\[kb\] warning: input line >128B truncated"
 send "help"
 wait_for "命令回显 help"       "help"
 wait_for "help 输出"           "mini-os shell commands:"
