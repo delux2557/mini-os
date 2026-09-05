@@ -48,6 +48,9 @@ static void sys_print(const char *s) {
 }
 
 const char *tokbuf_current(void);       /* 定义在词法章节 */
+static int src_pos;                     /* fail 调试定位用（词法区定义，前向声明） */
+static int src_len;
+static const unsigned char *src;
 
 /* 编译错误：打印上下文 token 后以 1 退出（host/guest 均由 sys_exit 兜底） */
 static void fail(const char *msg) {
@@ -55,7 +58,32 @@ static void fail(const char *msg) {
     sys_print(msg);
     sys_print(" [");
     sys_print(tokbuf_current());
-    sys_print("]\n");
+    sys_print("] @");
+    {   /* 调试：打印 src_pos（十进制）与上下文源码行 */
+        int p = src_pos, d = 1000000, f = 0;
+        char buf[16]; int bi = 0;
+        if (p == 0) { buf[bi++] = '0'; }
+        while (d > 0) {
+            int q = p / d; p = p % d;
+            if (q || f) { buf[bi++] = (char)('0' + q); f = 1; }
+            d = d / 10;
+        }
+        buf[bi] = 0;
+        sys_print(buf);
+    }
+    sys_print(" pos ");
+    {   /* 调试：打印错误 token 前的原始源码上下文 */
+        int st = src_pos - 30; if (st < 0) st = 0;
+        int en = src_pos + 30; if (en > src_len) en = src_len;
+        sys_print(" ctx[");
+        for (int i = st; i < en; i++) {
+            char bb[2];
+            if (src[i] == '\n') { sys_print("\\n"); continue; }
+            bb[0] = (char)src[i]; bb[1] = 0;
+            sys_print(bb);
+        }
+        sys_print("]\n");
+    }
     syscall3(0, 1, 0, 0);                   /* SYS_EXIT(1) */
 }
 
@@ -133,7 +161,9 @@ static Sym syms[SYM_MAX];
 static int nsym;
 
 static int sym_find(const char *name) {
-    for (int i = 0; i < nsym; i++)
+    /* V3：从后往前查找（最近声明优先）——局部变量遮蔽同名的全局函数/变量
+     * （如 finish() 的局部 rel 遮蔽解析函数 rel，BUG-035）。 */
+    for (int i = nsym - 1; i >= 0; i--)
         if (s_eq(syms[i].name, name)) return i;
     return -1;
 }
@@ -151,7 +181,7 @@ static int sym_add(const char *name, int kind, int ty, int bty, int len, int val
 
 /* ================= 补丁（符号引用 / 控制流标签） ================= */
 
-#define PATCH_MAX 1024
+#define PATCH_MAX 4096         /* V3：自举需 ~2K 引用（函数调用+全局地址），1024 溢出 */
 enum { P_CALL, P_ADDR };
 typedef struct { char name[32]; int pos; int kind; } Patch;
 static Patch patches[PATCH_MAX];
@@ -203,8 +233,11 @@ static void patch_lab(int lab, int target) {
 enum {
     ND_NUM, ND_STR, ND_VAR, ND_FUNCALL,   /* V2c：ND_STR 字符串字面量（ival=池偏移） */
     ND_ADD, ND_SUB, ND_MUL, ND_DIV, ND_MOD,
+    ND_BITAND, ND_BITOR, ND_BITXOR,       /* V3a：& | ^ */
+    ND_SHL, ND_SHR,                       /* V3a：<< >> */
     ND_EQ, ND_NE, ND_LT, ND_LE, ND_GT, ND_GE,
-    ND_AND, ND_OR, ND_NEG, ND_NOT, ND_ASSIGN,
+    ND_AND, ND_OR, ND_NEG, ND_NOT, ND_BNOT,  /* V3a：ND_BNOT ~ */
+    ND_ASSIGN,
     ND_ADDR, ND_DEREF,         /* V2b：& 取地址 / * 解引用 */
     ND_INDEX,                  /* V2d：a[i] 下标（l=数组 VAR，r=下标表达式，左值） */
     ND_EXPR_STMT, ND_BLOCK, ND_IF, ND_WHILE, ND_RET,
@@ -269,9 +302,6 @@ static void emit_add_esp(int n4) {
 /* ================= 词法 ================= */
 
 #define TOK_MAX 256            /* V2c：字符串字面量上限 254 字节（含解码） */
-static const unsigned char *src;
-static int src_len;
-static int src_pos;
 static char tok[TOK_MAX];
 static int tok_is_word;
 static int tok_is_num;
@@ -354,6 +384,23 @@ static void next_tok(void) {
     if (c >= '0' && c <= '9') {
         int n = 0;
         tok[n++] = (char)c;
+        /* V3a：0x 前缀十六进制字面量（0xNN，支持 a-f/A-F；值须落 int 范围） */
+        if (c == '0' && (peekc() == 'x' || peekc() == 'X')) {
+            tok[n++] = (char)src[src_pos++];
+            while (n < TOK_MAX - 1) {
+                int d = peekc();
+                if ((d >= '0' && d <= '9') || (d >= 'a' && d <= 'f') ||
+                    (d >= 'A' && d <= 'F')) { tok[n++] = (char)d; src_pos++; }
+                else break;
+            }
+            tok[n] = 0;
+            if (peekc() == '_' || (peekc() >= '0' && peekc() <= '9') ||
+                (peekc() >= 'a' && peekc() <= 'z') || (peekc() >= 'A' && peekc() <= 'Z'))
+                fail("bad number");
+            toklen = n;
+            tok_is_num = 1;
+            return;
+        }
         while (n < TOK_MAX - 1) {
             int d = peekc();
             if (d >= '0' && d <= '9') { tok[n++] = (char)d; src_pos++; }
@@ -398,6 +445,7 @@ static void next_tok(void) {
     int d = peekc();
     if ((c == '=' && d == '=') || (c == '!' && d == '=') ||
         (c == '<' && d == '=') || (c == '>' && d == '=') ||
+        (c == '<' && d == '<') || (c == '>' && d == '>') ||
         (c == '&' && d == '&') || (c == '|' && d == '|')) {
         tok[0] = (char)c; tok[1] = (char)d; tok[2] = 0;
         src_pos++;
@@ -406,6 +454,7 @@ static void next_tok(void) {
     }
     if (c == '+' || c == '-' || c == '*' || c == '/' || c == '%' ||
         c == '<' || c == '>' || c == '=' || c == '!' ||
+        c == '&' || c == '|' || c == '^' || c == '~' ||
         c == '(' || c == ')' || c == '{' || c == '}' || c == ';' || c == ',') {
         tok[0] = (char)c; tok[1] = 0;
         toklen = 1;
@@ -416,7 +465,16 @@ static void next_tok(void) {
 }
 
 static int peek(const char *s) { return s_eq(s, tok); }
+/* 符号匹配：字面量 token（word/num/str/char）绝不参与符号比较，
+ * 否则字符串 ")" / 字符 ';' 会被误判为括号/分号（BUG-034）。 */
+static int is_sym(const char *s) {
+    if (tok_is_word || tok_is_num || tok_is_str || tok_is_char) return 0;
+    return s_eq(s, tok);
+}
 static int accept(const char *s) {
+    /* 字面量 token（字符/字符串/数字）绝不参与符号匹配：
+     * 否则字符字面量 '&' '*' '-' 等会被 unary/二元运算符误消费（BUG-034）。 */
+    if (tok_is_char || tok_is_str || tok_is_num) return 0;
     if (peek(s)) { next_tok(); return 1; }
     return 0;
 }
@@ -463,9 +521,14 @@ static int size_of(int ty, int bty, int len) {
 }
 
 /* 类型等价（契约式语义检查）：指针须基类型一致；int/char 同属整型族可互转；
- * 数组元素（INDEX 结果）按元素类型参与检查 */
+ * 数组元素（INDEX 结果）按元素类型参与检查。
+ * V3（自举）：右值 int 可赋给指针（如 code = xmalloc(n) 的地址值，xmalloc 返回 int）——
+ * 这是自举版编译器以 brk 动态分配 code 与输入缓冲的唯一通道（minicc 无 void 指针与类型转换）。 */
 static int type_eq(int t1, int b1, int t2, int b2) {
-    if (t1 != t2) return t1 != TY_PTR && t2 != TY_PTR && t1 != TY_ARRAY && t2 != TY_ARRAY;
+    if (t1 != t2) {
+        if (t1 == TY_PTR && t2 == TY_INT) return 1;
+        return t1 != TY_PTR && t2 != TY_PTR && t1 != TY_ARRAY && t2 != TY_ARRAY;
+    }
     if (t1 != TY_PTR && t1 != TY_ARRAY) return 1;
     return b1 == b2;
 }
@@ -495,9 +558,20 @@ static Node *primary(void) {
     if (tok_is_num) {
         n = node_new(ND_NUM);
         n->val = 0;
-        for (int i = 0; tok[i]; i++) {
-            if (tok[i] < '0' || tok[i] > '9') fail("bad number");
-            n->val = n->val * 10 + (tok[i] - '0');
+        if (tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
+            for (int i = 2; tok[i]; i++) {
+                int d = tok[i], v = 0;
+                if (d >= '0' && d <= '9') v = d - '0';
+                else if (d >= 'a' && d <= 'f') v = d - 'a' + 10;
+                else if (d >= 'A' && d <= 'F') v = d - 'A' + 10;
+                else fail("bad number");
+                n->val = n->val * 16 + v;
+            }
+        } else {
+            for (int i = 0; tok[i]; i++) {
+                if (tok[i] < '0' || tok[i] > '9') fail("bad number");
+                n->val = n->val * 10 + (tok[i] - '0');
+            }
         }
         next_tok();
         return n;
@@ -531,11 +605,11 @@ static Node *primary(void) {
             n->val = si < 0 ? nsym - 1 : si;         /* 符号下标 */
             expect("(");
             Node *head = NULL, **tail = &head;
-            while (!peek(")")) {
+            while (!is_sym(")")) {
                 Node *arg = expr();
                 *tail = arg; tail = &arg->next;
                 n->nargs++;
-                if (!accept(",")) break;
+                if (is_sym(",")) next_tok(); else break;
             }
             expect(")");
             n->a = head;
@@ -585,6 +659,11 @@ static Node *unary(void) {
     }
     if (accept("!")) {
         Node *n = node_new(ND_NOT);
+        n->l = unary();
+        return n;
+    }
+    if (accept("~")) {                  /* V3a：按位取反 */
+        Node *n = node_new(ND_BNOT);
         n->l = unary();
         return n;
     }
@@ -640,13 +719,22 @@ static Node *add(void) {
     }
 }
 
-static Node *rel(void) {
+static Node *shift(void) {              /* V3a：<< >>（优先级：加之下、关系之上） */
     Node *n = add();
     for (;;) {
-        if (accept("<"))       n = bin(n, add(), ND_LT);
-        else if (accept("<=")) n = bin(n, add(), ND_LE);
-        else if (accept(">"))  n = bin(n, add(), ND_GT);
-        else if (accept(">=")) n = bin(n, add(), ND_GE);
+        if (accept("<<"))      n = bin(n, add(), ND_SHL);
+        else if (accept(">>")) n = bin(n, add(), ND_SHR);
+        else return n;
+    }
+}
+
+static Node *rel(void) {
+    Node *n = shift();
+    for (;;) {
+        if (accept("<"))       n = bin(n, shift(), ND_LT);
+        else if (accept("<=")) n = bin(n, shift(), ND_LE);
+        else if (accept(">"))  n = bin(n, shift(), ND_GT);
+        else if (accept(">=")) n = bin(n, shift(), ND_GE);
         else return n;
     }
 }
@@ -660,9 +748,27 @@ static Node *eq(void) {
     }
 }
 
-static Node *land(void) {
+static Node *bitand(void) {             /* V3a：&（优先级：相等之下、异或之上） */
     Node *n = eq();
-    while (accept("&&")) n = bin(n, eq(), ND_AND);
+    while (accept("&")) n = bin(n, eq(), ND_BITAND);
+    return n;
+}
+
+static Node *bitxor(void) {
+    Node *n = bitand();
+    while (accept("^")) n = bin(n, bitand(), ND_BITXOR);
+    return n;
+}
+
+static Node *bitor(void) {
+    Node *n = bitxor();
+    while (accept("|")) n = bin(n, bitxor(), ND_BITOR);
+    return n;
+}
+
+static Node *land(void) {
+    Node *n = bitor();
+    while (accept("&&")) n = bin(n, bitor(), ND_AND);
     return n;
 }
 
@@ -698,7 +804,7 @@ static Node *stmt(void);
 static Node *block_stmt(void) {
     int mark = nsym;
     Node *head = NULL, **tail = &head;
-    while (!peek("}")) {
+    while (!is_sym("}")) {
         if (tok[0] == 0) fail("unexpected end of file");
         Node *s = stmt();
         *tail = s; tail = &s->next;
@@ -712,7 +818,7 @@ static Node *block_stmt(void) {
 
 static Node *stmt(void) {
     Node *n;
-    if (peek("{")) {
+    if (is_sym("{")) {
         next_tok();
         return block_stmt();
     }
@@ -759,7 +865,7 @@ static Node *stmt(void) {
     }
     if (accept("return")) {
         n = node_new(ND_RET);
-        if (!peek(";")) n->l = expr();
+        if (!is_sym(";")) n->l = expr();
         expect(";");
         return n;
     }
@@ -801,7 +907,7 @@ static void parse_program(void) {
             int func_scope = nsym;
             cur_nargs = 0; cur_frame = 0;
             Node *params = NULL, **ptail = &params;
-            if (!peek(")")) {
+            if (!is_sym(")")) {
                 for (;;) {
                     Node *p = node_new(ND_VAR);
                     p->ty = decl_type(&p->bty);
@@ -840,7 +946,20 @@ static void parse_program(void) {
                 if (ty == TY_ARRAY) fail("array init not supported");
                 if (tok_is_num) {
                     g->ival = 0;
-                    for (int i = 0; tok[i]; i++) g->ival = g->ival * 10 + (tok[i] - '0');
+                    /* BUG-039：初值支持十六进制（CODE_BASE=0x800a0000），与 minicc_self.c 的
+                     * GVAR 初值环严格一致；旧十进制环把 'x'/'a' 当数字位算成垃圾值。 */
+                    if (tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
+                        for (int i = 2; tok[i]; i++) {
+                            int d = tok[i], v = 0;
+                            if (d >= '0' && d <= '9') v = d - '0';
+                            else if (d >= 'a' && d <= 'f') v = d - 'a' + 10;
+                            else if (d >= 'A' && d <= 'F') v = d - 'A' + 10;
+                            else fail("bad hex global init");
+                            g->ival = g->ival * 16 + v;
+                        }
+                    } else {
+                        for (int i = 0; tok[i]; i++) g->ival = g->ival * 10 + (tok[i] - '0');
+                    }
                     next_tok();
                 } else if (tok_is_char) {
                     g->ival = (unsigned char)tok[0];
@@ -900,6 +1019,7 @@ static void gen(Node *n) {
     case ND_ADDR:
         gen_addr(n->l); return;     /* &x：值 = x 的地址 */
     case ND_NEG: gen(n->l); emit_op("\xf7\xd8"); return;
+    case ND_BNOT: gen(n->l); emit_op("\xf7\xd0"); return;      /* V3a：not %eax */
     case ND_NOT:
         gen(n->l); emit_test();
         emit_op("\x0f\x94\xc0\x0f\xb6\xc0");    /* sete al; movzbl al,eax */
@@ -909,6 +1029,11 @@ static void gen(Node *n) {
         gen(n->r);
         if (n->l->ty == TY_CHAR) emit_store8(); else emit_store();
         return;
+    case ND_BITAND: gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x21\xd8"); return;
+    case ND_BITOR:  gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x09\xd8"); return;
+    case ND_BITXOR: gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x31\xd8"); return;
+    case ND_SHL:    gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x87\xd8\x89\xd9\xd3\xe0"); return;
+    case ND_SHR:    gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x87\xd8\x89\xd9\xd3\xf8"); return;
     case ND_ADD:
         gen(n->l); emit1(0x50); gen(n->r);
         /* 指针算术：按基类型缩放（int×4，char×1 不缩放） */

@@ -242,7 +242,7 @@ check "msg 演示完成"       "\[MC\] done"
 # ---- v0.8 文件系统 ----
 check "spawn procFSA"     "spawn pid=8 name=procFSA"
 check "spawn procFSB"     "spawn pid=9 name=procFSB"
-check "内存盘初始化"       "\[storage\] ramdisk 256 blocks"
+check "内存盘初始化"       "\[storage\] ramdisk 768 blocks"
 check "fs 创建 hello.txt" "\[fs\] create 'hello.txt'"
 check "fs 打开写模式"      "\[fs\] open fd=1 'hello.txt' inode=.* mode=1"
 check "fs 跨块写入"       "\[fs\] write fd=1"
