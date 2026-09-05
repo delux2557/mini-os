@@ -60,7 +60,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: v2-c-kernel/build/*.log
+          path: |
+            v2-c-kernel/build/*.log
+            v2-c-kernel/build/assert_timing_*.tsv
 
   # RR 处理项重型回归（F3/F6 修复落点）：独立 job，不绑定 main 分支保护的 required check `test`，
   # 避免拖慢/抖动强制门禁；但每次 push/PR 都会执行，红绿可见，用于把"修复过的测试 harness"接进 CI 回归。
