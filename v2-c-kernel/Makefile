@@ -331,6 +331,10 @@ test-cc500:
 test-minicc:
 	bash tests/test_minicc.sh
 
+# V4 mini-Csmith 差分对拍（MVP-A）：生成器(特性表+无UB三纪律)+gcc参考+minicc acceptance 差分
+test-diffsynth:
+	bash tests/test_diffsynth.sh
+
 # v1.1 Step 2 串口网卡回归：COM2 + SLIP（RFC 1055）UDP 数据报与宿主对端往返一致
 test-slip:
 	bash tests/test_slip_net.sh
@@ -403,9 +407,9 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host qemu serial persist net socket cc500 minicc slip tcp det tr rp stack
+TEST_LAYERS       = host qemu serial persist net socket cc500 minicc diffsynth slip tcp det tr rp stack
 TEST_LAYERS_FAST  = host stack
-TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc slip tcp det tr rp
+TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc diffsynth slip tcp det tr rp
 
 test: $(addprefix test-,$(TEST_LAYERS))
 test-fast: $(addprefix test-,$(TEST_LAYERS_FAST))
@@ -462,4 +466,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-diffsynth test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
