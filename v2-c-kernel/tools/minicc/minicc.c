@@ -111,6 +111,12 @@ typedef struct {
     Lab labs[LAB_MAX]; int nlab;
     /* codegen 译状态 */
     int cur_nargs, frame_patch, cur_frame, bty_top, len_top;
+    /* 循环帧栈（ND_DO/WHILE/FOR 的 break/continue 未决跳转记录，循环收尾统一回填相对位移）。
+     * 不用单 label 的 labs[]（其"每标签单补丁"限制无法承载一循环多个 break），
+     * 改为每帧累积 E9 跳转的 code 位置，帧尾按目标批量 save32。 */
+    int loop_brk[32][64]; int loop_brk_n[32];
+    int loop_cont[32][64]; int loop_cont_n[32];
+    int nloop;
     /* 字符串池 */
     unsigned char *strpool; int nstrpool, strpool_cap, strpool_base;
     /* AST 链表 */
@@ -328,6 +334,13 @@ static void emit_jmp_to(int target) {
     emit4(target - (p + 5));
 }
 
+/* 直接目标的条件跳转（0F <op> rel32，向后/绝对目标用，不走 labs 前向补丁）：
+ * 指令长 6 字节，rel 相对"指令尾" target - (p+6)。 */
+static void emit_cond_direct(int op, int target) {
+    int p = code_len;
+    emit1(0x0F); emit1(op); emit4(target - (p + 6));
+}
+
 static void patch_lab(int lab, int target) {
     labs[lab].target = target;
 }
@@ -345,7 +358,8 @@ enum {
     ND_ADDR, ND_DEREF,         /* V2b：& 取地址 / * 解引用 */
     ND_INDEX,                  /* V2d：a[i] 下标（l=数组 VAR，r=下标表达式，左值） */
     ND_EXPR_STMT, ND_BLOCK, ND_IF, ND_WHILE, ND_FOR, ND_RET,
-    ND_DECL, ND_FUNC, ND_GVAR
+    ND_DECL, ND_FUNC, ND_GVAR,
+    ND_DO, ND_BREAK, ND_CONTINUE   /* 循环语句补齐：do-while / break / continue */
 };
 /* （Node 类型已收进顶部 CC 上下文，见文件头"编译器上下文 CC"） */
 
@@ -948,6 +962,19 @@ static Node *stmt(void) {
         n->b = stmt();
         return n;
     }
+    if (accept("do")) {
+        /* do <body> while (<expr>); —— post-test 循环 */
+        n = node_new(ND_DO);
+        n->b = stmt();              /* body（先执行一次） */
+        expect("while");
+        expect("(");
+        n->l = expr();              /* 条件（body 后求值） */
+        expect(")");
+        expect(";");
+        return n;
+    }
+    if (accept("break")) { n = node_new(ND_BREAK); expect(";"); return n; }
+    if (accept("continue")) { n = node_new(ND_CONTINUE); expect(";"); return n; }
     if (accept("return")) {
         n = node_new(ND_RET);
         if (!is_sym(";")) n->l = expr();
@@ -1181,6 +1208,17 @@ static void gen(Node *n) {
     }
 }
 
+/* ================= 循环 break/continue 目标栈 =================
+ * 进入循环时 loop_enter；body 内 break/continue 各自记下一个"正向 E9（占位 rel=0）"的
+ * code 位置；循环收尾用 loop_patch_break(出口)/loop_patch_continue(续点) 批量回填。
+ * 相对位移 = target - (jmp_pos + 5)（E9 rel32 长度为 5）。 */
+static void loop_enter(void){ if(cc.nloop>=32) fail("loop nesting too deep"); cc.loop_brk_n[cc.nloop]=0; cc.loop_cont_n[cc.nloop]=0; cc.nloop++; }
+static void loop_leave(void){ if(cc.nloop>0) cc.nloop--; }
+static void loop_brk_add(void){ int i=cc.nloop-1; if(cc.loop_brk_n[i]>=64) fail("too many break in a loop"); cc.loop_brk[i][cc.loop_brk_n[i]++]=code_len; emit1(0xE9); emit4(0); }
+static void loop_cont_add(void){ int i=cc.nloop-1; if(cc.loop_cont_n[i]>=64) fail("too many continue in a loop"); cc.loop_cont[i][cc.loop_cont_n[i]++]=code_len; emit1(0xE9); emit4(0); }
+static void loop_patch_break(int target){ int i=cc.nloop-1; for(int j=0;j<cc.loop_brk_n[i];j++){ int p=cc.loop_brk[i][j]; save32(p+1, target-(p+5)); } }
+static void loop_patch_continue(int target){ int i=cc.nloop-1; for(int j=0;j<cc.loop_cont_n[i];j++){ int p=cc.loop_cont[i][j]; save32(p+1, target-(p+5)); } }
+
 static void gen_stmt(Node *n) {
     switch (n->kind) {
     case ND_EXPR_STMT: gen(n->l); return;
@@ -1206,11 +1244,15 @@ static void gen_stmt(Node *n) {
         return;
     }
     case ND_WHILE: {
-        int top = code_len;
+        int top = code_len;                 /* continue 目标 = 条件测试 */
         int en = new_lab();
+        loop_enter();
         gen(n->l); emit_test(); emit_cond(0x84, en);
         gen_stmt(n->r);
         emit_jmp_to(top);
+        loop_patch_break(code_len);         /* break 出口 = 循环末尾 */
+        loop_patch_continue(top);           /* continue → 回测条件 */
+        loop_leave();
         patch_lab(en, code_len);
         return;
     }
@@ -1218,15 +1260,40 @@ static void gen_stmt(Node *n) {
         /* for(init;cond;step)body：l=init, r=cond(可空), a=step(可空), b=body
          * 空 init 时需额外跳过一个空语句（node_new 生 ND_EXPR_STMT(0) 亦可空跑） */
         if (n->l) gen(n->l);
-        int top = code_len;
+        int top = code_len;                 /* 条件测试起点 */
         int en = new_lab();
+        loop_enter();
         if (n->r) { gen(n->r); emit_test(); emit_cond(0x84, en); }
         gen_stmt(n->b);
+        int cont_pt = code_len;             /* continue 目标 = step 起点（无 step 则退到 jmp-to-cond） */
         if (n->a) gen(n->a);
         emit_jmp_to(top);
+        loop_patch_break(code_len);
+        loop_patch_continue(cont_pt);
+        loop_leave();
         patch_lab(en, code_len);
         return;
     }
+    case ND_DO: {
+        int top = code_len;                 /* body 起点（先执行一次） */
+        loop_enter();
+        gen_stmt(n->b);
+        int cont_pt = code_len;             /* continue 目标 = body 之后的条件求值 */
+        gen(n->l); emit_test();
+        emit_cond_direct(0x85, top);        /* jnz 回 body（条件真则重跑，向后直接跳） */
+        loop_patch_break(code_len);         /* break 出口 = 循环末尾 */
+        loop_patch_continue(cont_pt);
+        loop_leave();
+        return;                             /* 条件假 → 自然落出循环 */
+    }
+    case ND_BREAK:
+        if (cc.nloop == 0) fail("break outside loop");
+        loop_brk_add();
+        return;
+    case ND_CONTINUE:
+        if (cc.nloop == 0) fail("continue outside loop");
+        loop_cont_add();
+        return;
     case ND_RET:
         if (n->l) gen(n->l);
         emit_epilogue();
