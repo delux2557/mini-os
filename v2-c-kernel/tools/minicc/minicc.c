@@ -470,6 +470,10 @@ static void next_tok(void) {
         tok[n] = 0;
         toklen = n;
         tok_is_word = 1;
+        /* FIX-D（外部审计 MC-02）：Sym.name/Node.name 均 `char name[32]`，写入用无界 s_cpy。
+         * 词法允许最长 TOK_MAX-1=255 字符标识符 → 栈上 name[32] 越界（36-37 字符静默坏码、
+         * ≥38 SIGSEGV）。此处在词法层提前拒绝，与 `char name[32]` 上限一致（宁拒不坑）。 */
+        if (n >= 32) fail("identifier too long (max 31)");
         return;
     }
     if (c >= '0' && c <= '9') {
@@ -593,15 +597,35 @@ static int decl_type(int *bty) {
     return base;
 }
 
-/* V2d：标识符之后的数组后缀 [N]（N 为十进制常量 ≥1，指针数组拒绝）；
+/* V2d：标识符之后的数组后缀 [N]（N 为常量 ≥1，指针数组拒绝）；
  * 命中则置 *len 并返回 1，否则 *len=0 返回 0。 */
 static int array_suffix(int ty, int *len) {
     *len = 0;
     if (!accept("[")) return 0;
     if (ty == TY_PTR) fail("unsupported: array of pointers");
     if (!tok_is_num) fail("array size must be a constant");
+    /* FIX-A（外部审计 MC-05）：与 primary()/GVAR 同构的字面量解析。
+     * 旧实现 `n = n*10 + (tok[i]-'0')` 按十进制环吃整个 token —— `int g[0x10]` 被当成 7210 个
+     * 元素（把 'x'=0x78 当位算 40），与 BUG-039（GVAR hex 初值）同源。非数字字符一律拒绝。 */
     int n = 0;
-    for (int i = 0; tok[i]; i++) n = n * 10 + (tok[i] - '0');
+    if (tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
+        if (!tok[2]) fail("bad number");
+        for (int i = 2; tok[i]; i++) {
+            int d = tok[i], v = 0;
+            if (d >= '0' && d <= '9') v = d - '0';
+            else if (d >= 'a' && d <= 'f') v = d - 'a' + 10;
+            else if (d >= 'A' && d <= 'F') v = d - 'A' + 10;
+            else fail("bad number");
+            if (n > 0x0fffffff) fail("array size overflow");
+            n = n * 16 + v;
+        }
+    } else {
+        for (int i = 0; tok[i]; i++) {
+            if (tok[i] < '0' || tok[i] > '9') fail("bad number");
+            if (n > 0x0fffffff) fail("array size overflow");
+            n = n * 10 + (tok[i] - '0');
+        }
+    }
     if (n < 1) fail("array size must be positive");
     next_tok();
     expect("]");
@@ -609,10 +633,18 @@ static int array_suffix(int ty, int *len) {
     return 1;
 }
 
-/* 变量字节大小：int/char/指针标量 4 字节（char 标量对齐）；数组 = len × 元素尺寸 */
-static int size_of(int ty, int bty, int len) {
-    if (ty == TY_ARRAY) return len * (bty == TY_INT ? 4 : 1);
-    return 4;
+/* FIX-B（外部审计 MC-03）：数组字节数 = len × 元素尺寸 的 int 乘法可溢出为 0/负值：
+ *   0 → 相邻全局互相覆盖（int g[1073741824] + int h 时 g[0] 写坏 h，实测）；
+ *   负 → 绕过 "cur_frame > 4096" 守卫（负数对其恒不成立），产出非法 lea/sub，产物一执行即崩。
+ *   故在唯一入口做上限校验（宁拒绝勿产出坏码 = 设计文档原则 3）。 */
+#define LOCAL_BYTES_MAX 4096        /* 与既有 "frame too big" 守卫同额度（guest 帧上限） */
+#define GLOBAL_BYTES_MAX (16 * 1024 * 1024)   /* 全局数据段上限（自举版数据 ~340KB，宽裕） */
+static int bytes_of(int ty, int bty, int len, int limit) {
+    int esz;
+    if (ty != TY_ARRAY) return 4;
+    esz = (bty == TY_INT) ? 4 : 1;
+    if (len > limit / esz) fail("array too big");
+    return len * esz;
 }
 
 /* 类型等价（契约式语义检查）：指针须基类型一致；int/char 同属整型族可互转；
@@ -997,8 +1029,9 @@ static Node *stmt(void) {
         next_tok();
         if (array_suffix(n->ty, &n->len)) { n->bty = n->ty; n->ty = TY_ARRAY; }
         if (n->ty == TY_ARRAY && peek("=")) fail("array init not supported");
-        /* V2d：帧按纯字节偏移分配（数组紧凑 len×元素尺寸，标量不保证 4 对齐） */
-        int size = size_of(n->ty, n->bty, n->len);
+        /* V2d：帧按纯字节偏移分配（数组紧凑 len×元素尺寸，标量不保证 4 对齐）；
+         * FIX-B：走 bytes_of 唯一入口做溢出/上限校验（局部帧上限=4096） */
+        int size = bytes_of(n->ty, n->bty, n->len, LOCAL_BYTES_MAX);
         cur_frame += size;
         if (cur_frame > 4096) fail("frame too big");
         n->val = cur_frame;             /* 帧字节偏移（首个变量 = 4，lea -4(%ebp)） */
@@ -1358,9 +1391,16 @@ static void gen_stmt(Node *n) {
          * 空 init 时需额外跳过一个空语句（node_new 生 ND_EXPR_STMT(0) 亦可空跑） */
         if (n->l) gen(n->l);
         int top = code_len;                 /* 条件测试起点 */
-        int en = new_lab();
+        /* FIX-C1（外部审计 MC-01）：条件为空时不得申请 en（en=-1 哨兵）。
+         * 旧实现无条件 new_lab()：未 emit 的标签 labs[en].pos 保持初值 0，
+         * finish() 按 pos+2 回填 → save32(2,rel) 把跳转立即数写进 ELF 头(e_ident)，
+         * 结果编译报 "compiled OK"、产物却被内核 elf_load 拒载。 */
+        int en = -1;
         loop_enter();
-        if (n->r) { gen(n->r); emit_test(); emit_cond(0x84, en); }
+        if (n->r) {
+            en = new_lab();
+            gen(n->r); emit_test(); emit_cond(0x84, en);
+        }
         gen_stmt(n->b);
         int cont_pt = code_len;             /* continue 目标 = step 起点（无 step 则退到 jmp-to-cond） */
         if (n->a) gen(n->a);
@@ -1368,7 +1408,7 @@ static void gen_stmt(Node *n) {
         loop_patch_break(code_len);
         loop_patch_continue(cont_pt);
         loop_leave();
-        patch_lab(en, code_len);
+        if (en >= 0) patch_lab(en, code_len);
         return;
     }
     case ND_DO: {
@@ -1404,7 +1444,7 @@ static void gen_stmt(Node *n) {
 static void gen_global(Node *n) {
     int si = n->val;
     int pos = code_len;
-    int size = size_of(n->ty, n->bty, n->len);
+    int size = bytes_of(n->ty, n->bty, n->len, GLOBAL_BYTES_MAX);  /* FIX-B */
     for (int i = 0; i < size; i++) emit1(0);
     if (n->ival && n->ty != TY_ARRAY) save32(pos, n->ival);     /* 常量初始化 */
     syms[si].val = pos;
@@ -1427,6 +1467,10 @@ static void gen_func(Node *n) {
 
 static void finish(void) {
     for (int i = 0; i < nlab; i++) {
+        /* FIX-C2（外部审计 MC-01 类）：labs[i].pos < 95（ELF 头 + 入口 stub 之前的字节
+         * 永不可能是跳转指令）⇔ 有标签被分配却未发射（如空条件 for 未 emit_cond），
+         * 属编译器内部缺陷。把整类"未发射标签"从静默写坏 ELF 头变为显式编译失败。 */
+        if (labs[i].pos < 95) fail("internal: label not emitted");
         int imm = labs[i].pos + (labs[i].kind == L_COND ? 2 : 1);
         int rel = labs[i].target - (labs[i].pos + (labs[i].kind == L_COND ? 6 : 5));
         save32(imm, rel);
