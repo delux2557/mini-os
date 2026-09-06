@@ -231,6 +231,8 @@ int sched_spawn(uint32_t entry_off, const char *name) {
     if (pid < 0) return -1;
     pcb_t *p = &procs[pid];
     memset8((uint8_t *)p, 0, sizeof(pcb_t));
+    p->last_run_tick = ticks;     /* 看门狗：新进程视为"刚运行"，防被误判长时间未调度 */
+    p->last_prog_tick = ticks;
 
     p->kstack_frame = frame_alloc();   /* 独立内核栈 */
     p->stack_frames[0] = frame_alloc();   /* 独立用户栈（初始页） */
@@ -279,6 +281,8 @@ int sched_spawn_at(uint32_t entry, const char *name, uint32_t pd,
     if (pid < 0) return -1;
     pcb_t *p = &procs[pid];
     memset8((uint8_t *)p, 0, sizeof(pcb_t));
+    p->last_run_tick = ticks;     /* 看门狗：新进程视为"刚运行"，防被误判长时间未调度 */
+    p->last_prog_tick = ticks;
 
     p->kstack_frame = frame_alloc();   /* 独立内核栈 */
     p->stack_frames[0] = frame_alloc();   /* 独立用户栈（初始页） */
@@ -368,6 +372,8 @@ int sched_fork(registers_t *r) {
     if (pid < 0) return -1;
     pcb_t *c = &procs[pid];
     memset8((uint8_t *)c, 0, sizeof(pcb_t));
+    c->last_run_tick = ticks;     /* 看门狗：新 fork 子进程视为"刚运行"，防误判 */
+    c->last_prog_tick = ticks;
     pcb_t *p = &procs[current_pid];
 
     c->kstack_frame = frame_alloc();
@@ -592,6 +598,7 @@ static void schedule(registers_t *r) {
     pcb_t *n = &procs[next];
     n->state = PROC_RUNNING;
     current_pid = next;
+    n->last_run_tick = ticks;      /* 挂起看门狗：记录本进程最近被选中运行的心跳 */
     usermode_set_esp0(n->kstack_top);
     switch_page_dir(n->page_dir);   /* v0.11: 切到目标进程的地址空间（CR3） */
     sched_switch_esp(n->kernel_esp);
@@ -612,6 +619,7 @@ void sched_start(void) {
     pcb_t *n = &procs[next];
     n->state = PROC_RUNNING;
     current_pid = next;
+    n->last_run_tick = ticks;      /* 挂起看门狗：记录本进程最近被选中运行的心跳 */
     usermode_set_esp0(n->kstack_top);
     switch_page_dir(n->page_dir);   /* v0.11: 切入第一个进程的地址空间 */
     serial_printf("[sched] start -> pid=%u name=%s\n", n->pid, n->name);
@@ -636,6 +644,70 @@ static void reap_process(uint32_t i) {
 void sched_reap(uint32_t pid) {
     if (pid >= MAX_PROCS || procs[pid].state != PROC_ZOMBIE) return;
     reap_process(pid);
+}
+
+/** ---- 挂起看门狗（v0.3x 本地调试用）----
+ * 现象：persist 层 CI 中第二次 `micc` fork 后子进程从不打开输入文件、父进程永久 wait，
+ * 8/20/45s 三档超时均死；guest 表现为"只调度却无 syscall 进展"甚至整体冻结。
+ * 本看门狗在每 WDG_PERIOD_TICKS 心跳扫描一次：若某个被 BLOCK_WAIT 等待的子进程
+ * 处于就绪却久不被调度（kind=1），或运行中却久无 syscall 进展（kind=2），判定挂起，
+ * 立即 dump 全部 PCB 现场（含各进程保存帧 eip/eflags），只报一次防刷屏。
+ * 局限：若 guest 整体冻结（tick 停摆），本 tick 驱动看门狗也停摆，无法探测——
+ * 该类由 QEMU 侧另行判定。本功能纯诊断，不参与任何门禁判定。 */
+static int         wdg_fired   = 0;
+static uint32_t    wdg_next    = 0;
+#define WDG_PERIOD_TICKS  16   /* 每 16 心跳扫一次（MAX_PROCS=16，开销可忽略） */
+#define WDG_STALL_TICKS   60   /* 子进程"无实质进展"容忍心跳数（正常编译子进程 syscall 密集） */
+
+static void wdog_dump(registers_t *cur) {
+    serial_printf("\n[WATCHDOG] === PCB 现场 dump ===\n");
+    if (cur)
+        serial_printf("[WATCHDOG] current running pid=%u eip=%x eflags=%x cs=%x\n",
+                      current_pid, cur->eip, cur->eflags, cur->cs);
+    for (uint32_t i = 0; i < MAX_PROCS; i++) {
+        pcb_t *p = &procs[i];
+        if (p->state == PROC_FREE) continue;
+        uint32_t eip = 0, efl = 0, kesp = p->kernel_esp;
+        registers_t *f = kesp ? (registers_t *)kesp : 0;
+        if (f) { eip = f->eip; efl = f->eflags; }
+        serial_printf("[WATCHDOG] pid=%u name='%s' state=%u reason=%u arg=%u "
+                      "last_run=%u last_prog=%u eip=%x ef=%x kesp=%x\n",
+                      p->pid, p->name ? p->name : "?", p->state, p->block_reason,
+                      p->block_arg, p->last_run_tick, p->last_prog_tick, eip, efl, kesp);
+    }
+}
+
+void sched_mark_progress(void) {
+    if (current_pid < MAX_PROCS)
+        procs[current_pid].last_prog_tick = ticks;
+}
+
+static void wdog_check(registers_t *r) {
+    if (wdg_fired) return;
+    if ((int32_t)(ticks - wdg_next) < 0) return;
+    wdg_next = ticks + WDG_PERIOD_TICKS;
+    for (uint32_t i = 1; i < MAX_PROCS; i++) {
+        pcb_t *P = &procs[i];
+        if (P->state != PROC_BLOCKED || P->block_reason != BLOCK_WAIT) continue;
+        uint32_t cid = P->block_arg;
+        if (cid >= MAX_PROCS) continue;
+        pcb_t *C = &procs[cid];
+        if (C->state == PROC_FREE || C->state == PROC_ZOMBIE) continue;
+        int32_t since_run  = (int32_t)(ticks - C->last_run_tick);
+        int32_t since_prog = (int32_t)(ticks - C->last_prog_tick);
+        int kind = 0;
+        if (C->state == PROC_READY && since_run > WDG_STALL_TICKS)
+            kind = 1;   /* 子进程就绪却久不被调度（就绪队列入队/alloc 竞态） */
+        else if (C->state == PROC_RUNNING && since_prog > WDG_STALL_TICKS && since_run > 0)
+            kind = 2;   /* 子进程在跑却久无 syscall 进展（用户态/内核态空转死循环） */
+        if (!kind) continue;
+        serial_printf("\n[WATCHDOG] pid=%u waits child=%u STALLED kind=%u "
+                      "(since_run=%d since_prog=%d state=%u)\n",
+                      P->pid, cid, kind, since_run, since_prog, C->state);
+        wdog_dump(r);
+        wdg_fired = 1;
+        return;
+    }
 }
 
 /* 定时器心跳：唤醒到期阻塞进程 -> 回收僵尸 -> 抢占切换 */
@@ -666,6 +738,7 @@ void sched_tick(registers_t *r) {
         }
         reap_process(i);
     }
+    wdog_check(r);   /* 挂起看门狗：检测被 wait 子进程空转/不被调度 */
     /* schedule() 仅在"当前为 idle 且就绪队列为空"时返回；
      * 此时必须正常返回（不可 cli;hlt），让 iret 回到 idle 循环
      * 继续刷新状态并再次 hlt 等待下一个心跳。 */
