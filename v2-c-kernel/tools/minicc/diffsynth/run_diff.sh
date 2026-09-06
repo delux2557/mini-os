@@ -43,8 +43,11 @@ mkdir -p "$(dirname "$GEN")"   # P0：GEN 可能落在独立目录（默认 /tmp
 command -v gcc >/dev/null 2>&1 || { echo "[ERR] 缺 gcc"; exit 2; }
 command -v qemu-i386 >/dev/null 2>&1 || { echo "[ERR] 缺 qemu-i386"; exit 2; }
 [ -x "$GEN" ] || { gcc -O2 -Wall -Wextra -Werror -o "$GEN" "$GEN_SRC" || { echo "[ERR] gen 编译失败"; exit 2; }; }
-if [ -z "$HOSTMINICC" ] || [ ! -x "$HOSTMINICC" ]; then
-  HOSTMINICC="$out/hostminicc"
+if [ -z "$HOSTMINICC" ]; then HOSTMINICC="$out/hostminicc"; fi
+# P0：hostminicc 须与源同步可执行——仅判 -x 会在更换 minicc.c/host_crt.c 后复用旧编译器产物，
+# 导致新特性（如 V3b 语法糖）被旧 hostminicc 误拒（差分假红）。与 gen_guest_elfs.sh P0 同法。
+if [ ! -x "$HOSTMINICC" ] ||
+   [ -n "$(find "$TOOLS_MINI/minicc.c" "$TOOLS_MINI/host_crt.c" -newer "$HOSTMINICC" -print -quit 2>/dev/null)" ]; then
   gcc -m32 -std=gnu99 -O1 -w -fpermissive -o "$HOSTMINICC" \
       "$TOOLS_MINI/minicc.c" "$TOOLS_MINI/host_crt.c" || { echo "[ERR] hostminicc 构建失败"; exit 2; }
 fi
