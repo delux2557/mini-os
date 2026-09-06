@@ -13,7 +13,12 @@ TOOLS_MINI="$(dirname "$SELF_DIR")"                 # .../tools/minicc
 
 mkdir -p "$DIR"
 HOSTMINICC="$DIR/hostminicc"
-if [ ! -x "$HOSTMINICC" ]; then
+# P0：缓存须比较源新旧——只判 -x 会在更换 minicc.c/host_crt.c 后复用旧编译器产物
+#   → 本地 guest 差分假绿（旧编译器还在用）。binary 缺失或任一源比 binary 新则重建。
+need=0
+[ -x "$HOSTMINICC" ] || need=1
+[ -n "$(find "$TOOLS_MINI/minicc.c" "$TOOLS_MINI/host_crt.c" -newer "$HOSTMINICC" -print -quit 2>/dev/null)" ] && need=1
+if [ "$need" -eq 1 ]; then
   gcc -m32 -std=gnu99 -O1 -w -fpermissive -o "$HOSTMINICC" \
       "$TOOLS_MINI/minicc.c" "$TOOLS_MINI/host_crt.c" || { echo "[ERR] hostminicc 构建失败"; exit 2; }
 fi
