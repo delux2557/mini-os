@@ -63,9 +63,15 @@ for f in "$out"/prog_*.c; do
   if ! gcc -O0 -m32 -w -o "$exe" "$f" 2>/dev/null; then
     gcc_reject=$((gcc_reject+1)); echo "[哨兵] gcc 拒 '$f'（生成器 bug，应修 gen）" | tee -a "$LOG_D"; continue
   fi
-  r1=$({ timeout 5 qemu-i386 "$exe"; echo $?; } 2>/dev/null | tail -1)
-  if [ "$r1" -eq 124 ]; then sig_fail=$((sig_fail+1)); echo "[纪律] '$f' 超时/挂起 (rc=124)" | tee -a "$LOG_D"; continue; fi
-  r2=$({ timeout 5 qemu-i386 "$exe"; echo $?; } 2>/dev/null | tail -1)
+  # ⚠️ 超时判定不能只看退出码==124：合法的参考程序可能自身 `return 124`
+  #（F_CHAR 入网后 char 值域 0..127 可返回 124，PR#110 seed=99 prog_012 即误报"挂起"）。
+  # 用 `timeout --verbose`：只有真正触发超时时才往 stderr 打 "sending signal" 标记，
+  # 据此与"程序自身退出码 124"可靠区分（coreutils 7.4+）。
+  errf="$out/.ref.$$"
+  r1=$({ timeout --verbose 5 qemu-i386 "$exe" 2>"$errf"; echo $?; } | tail -1)
+  tmo=0; grep -q 'sending signal' "$errf" && tmo=1; rm -f "$errf"
+  if [ "$tmo" -eq 1 ]; then sig_fail=$((sig_fail+1)); echo "[纪律] '$f' 超时/挂起 (timeout 触发)" | tee -a "$LOG_D"; continue; fi
+  r2=$({ timeout --verbose 5 qemu-i386 "$exe" 2>/dev/null; echo $?; } | tail -1)
   [ "$r1" != "$r2" ] && { det_fail=$((det_fail+1)); echo "[确定] '$f' 两次不一致 $r1/$r2" | tee -a "$LOG_D"; }
   # 差分：minicc 接受否（hostminicc 是 32 位二进制，宿主无 ia32 exec，用 qemu-i386 跑）
   # 设计层区分：fail() 恒 sys_exit(1)=正常拒绝；rc>128=条目下编译器收到信号崩溃（真 bug）；
@@ -80,6 +86,18 @@ for f in "$out"/prog_*.c; do
     echo "[差分] minicc $tag '$f'（gcc 接受）：$(echo "$mout" | tail -1)" | tee -a "$LOG_D"
   fi
 done
+
+# ---- 违例留档（进 violations/，规避下一批 `rm -f "$out"/prog_*.c` 覆盖）----
+# 原缺口：#106 失败留档对 diffsynth 形同虚设——每批开头 rm prog_*.c，seed=99 的违例现场
+# 被 seed=2026/cc500 覆盖，artifact 里找不回 prog_012.c。现：本批但凡出现纪律/哨兵/差分违例，
+# 即把本批全部 prog + 本批 log 拷入 violations/（该目录不在 rm 范围，跨批可复现追溯）。
+if [ "$gcc_reject" -gt 0 ] || [ "$sig_fail" -gt 0 ] || [ "$det_fail" -gt 0 ] || [ "$minic_reject" -gt 0 ]; then
+    VIOD="$out/violations/seed-${seed}-${target}"
+    mkdir -p "$VIOD"
+    cp "$out"/prog_*.c "$VIOD"/ 2>/dev/null
+    [ -f "$LOG_D" ] && cp "$LOG_D" "$VIOD/diffsynth.log"
+    echo "[留档] 违例样本已拷入 $VIOD/（$total prog + diffsynth.log）" | tee -a "$LOG_D"
+fi
 
 echo "== [diffsynth] seed=$seed target=$target total=$total " | tee -a "$LOG_D"
 echo "   ref(gcc) 有效=$((total-gcc_reject)) 无效=$gcc_reject  纪律违例(挂/信号)=$sig_fail 确定性错=$det_fail" | tee -a "$LOG_D"
