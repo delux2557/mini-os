@@ -229,6 +229,67 @@ static void t_expr_hex_value(void) {
     expect_num(n, 255);
 }
 
+/* ============ V3b：复合赋值 += -= *= /= %= 与前/后缀 ++/--（语法糖） ============ */
+/* 先经 stmt() 注册局部 `a`，再换词法源解析表达式（保留符号表，不复位） */
+static void t_sugar_decl_a(void) {
+    lex_set("int a;");
+    next_tok();
+    stmt();                             /* 注册 K_LOCAL `a` */
+    src = (const unsigned char *)"";    /* 占位，防残留 */
+}
+static void t_expr_compound_assign(void) {
+    t_sugar_decl_a();
+    src = (const unsigned char *)"a+=7"; src_len = 4; src_pos = 0; next_tok();
+    Node *n = expr();
+    expect_sym(n, ND_ASSIGN);           /* lv op= rhs → ND_ASSIGN */
+    CHECK(n->l->kind == ND_VAR && n->l == n->r->l);   /* 左值复用（语法糖左值即运算数） */
+    expect_sym(n->r, ND_ADD);           /* rhs = lv op rhs */
+    expect_num(n->r->r, 7);
+}
+static void t_expr_prefix_inc(void) {
+    t_sugar_decl_a();
+    src = (const unsigned char *)"++a"; src_len = 3; src_pos = 0; next_tok();
+    Node *n = expr();
+    expect_sym(n, ND_ASSIGN);
+    expect_sym(n->r, ND_ADD);
+    expect_num(n->r->r, 1);             /* ++a → a = a + 1 */
+}
+static void t_expr_prefix_dec(void) {
+    t_sugar_decl_a();
+    src = (const unsigned char *)"--a"; src_len = 3; src_pos = 0; next_tok();
+    Node *n = expr();
+    expect_sym(n, ND_ASSIGN);
+    expect_sym(n->r, ND_SUB);
+    expect_num(n->r->r, 1);             /* --a → a = a - 1 */
+}
+static void t_expr_postfix_inc(void) {
+    t_sugar_decl_a();
+    src = (const unsigned char *)"a++"; src_len = 3; src_pos = 0; next_tok();
+    Node *n = expr();
+    expect_sym(n, ND_POST_INC);         /* 后缀专用节点：值=旧值 */
+    CHECK(n->l->kind == ND_VAR);
+    CHECK(n->ty == n->l->ty);
+}
+static void t_expr_postfix_dec(void) {
+    t_sugar_decl_a();
+    src = (const unsigned char *)"a--"; src_len = 3; src_pos = 0; next_tok();
+    Node *n = expr();
+    expect_sym(n, ND_POST_DEC);
+    CHECK(n->l->kind == ND_VAR);
+}
+static void t_err_compound_nonlval(void) {
+    t_sugar_decl_a();
+    src = (const unsigned char *)"3+=7"; src_len = 4; src_pos = 0; next_tok();
+    const char *m = expr_err();
+    CHECK(m != NULL && strstr(m, "assign to non-lvalue") != NULL);
+}
+static void t_err_postfix_nonlval(void) {
+    t_sugar_decl_a();
+    src = (const unsigned char *)"3++"; src_len = 3; src_pos = 0; next_tok();
+    const char *m = expr_err();
+    CHECK(m != NULL && strstr(m, "increment/decrement of non-lvalue") != NULL);
+}
+
 /* ================= 用例组 3：词法错误路径（setjmp 捕获 fail 消息） ================= */
 static void t_err_unterminated_string(void) {
     lex_set("\"abc");
@@ -430,12 +491,27 @@ static void t_pipeline_full(void) {
     CHECK(code_len == out_fs_len);
 }
 
+static void t_pipeline_sugar(void) {
+    /* V3b：复合赋值 + 前/后缀 ++/-- 走整条编译（含 codegen，防坏节点） */
+    t_reset();
+    feed_fs_input("int main(){int a;int s;a=5;a+=7;a-=3;a*=4;a/=2;a%=7;"
+                  "int c;c=++a;c=a++;c=a--;c=--a;return c;}");
+    char *av[3]; av[0] = "/"; av[1] = "/ps.c"; av[2] = "/ps.elf";
+    int rc = minicc_main((char *)av, 3);
+    CHECK(rc == 0);
+    CHECK(out_fs_len > 95 && out_fs[0] == 0x7f && out_fs[1] == 'E' && out_fs[2] == 'L');
+    CHECK(code_len == out_fs_len);
+}
+
 static void run_all(void) {
     t_lex_num(); t_lex_word(); t_lex_double_sym(); t_lex_single_sym();
     t_lex_str(); t_lex_char(); t_lex_block_comment(); t_lex_line_comment();
     t_lex_hex_token();
     t_expr_precedence(); t_expr_precedence_rev(); t_expr_left_assoc();
     t_expr_paren(); t_expr_hex_value();
+    t_expr_compound_assign(); t_expr_prefix_inc(); t_expr_prefix_dec();
+    t_expr_postfix_inc(); t_expr_postfix_dec();
+    t_err_compound_nonlval(); t_err_postfix_nonlval();
     t_err_unterminated_string(); t_err_bad_number(); t_err_bad_escape();
     t_err_bad_expression();
     t_decl_int(); t_decl_char(); t_decl_ptr(); t_decl_array_int(); t_decl_array_char();
@@ -446,7 +522,7 @@ static void run_all(void) {
     t_err_decl_type_mismatch();
     t_err_param_name(); t_err_array_param(); t_err_func_body();
     t_err_redefined_func(); t_err_redefined_global();
-    t_pipeline_simple(); t_pipeline_full();
+    t_pipeline_simple(); t_pipeline_full(); t_pipeline_sugar();
 }
 
 int main(void) {

@@ -32,6 +32,20 @@
 * `docs/design/minicc-design.md` §6.1 Feature Matrix：语句支持加 `for`/`do`/`break`/`continue`，拒绝列表摘除。
 * `changelog.md`：本条目。
 
+## [v1.4·minicc-sugar] - 2026-09-06 · minicc 复合赋值（+= -= *= /= %=）与前/后缀 ++/--（纯语法糖）
+
+> **纯语法糖，无新 emit 原语**：`lv op= rhs` 在 parser 层改写成 `lv = (lv op rhs)`（`ND_ASSIGN` 套
+> 二元 `ND_ADD/SUB/MUL/DIV/MOD`），前缀 `++lv/--lv` 改写成 `lv = lv±1`；后缀 `lv++/lv--` 因 C 语义
+> **值为旧值**而引入单节点 `ND_POST_INC/ND_POST_DEC`，其 codegen 仅复用现有 load/store 指令（ebx 暂存
+> 左值地址，读旧值→±1→写回→弹回旧值），**不新增任何 emit 字节原语**。词法新增两字符运算符
+> `+= -= *= /= %= ++ --`。
+> - 契约：非左值复合赋值/自增自减 → 编译期静态报错（`assign to non-lvalue` /
+>   `increment/decrement of non-lvalue`），绝不出坏码。
+> - 差分对拍（diffsynth）新增 `F_SUGAR` 入网：安全子集 `+=(2..9) -= (2..9) /= %%=(2..9) ++ --`；
+>   刻意排除 `*=`（重复累乘会令值域逃逸有符号溢出，与"无 UB 三纪律"冲突）。
+> - 三层验证（三同步）：host（test_minicc.sh 编译层）、Mock 白盒（AST 形状 + 全管线 codegen，断言
+>   76→96）、guest（test_minicc.sh 运行语义：前缀新值/后缀旧值/复合链/指针 p+=1）。
+
 ## [v1.4·netif] - 2026-09-06 · 虚拟 TCP 下行滑动窗口（host→guest 停-等→滑动窗口，吞吐 W/RTT）
 
 > 下行可靠由 v1.2 停-等升级为**滑动窗口**（与 v1.3 上行镜像）：转发器发送窗口 `DWIN=8`（=guest

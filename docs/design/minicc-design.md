@@ -150,6 +150,21 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 
 - ✅ 系统调用面（V2c）：产物隐式调用 `syscall3(n,a,b,c)` 时编译器自动生成 `int $0x80` 机器码 stub（参数按 minicc 约定映射 eax=号 ebx=a ecx=b edx=c；用户显式定义则作普通函数），从而支持 `sys_print`/读写文件——guest "写-编-跑"从"纯计算"走向**可观察 I/O**（测试断言产物运行期输出）。
 
+### 6.2b V3b：复合赋值 `+= -= *= /= %=` + 前/后缀 `++ --`（纯语法糖，双编译器差分入网）
+
+- ✅ 复合赋值（V3b）：`lv op= rhs` → parser 层改写成 `lv = (lv op rhs)`（`ND_ASSIGN` 套 `ND_ADD/SUB/
+  MUL/DIV/MOD`），**无任何新增 emit**；右操作数右结合递归；左值/类型检查与 `=` 共用 `mk_assign`。
+- ✅ 前缀 `++lv/--lv`：改写成 `lv = lv±1`（`ND_ASSIGN` 值留在 eax = 新值，恰为前缀表达式值）。
+- ✅ 后缀 `lv++/lv--`：值为旧值，引入单节点 `ND_POST_INC/ND_POST_DEC`，codegen 仅复用现有 load/store
+  指令（ebx 暂存左值地址：读旧值→±1→写回→弹回旧值），**不新增 emit 原语**。
+- ✅ 词法新增两字符运算符 `+= -= *= /= %= ++ --`（原有 `== != <= >= << >> && ||` 之后并入）。
+- 契约：非左值复合赋值 / 非左值自增自减 → 编译期静态报错（`assign to non-lvalue` /
+  `increment/decrement of non-lvalue`），绝不产出坏码。
+- 差分对拍（diffsynth）`F_SUGAR` 入网：安全子集 `+=(2..9) -= /= %= ++ --`；**刻意排除 `*=`**（重复累乘
+  令值域逃逸有符号溢出，与"无 UB 三纪律"冲突）。
+- 测试锚点：Mock 白盒 AST 形状 + 全管线 codegen（断言 76→96）；guest 运行语义（前缀新值/后缀旧值/
+  复合链 `/ca.c`、指针 `p+=1` `/cf.c`）；host 编译层用例（`t_cp*` / `t_inc*` / `t_dec*`）。
+
 ### 6.3 明确拒绝清单（编译期静态报错，不产出坏码）
 
 `long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、`goto`、预处理指令、隐式指针转换、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、指针/整型混赋。
