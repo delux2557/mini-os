@@ -145,9 +145,10 @@
     2. `fail()` 退进程 → 上层承上补：setjmp/longjmp 就地捕获（见上），停摆不越界；
     3. 链接方式 → 测试驱动**自建 `syscall3` shim**（exit/print/brk 静态竞技场 64MB），`#include minicc.c` 白盒，不 include host_crt.c。
   - **新发现的一条摩擦（宏碰撞）**：收敛别名 `#define src cc.src` 等会把驱动里的 `cc.src` 展开成 `cc.cc.src`（编译报 `'CC' has no member named 'cc'`）。解法：被别名收编的字段一律用**别名宏**读写（`src/tok/toklen/tok_is_num/...`）；只有未被收编的字段（`fail_jb/fail_msg/fail_jmp_on`）才写 `cc.xxx`。
-  - **覆盖与验收（2026-09-05 二期扩充）**：① 词法分类 9 例；② 优先级/结合/括号 AST 形状 + hex 值 5 例；③ 词法错误消息 4 例（unterminated string / bad number / bad escape / bad expression）；④ **声明分配成功路径 7 组**（int/char/ptr/数组/char 数组/初值/连续帧偏移 4·7·11，断言 AST 类型+符号表 K_LOCAL+帧偏移，含 `int* p` bty、`char s[8]` 紧凑 8B）；⑤ **语句错误路径 8 项**（if/while/for 缺括号分号、decl 缺标识符/分号、数组初始化拒绝、类型不匹配 `int x=p`）。共 **65 断言全绿**；已接入 `tests/test_minicc.sh` [3.5/4] Mock 层，`test_minicc` 主机 51 全过 + Mock 65 + guest 端到端全绿。
-  - **验收口径达成**：原则 6 的 Mock 半兑现 ✓（成功路径词法/优先级建树/声明分配 + 语句级 as-if/while/for 错误消息捕获）。
+  - **覆盖与验收（2026-09-05 三期扩充）**：① 词法分类 9 例；② 优先级/结合/括号 AST 形状 + hex 值 5 例；③ 词法错误消息 4 例；④ 声明分配成功路径 7 组；⑤ 语句错误路径 8 项；⑥ **函数/参数/重定义错误 5 项**（expected parameter name `int f(int)` / unsupported array parameter `int a[3]` / expected function body `int h();` / K_FUNC↔K_GLOBAL 冲突 redefined `int f(){} int f;` / 全局重定义 `int g; int g;`——经 `prog_set` 初始化 funcs/gvars 链后直调 `parse_program`）；⑦ **minicc_main 全管线成功 2 例**（扩展 syscall3 shim 加内存文件系统 slot1 输入/slot2 输出：简单 `return 42` + 大而全 全局/数组/指针/for/while，断言 rc==0 + ELF magic + `code_len==out_fs_len`）。共 **76 断言全绿**；已接入 `tests/test_minicc.sh` [3.5/4] Mock 层，宿主 51 全过 + Mock 76 + guest 端到端全绿。
+  - **验收口径达成**：原则 6 的 Mock 半兑现 ✓（成功路径：词法/优先级建树/声明分配/`minicc_main` 全管线；错误路径：词法与 stmt 层 + `parse_program` 函数/参数/重定义消息捕获）。
   - **一条实操注意（写用例时踩过）**：测 `stmt()` 前必须先 `next_tok()` 预热当前 token——`lex_set` 只设了 src，当前 token 为空；不预热会让 `accept("if")`/`peek("int")` 对空 token 判 false，走错分支、断言落空（曾致 8 项假 FAIL）。`t_err_decl_type_mismatch` 例外：它先 `stmt()` 成功消费 `int* p;` 把 token 停在 `int`，故无需额外预热。
+  - **又一条（组6踩过）**：**直调 `parse_program()` 前必须初始化 funcs/gvars 整链**（`funcs=NULL; funcs_tail=&funcs; gvars=NULL; gvars_tail=&gvars;`）——`parse_program` 末尾 `*funcs_tail = fn` 依赖非空 tail；`lex_set` 的 `t_reset()` memset cc 后 tail 为 NULL，直接置 `funcs_tail` 写空，SIGSEGV。包一层 `prog_set(s)=lex_set+链初始化` 即可。全管线 `minicc_main` 自会初始化链，故不受影响。
 
 ***
 

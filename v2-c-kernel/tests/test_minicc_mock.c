@@ -29,23 +29,53 @@
 #define MINICC_MOCK 1
 #include "../tools/minicc/minicc.c"
 
-/* ---- 自建 syscall3 shim（exit/print/brk；lexer/parser 只需 brk） ---- */
+/* ---- 自建 syscall3 shim（exit/print/fs/brk；内存文件模拟供 minicc_main 全管线） ---- */
 static unsigned char arena_mem[64u << 20];
 static uint32_t base_brk = 0, cur_brk = 0;
 
+/* 内存文件系统：slot1=输入源码（用例预置 in_fs/in_fs_len），slot2=输出 ELF 产物 */
+static unsigned char in_fs[65536]; static int in_fs_len = 0, in_fs_pos = 0;
+static unsigned char out_fs[65536]; static int out_fs_len = 0;
+
 int syscall3(int n, int a, int b, int c) {
-    (void)b; (void)c;
     switch (n) {
-    case 0:  exit((unsigned)a & 255u);                       /* SYS_EXIT */
+    case 0:  exit((unsigned)a & 255u);                                  /* SYS_EXIT */
     case 1:  fwrite((const void *)(uintptr_t)a, 1, strlen((const char *)(uintptr_t)a), stderr);
-             return 0;                                       /* SYS_PRINT */
-    case 35: /* SYS_BRK：静态竞技场模拟 */
+             return 0;                                                  /* SYS_PRINT */
+    case 13: return 0;                                                  /* SYS_FS_CREATE */
+    case 14:                                                            /* SYS_FS_OPEN slot a=b path b=c mode */
+        if (a == 1) { in_fs_pos = 0; return 0; }                        /* slot1 = 输入（读） */
+        if (a == 2) { out_fs_len = 0; return 0; }                       /* slot2 = 输出（截断写） */
+        return -1;
+    case 15: {                                                          /* SYS_FS_WRITE slot */
+        int cp = (int)c;
+        if (cp > 65536 - out_fs_len) cp = 65536 - out_fs_len;
+        memcpy(out_fs + out_fs_len, (const void *)(uintptr_t)b, (size_t)cp);
+        out_fs_len += cp; return cp;
+    }
+    case 16: {                                                          /* SYS_FS_READ slot */
+        int cp = (int)c;
+        if (cp > in_fs_len - in_fs_pos) cp = in_fs_len - in_fs_pos;
+        if (cp < 0) cp = 0;
+        memcpy((void *)(uintptr_t)b, in_fs + in_fs_pos, (size_t)cp); in_fs_pos += cp; return cp;
+    }
+    case 17: return 0;                                                  /* SYS_FS_CLOSE */
+    case 19: return 0;                                                  /* SYS_FS_DELETE */
+    case 35:                                                            /* SYS_BRK */
         if (!base_brk) base_brk = (uint32_t)(uintptr_t)arena_mem;
         if (a == 0) return (int)(cur_brk ? cur_brk : base_brk);
         cur_brk = (uint32_t)a;
+        if ((uint32_t)cur_brk - (uint32_t)base_brk > (uint32_t)sizeof arena_mem) exit(2);
         return 0;
-    default: return 0;
+    default: return -1;
     }
+}
+
+/* 预置输入源码：minicc_main 从 slot1 读它就是源码 */
+static void feed_fs_input(const char *s) {
+    in_fs_len = (int)strlen(s);
+    memcpy(in_fs, s, (size_t)in_fs_len);
+    in_fs_pos = 0;
 }
 
 /* ---- 用例隔离：清空 CC 单例（含 fail 注入态）+ 复位 brk ---- */
@@ -59,6 +89,13 @@ static void lex_set(const char *s) {
     src = (const unsigned char *)s;
     src_len = (int)strlen(s);
     src_pos = 0;
+}
+/* 顶层程序级预置：除 lex_set 外还须初始化 funcs/gvars 链表——parse_program 末尾
+ * `*funcs_tail = fn` 依赖非空 tail 指针；单层 stmt/expr 用例不需要，故仅组6/顶层用。 */
+static void prog_set(const char *s) {
+    lex_set(s);
+    funcs = NULL; funcs_tail = &funcs;
+    gvars = NULL; gvars_tail = &gvars;
 }
 
 /* ---- 错误路径捕获：fail 经 longjmp 回到 setjmp 现场；返回捕获消息（无错=本已清 NULL） ---- */
@@ -77,6 +114,12 @@ static const char *expr_err(void) {
 static const char *stmt_err(void) {
     cc.fail_jmp_on = 1;
     if (setjmp(cc.fail_jb) == 0) stmt();
+    cc.fail_jmp_on = 0;
+    return cc.fail_msg;
+}
+static const char *prog_err(void) {          /* 顶层程序（函数/全局声明）错误路径 */
+    cc.fail_jmp_on = 1;
+    if (setjmp(cc.fail_jb) == 0) parse_program();
     cc.fail_jmp_on = 0;
     return cc.fail_msg;
 }
@@ -327,6 +370,66 @@ static void t_err_decl_type_mismatch(void) {
     CHECK(m != NULL && strstr(m, "type mismatch") != NULL);
 }
 
+/* ================= 用例组 6：函数/参数/重定义错误路径（parse_program 层） ================= */
+static void t_err_param_name(void) {
+    prog_set("int f(int);");                 /* 形参 decl_type 后无名字 */
+    next_tok();
+    const char *m = prog_err();
+    CHECK(m != NULL && strstr(m, "expected parameter name") != NULL);
+}
+static void t_err_array_param(void) {
+    prog_set("int g(int a[3]){}");           /* 数组参数不支持 */
+    next_tok();
+    const char *m = prog_err();
+    CHECK(m != NULL && strstr(m, "unsupported: array parameter") != NULL);
+}
+static void t_err_func_body(void) {
+    prog_set("int h() ;");                    /* 缺函数体 { */
+    next_tok();
+    const char *m = prog_err();
+    CHECK(m != NULL && strstr(m, "expected function body") != NULL);
+}
+static void t_err_redefined_func(void) {
+    /* 函数先定义，同名再声明为全局变量 → K_FUNC↔K_GLOBAL 冲突，parse 层报 redefined。
+     * 注：minicc 的函数-函数两次定义 parse 期不报（val 仍 -1），last-definition 覆盖，属实测允许行为。 */
+    prog_set("int f(){} int f;");
+    next_tok();
+    const char *m = prog_err();
+    CHECK(m != NULL && strstr(m, "redefined") != NULL);
+}
+static void t_err_redefined_global(void) {
+    prog_set("int g; int g;");                /* 全局变量重复定义 */
+    next_tok();
+    const char *m = prog_err();
+    CHECK(m != NULL && strstr(m, "redefined") != NULL);
+}
+
+/* ================= 用例组 7：minicc_main 全管线成功路径（编译成功 + ELF 产物落盘） ================= */
+/* 经内存文件系统跑完整编译：读源码 → 建树 → 代码生成 → 写 ELF 到 out end_fs；断言返回 0 且
+ * 产物以 ELF magic 开头、长度等于 code_len。这测的是整条编译器管线而非单层。 */
+static void t_pipeline_simple(void) {
+    t_reset();
+    feed_fs_input("int main(){return 42;}");
+    char *av[3]; av[0] = "/"; av[1] = "/p.c"; av[2] = "/p.elf";
+    int rc = minicc_main((char *)av, 3);
+    CHECK(rc == 0);
+    CHECK(out_fs_len > 95 && out_fs[0] == 0x7f && out_fs[1] == 'E' &&
+          out_fs[2] == 'L' && out_fs[3] == 'F');   /* ELF32 magic */
+    CHECK(code_len == out_fs_len);                 /* 产物字节 = 写入字节 */
+}
+static void t_pipeline_full(void) {
+    /* 大而全：全局 vars + 递归 + for + 数组 + 指针 + 字符串，过整条编译 */
+    t_reset();
+    feed_fs_input("int g;int main(){int a[3];int* p;p=&a[0];int i;"
+                  "for(i=0;i<3;i=i+1)a[i]=i;i=0;g=0;"
+                  "while(i<3){g=g+a[i];i=i+1;}return g;}");
+    char *av[3]; av[0] = "/"; av[1] = "/pf.c"; av[2] = "/pf.elf";
+    int rc = minicc_main((char *)av, 3);
+    CHECK(rc == 0);
+    CHECK(out_fs_len > 95 && out_fs[0] == 0x7f && out_fs[1] == 'E' && out_fs[2] == 'L');
+    CHECK(code_len == out_fs_len);
+}
+
 static void run_all(void) {
     t_lex_num(); t_lex_word(); t_lex_double_sym(); t_lex_single_sym();
     t_lex_str(); t_lex_char(); t_lex_block_comment(); t_lex_line_comment();
@@ -341,6 +444,9 @@ static void run_all(void) {
     t_err_for_missing_semicolon(); t_err_for_missing_rparen();
     t_err_decl_missing_id(); t_err_decl_missing_semi(); t_err_array_init_rejected();
     t_err_decl_type_mismatch();
+    t_err_param_name(); t_err_array_param(); t_err_func_body();
+    t_err_redefined_func(); t_err_redefined_global();
+    t_pipeline_simple(); t_pipeline_full();
 }
 
 int main(void) {
