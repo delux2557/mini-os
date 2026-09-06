@@ -64,7 +64,7 @@ mini-os 的开发文档遵循三条铁律：
 | design.md 落后 ~10 版（停 v0.27/v0.28，缺 v0.29~v1.x） | ✅ 已补写（20~22 章：加固收口 / RR 确定性 / 并发不变量，见 PR #51） |
 | docs 目录四象限重组（explanation/ / reference/ 分层） | ✅ 已落地（PR #52：design/roadmap → explanation/，changelog/bugs → reference/；契约与 history/ 留根，不设空 guides/） |
 | external-reviews 命名统一（部分缺审计对象 sha） | ✅ 已闭环（P2 迁移 history/，规则明文化：sha 可考才带后缀） |
-| **CI 健壮性债：`test` job 失败只报 `exit code 2`、原因不可见**（2026-09-05，PR #91 首跑 flake，annotation 无有效输出）| 🟡 部分加固（本 PR）：diffsynth 违例行 tee 落 `build/diffsynth/diffsynth.log`（CI step log 已文本可见；样例 `.c` 的 **artifact 递归归档**需 `workflow` scope 的 token 才能改 glob——当前 PAT 被 GitHub 拒，已存 diff 待有权限者应用）。仍待办：样例归档 + 定位 exit 2 出处（逐层已解，顶层收敛待做） |
+| **CI 健壮性债：`test` job 失败只报 `exit code 2`、原因不可见**（2026-09-05，PR #91 首跑 flake，annotation 无有效输出）| ✅ 已加固（本 PR）：diffsynth 违例行 tee 落 `build/diffsynth/diffsynth.log`；CI/layers artifact glob 扩为递归 `build/**/*.log + build/**/*.c` + `build-logs/*`，子目录日志与失败样例 .c 随 artifact 归档（可下载后薄 ddmin 复现）。仍待办：定位 `test` job 顶层 exit 2 出处（逐层已解，顶层收敛待做） |
 
 ---
 
