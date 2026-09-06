@@ -431,6 +431,26 @@ static void t_err_decl_type_mismatch(void) {
     CHECK(m != NULL && strstr(m, "type mismatch") != NULL);
 }
 
+/* ================= 用例组 5b：循环控制语句 AST 形状（do/break/continue） ================= */
+static void t_stmt_do(void) {
+    lex_set("do 0; while(1);");
+    next_tok();
+    Node *n = stmt();
+    expect_sym(n, ND_DO);                                   /* do -> ND_DO */
+    CHECK(n->b != NULL && n->b->kind == ND_EXPR_STMT);      /* body 为语句 */
+    CHECK(n->l != NULL && n->l->kind == ND_NUM);            /* cond 为表达式 */
+}
+static void t_stmt_break(void) {
+    lex_set("break;");
+    next_tok();
+    expect_sym(stmt(), ND_BREAK);
+}
+static void t_stmt_continue(void) {
+    lex_set("continue;");
+    next_tok();
+    expect_sym(stmt(), ND_CONTINUE);
+}
+
 /* ================= 用例组 6：函数/参数/重定义错误路径（parse_program 层） ================= */
 static void t_err_param_name(void) {
     prog_set("int f(int);");                 /* 形参 decl_type 后无名字 */
@@ -518,6 +538,7 @@ static void run_all(void) {
     t_decl_init_num(); t_decl_frame_seq();
     t_err_if_missing_lparen(); t_err_if_missing_rparen(); t_err_while_missing_rparen();
     t_err_for_missing_semicolon(); t_err_for_missing_rparen();
+    t_stmt_do(); t_stmt_break(); t_stmt_continue();
     t_err_decl_missing_id(); t_err_decl_missing_semi(); t_err_array_init_rejected();
     t_err_decl_type_mismatch();
     t_err_param_name(); t_err_array_param(); t_err_func_body();

@@ -27,6 +27,17 @@
 * guest 运行语义（heredoc 多行源）：do-while 累 0..9==45、for+break 累 0..4==10、
   continue 跳偶累奇==25、嵌套 break 只断内层 s==3，均 `code=0 PASS`。
 
+**Added**（Tests，`tests/test_minicc_mock.c` 白盒）
+
+* 新增 `t_stmt_do` / `t_stmt_break` / `t_stmt_continue`：断言 do→`ND_DO`（body/cond）、
+  break→`ND_BREAK`、continue→`ND_CONTINUE` 的 AST 形状。
+
+**Added**（差分对拍，`tools/minicc/diffsynth/gen.c`）
+
+* 新特性入网：`F_DO/F_BRK/F_CNT`（仅 `CAPS_MINIC`，cc500 保守基座不加）；
+  `stmt_gen` 新增 do-while + break/continue 语句模板（`_d<20` 限幅保终止），
+  使差分/自覆盖探针覆盖 do/break/continue（gcc↔minicc 差分 + 确定性）。
+
 **Engineering / Docs**
 
 * `docs/design/minicc-design.md` §6.1 Feature Matrix：语句支持加 `for`/`do`/`break`/`continue`，拒绝列表摘除。
