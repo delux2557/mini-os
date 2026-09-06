@@ -1249,10 +1249,21 @@ int main1(char *argv, int argc)
     sys_print("cc500: output setup fail\x0a");
     return 1;
   }
+  /* v0.35 F-4：先分配 token 缓冲。token 为全局指针（初值 NULL），正常路径靠 takechar()
+   * -> my_realloc 惰性分配；但对空/纯空白源一次 takechar 都不触发，get_token 末尾
+   * `token[i]=0` 会写 NULL -> SIGSEGV(139)（而非干净报错）。预分配后空源走干净 error。 */
+  token = malloc(32);
+  token_size = 32;
   be_start();
   nextc = getchar();
   get_token();
   program();
+  if (entry_call_done == 0) {
+    /* 无任何函数定义 -> 无入口（cc500 契约「首个定义即入口」），产出无入口 ELF 运行必挂；
+     * 与 be_finish 的 undefined-symbol 纪律一致：干净报错而非编出废产物（空/纯空白/仅注释源）。 */
+    sys_print("cc500: undefined symbol\x0a");
+    return 1;
+  }
   be_finish();
   if (flush_output() != 0) {
     sys_print("cc500: output write fail\x0a");

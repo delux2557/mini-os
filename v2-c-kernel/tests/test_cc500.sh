@@ -59,6 +59,10 @@ hrun t6_bad 'int sys_print(char*s);int main(){sys_print("unterminated' \
 # BUG-048：未闭合块注释 -> 必须 FAIL（干净报错 rc=1），不得死循环（timeout 兜底）
 hrun t_bcomm 'int main(){/* unterminated comment' \
      1 'cc500: error' 'compiled OK'
+# F-4：空/仅注释源（无任何函数=无入口）——必须 FAIL 干净报错（undefined symbol），
+# 不得 SIGSEGV(139)（旧缺陷：token 惰性分配，空源永不 takechar->写 NULL）也不得骗 compiled OK
+hrun t_empty '' 1 'undefined symbol' 'compiled OK'
+hrun t_comment_nofn '/* only a comment, no function */' 1 'undefined symbol' 'compiled OK'
 # BUG-049：数字字面量混入字母 -> 必须 FAIL 且报出错 token，不得静默算错骗 compiled OK
 hrun t_mixhex 'int main(){return 0x10;}' \
      1 '0x10' 'compiled OK'
