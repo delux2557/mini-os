@@ -165,6 +165,19 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 - 测试锚点：Mock 白盒 AST 形状 + 全管线 codegen（断言 76→96）；guest 运行语义（前缀新值/后缀旧值/
   复合链 `/ca.c`、指针 `p+=1` `/cf.c`）；host 编译层用例（`t_cp*` / `t_inc*` / `t_dec*`）。
 
+### 6.2c V3b：循环控制 `do-while` / `break` / `continue`（差分对拍 + Mock 补盲）
+
+- ✅ `do <body> while(<expr>);` 后测循环 + 循环内 `break`（提前退出）/ `continue`（跳下次迭代）。
+- ⚙️ codegen：单遍 AST 用**循环帧栈**（`loop_brk/loop_cont/nloop`）记录未决前向跳转位置，循环收尾统一
+  回填相对位移（E9 rel32 在 +1 处）——支持嵌套与同层多次 break/continue；while/for 的 continue 分别
+  指向条件测试 / step，do-while 指向 body 后条件求值；不新增 emit 原语。
+- 契约：循环外 `break`/`continue` → 编译期报错 `break/continue outside loop`。
+- 差分对拍（diffsynth）`F_DO/F_BRK/F_CNT` 入网（仅 `CAPS_MINIC`；cc500 保守基座不加）：`stmt_gen`
+  新增 do-while + break/continue 语句模板，`_d<20` 限幅保终止，gcc↔minicc 差分 + 自覆盖探针全触发。
+- 测试锚点：Mock 白盒 `t_stmt_do` / `t_stmt_break` / `t_stmt_continue`（AST 形状，断言 96→101）；
+  guest 运行语义（do-while 累 0..9==45、break 早退 s==10、continue 累奇==25、嵌套 break 只断内层 s==3）；
+  host 编译层（`t_do` / `t_brk` / `t_cont` / `t_do_break` + 循环外报错 `t_breakout` / `t_continueout`）。
+
 ### 6.3 明确拒绝清单（编译期静态报错，不产出坏码）
 
 `long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、`goto`、预处理指令、隐式指针转换、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、指针/整型混赋。
