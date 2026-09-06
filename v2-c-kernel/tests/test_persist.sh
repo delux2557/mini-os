@@ -25,8 +25,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# QEMU 满载（Layers 工作流 15+ layer 并行竞抢）下，guest 内"编译 + 执行用户产物"
+# 是最耗时的敏感步骤，8s 默认超时在层载下偏紧 → 单测 flaky 实为时序假失败
+# （#120 核查：本地单 QEMU 全绿，CI 满载仅此步 8s 超时）。
+# 与 test_serial.sh 同源：它的 wait_for 默认已升 20s（同因 CI 负载 8s 偶发 flake），
+# 此处一并统一默认 20s，并对编译/执行/重启段以 TMO_BUILD=45 放宽。
+TMO_BUILD=45
+
 wait_for() {   # wait_for <日志> <说明> <正则> [超时秒]
-    local log="$1" desc="$2" re="$3" tmo="${4:-8}" i
+    local log="$1" desc="$2" re="$3" tmo="${4:-20}" i
     for ((i = 0; i < tmo * 4; i++)); do
         grep -aq "$re" "$log" 2>/dev/null && { echo "[ok]   $desc"; return 0; }
         sleep 0.25
@@ -76,8 +83,8 @@ wait_for "$LOG1" "mkdir 建 /persist"   "\[shell\] mkdir '/persist' -> "
 send 'writefile /persist/p.c int syscall3(int n,int a,int b,int c);int main(){syscall3(1,"persist: hello\x0a",0,0);return 0;}'
 wait_for "$LOG1" "writefile 写持久化源码" "\[writefile\] '/persist/p.c' wrote [0-9][0-9]* bytes"
 send "ccrun /persist/p.c /persist/p.elf"
-wait_for "$LOG1" "cc500 编译持久化源码"   "cc500: compiled OK"
-wait_for "$LOG1" "编译产物落盘前可运行"    "\[ccrun\] '/persist/p.elf' exited code=0 PASS"
+wait_for "$LOG1" "cc500 编译持久化源码"   "cc500: compiled OK" "$TMO_BUILD"
+wait_for "$LOG1" "编译产物落盘前可运行"    "\[ccrun\] '/persist/p.elf' exited code=0 PASS" "$TMO_BUILD"
 # ---- 任务9：patch 原语 + 持久化（改一行源码 → micc 重编 → save 落盘，重启后仍在） ----
 send 'writefile <<PP /persist/patch.c'
 send 'int main(){'
@@ -85,13 +92,13 @@ send 'return 1;}'
 send 'PP'
 wait_for "$LOG1" "patch 源 heredoc 写入"    "\[writefile\] '/persist/patch.c' wrote 23 bytes"
 send "micc /persist/patch.c /persist/patch.elf"
-wait_for "$LOG1" "patch 前 FAIL 基线"       "\[micc\] '/persist/patch.elf' exited code=1 FAIL"
+wait_for "$LOG1" "patch 前 FAIL 基线"       "\[micc\] '/persist/patch.elf' exited code=1 FAIL" "$TMO_BUILD"
 send "patch /persist/patch.c 2 return 0;}"
-wait_for "$LOG1" "patch 改第 2 行"          "\[patch\] '/persist/patch.c' line 2 <- return 0;}"
+wait_for "$LOG1" "patch 改第 2 行"          "\[patch\] '/persist/patch.c' line 2 <- return 0;}" "$TMO_BUILD"
 send "micc /persist/patch.c /persist/patch.elf"
-wait_for "$LOG1" "patch 后重编 PASS"        "\[micc\] '/persist/patch.elf' exited code=0 PASS"
+wait_for "$LOG1" "patch 后重编 PASS"        "\[micc\] '/persist/patch.elf' exited code=0 PASS" "$TMO_BUILD"
 send "save"
-wait_for "$LOG1" "save 写回磁盘"       "\[shell\] save -> 0"
+wait_for "$LOG1" "save 写回磁盘"       "\[shell\] save -> 0" "$TMO_BUILD"
 wait_for "$LOG1" "storage 保存日志"    "\[storage\] saved "
 send "exit"
 wait_for "$LOG1" "shell 退出"          "bye"
@@ -108,14 +115,14 @@ send "selftest"
 wait_for "$LOG2" "持久盘应用可运行"    "\[selftest\] PASS (6 checks)" 20
 # ---- S10：重启后编译产物仍在磁盘、可被 run 直接加载运行 ----
 send "run /persist/p.elf"
-wait_for "$LOG2" "重启后编译产物被加载"  "\[elf\] '/persist/p.elf' loaded"
-wait_for "$LOG2" "重启后编译产物可运行"   "persist: hello"
-wait_for "$LOG2" "重启后编译产物退出码"   "'/persist/p.elf' exited code=0"
+wait_for "$LOG2" "重启后编译产物被加载"  "\[elf\] '/persist/p.elf' loaded" "$TMO_BUILD"
+wait_for "$LOG2" "重启后编译产物可运行"   "persist: hello" "$TMO_BUILD"
+wait_for "$LOG2" "重启后编译产物退出码"   "'/persist/p.elf' exited code=0" "$TMO_BUILD"
 # ---- 任务9：重启后 patch 改动仍在（cat 需见 return 0;}，且可重编译） ----
 send "cat /persist/patch.c"
 wait_for "$LOG2" "重启后 patch 改动仍在"  "return 0;}"
 send "micc /persist/patch.c /persist/patch2.elf"
-wait_for "$LOG2" "重启后 patch 源可重编译" "\[micc\] '/persist/patch2.elf' exited code=0 PASS"
+wait_for "$LOG2" "重启后 patch 源可重编译" "\[micc\] '/persist/patch2.elf' exited code=0 PASS" "$TMO_BUILD"
 shutdown
 
 echo
