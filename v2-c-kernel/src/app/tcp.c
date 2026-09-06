@@ -106,12 +106,25 @@ static void rx_push(tcp_conn_t *c, const uint8_t *data, uint32_t n) {
     }
 }
 
+/* v1.4 下行滑动窗口：从 rx_next 起交付"连续已到"的重排缓冲，并在交付后推进 rx_next。
+   每次要么前进（有连续包），要么立即停（rx_next 处缺包，等补位）。 */
+static void rx_flush(tcp_conn_t *c) {
+    while (c->rx_win[c->rx_next % TCP_RXWIN].busy) {
+        rx_slot_t *s = &c->rx_win[c->rx_next % TCP_RXWIN];
+        rx_push(c, s->data, s->len);
+        s->busy = 0;
+        c->rx_next++;
+    }
+}
+
 /* 泵取 UDP：从转发器回传队列只取"一个"会话数据报并路由进对应连接对象。
  * v1.2 BUG-047：原 for(;;) 全量 pump 把整段响应一次性挤进 rxb 环，超过 TCP_RXB 即丢尾；
  * 改为单报泵取，令 tcp_recv 每轮 drain 后立即排空，环永不涨破 TCP_RXB。
- * v1.2 可靠下行（stop-and-wait）：host→guest 的 MSG_DATA 携带序列号 seq，本函数
- * 只在 seq 恰为期望的 rx_next 时推入 rxb 并回 ACK，转发器收到 ACK 才发下一个；
- * 重复/乱序（ACK 丢后重发）直接丢弃并重发 ACK，保证大文件尾字节不丢。 */
+ * v1.2 可靠下行：host→guest 的 MSG_DATA 携带序列号 seq，转发器发下一报前等 ACK。
+ * v1.4 下行滑动窗口：guest 是"滑动窗口接收"端——seq 落在
+ * 窗口 [rx_next, rx_next+TCP_RXWIN) 内就缓存进重排缓冲（乱序先到），rx_flush 凑齐连续后
+ * 依序送 rxb，回累计 ACK（下一期望 = rx_next）；窗口外（超窗/已交付区重复）丢弃载荷、
+ * 重发 ACK 触发端对端自愈。与转发器下行发送窗口（镜像上行）闭环。 */
 static void drain(void) {
     uint8_t tmp[TCP_DGRAM_BUF];
     struct net_recv_iov ri;
@@ -125,12 +138,18 @@ static void drain(void) {
     if (!c) return;
     if (mt == MSG_DATA) {
         uint16_t seq = tcp_hdr_get_seq(tmp);
-        if (seq == c->rx_next) {
-            rx_push(c, tmp + TCP_PHDR, (uint32_t)n - TCP_PHDR);
-            c->rx_next++;
-            send_ack(c);                 /* 累计 ACK：请继续发下一个 */
+        uint32_t plen = (uint32_t)n - TCP_PHDR;
+        if (plen > TCP_MAX_PAYLOAD) plen = TCP_MAX_PAYLOAD;   /* 以单报载荷上限钳制副本 */
+        uint16_t off = (uint16_t)(seq - c->rx_next);          /* 相对 rx_next 的窗口偏移 */
+        if (off < TCP_RXWIN) {                                /* 窗口内：缓存（乱序/重复同值覆盖）+ 凑齐交付 */
+            rx_slot_t *s = &c->rx_win[seq % TCP_RXWIN];
+            for (uint32_t i = 0; i < plen; i++) s->data[i] = tmp[TCP_PHDR + i];
+            s->len = (uint16_t)plen;
+            s->busy = 1;
+            rx_flush(c);                                      /* 从 rx_next 起交付连续段并推进 rx_next */
+            send_ack(c);                                      /* 累计 ACK：下一期望 = rx_next */
         } else {
-            send_ack(c);                 /* 重发/乱序：丢弃载荷，重发 ACK 触发端对端自愈 */
+            send_ack(c);                                      /* 超窗/已交付区重复：丢弃载荷，重发 ACK 自愈 */
         }
     }
     else if (mt == MSG_OPENED)  { c->state = TCP_OPEN; }
@@ -162,7 +181,8 @@ int tcp_open(uint32_t ip, uint16_t port) {
     c->state = TCP_OPENING;
     c->dst_ip = ip; c->dst_port = port;
     c->rx_head = c->rx_tail = c->ev_head = c->ev_tail = 0;
-    c->rx_next = 0;                  /* v1.2 可靠下行：从 seq 0 开始期待 */
+    c->rx_next = 0;                  /* v1.4 可靠下行：从 seq 0 开始期待 */
+    for (int i = 0; i < TCP_RXWIN; i++) c->rx_win[i].busy = 0;   /* v1.4 清空下行重排缓冲（防上次连接残留） */
     c->tx_seq = 0; c->tx_base = 0; c->tx_pending_start = 0;  /* v1.3 上行滑动窗口：从 seq 0 起，窗口空 */
     /* tx_win 槽为静态零初始化（busy=0=空闲），连接复用前无需逐槽清零 */
     c->ev_overflow = 0;
