@@ -88,6 +88,10 @@ hrun t_ainit 'int main(){int a[2]=1;return 0;}' 1 'array init not supported' 'co
 hrun t_asize0 'int main(){int a[0];return 0;}' 1 'array size must be positive' 'compiled OK'
 # 数组参数 -> 必须 FAIL + array parameter
 hrun t_aparam 'int f(int a[3]){return 0;}int main(){return 0;}' 1 'array parameter' 'compiled OK'
+echo "== [2a4] 宿主循环控制错误路径（do-while/break/continue） =="
+# 循环外 break/continue -> 必须 FAIL + break/continue outside loop
+hrun t_breakout 'int main(){break;}' 1 'break outside loop' 'compiled OK'
+hrun t_continueout 'int main(){continue;}' 1 'continue outside loop' 'compiled OK'
 echo "== [2b] 宿主成功路径 =="
 # 成功：变量/四则/if/else/while/递归/全局/逻辑，编译层全过
 hrun t_arith 'int main(){int a;a=1+2*3-4;return 0;}' 0 'compiled OK' ''
@@ -102,6 +106,11 @@ hrun t_for 'int main(){int i;int s;s=0;for(i=0;i<10;i=i+1)s=s+i;return 0;}' 0 'c
 hrun t_forempty 'int main(){int i;i=0;for(;;){i=i+1;if(i>3)return 0;}}' 0 'compiled OK' ''
 hrun t_fornorestep 'int main(){int i;i=0;for(i=0;i<3;){i=i+1;}return 0;}' 0 'compiled OK' ''
 hrun t_fornested 'int main(){int i;int j;int s;s=0;for(i=0;i<3;i=i+1)for(j=0;j<3;j=j+1)s=s+1;return 0;}' 0 'compiled OK' ''
+# 循环控制（do-while / break / continue）：宿主编译层全过（运行语义见 guest）
+hrun t_do 'int main(){int i;i=0;do{i=i+1;}while(i<5);return 0;}' 0 'compiled OK' ''
+hrun t_brk 'int main(){int i;for(i=0;i<10;i=i+1){if(i==3)break;}return 0;}' 0 'compiled OK' ''
+hrun t_cont 'int main(){int i;for(i=0;i<10;i=i+1){if(i%2==0)continue;}return 0;}' 0 'compiled OK' ''
+hrun t_do_break 'int main(){int i;int s;s=0;i=0;do{s=s+i;i=i+1;if(i==5)break;}while(1);if(s==10)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_logic 'int main(){int a;a=1;if(a==1&&!(a==0)||0==1)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_global 'int g=7;int main(){int x;x=g;return 0;}' 0 'compiled OK' ''
 # 任务1（锁 BUG-039）：GVAR hex 初始化器——0x800a0000 == 2148139008（此前把 x/a 当数字位得垃圾值，
@@ -187,6 +196,43 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "for 求和 0..9 编译" "minicc: compiled OK" 40
     gwait "for 求和 0..9==45 运行" "\[micc\] '/mfo.elf' exited code=0 PASS" 40
     gsend "rm /mfo.c"; gsend "rm /mfo.elf"
+    # 循环控制（do-while / break / continue）运行语义，均用 heredoc 多行源绕开 128B 单行截断
+    # do-while：0..9 求和 ==45（post-test 至少执行一次）
+    gsend "writefile <<M /md.c"
+    gsend "int main(){int i;int s;s=0;i=0;do{s=s+i;i=i+1;}while(i<10);if(s==45)return 0;return 1;}"
+    gsend "M"
+    gwait "do-while 源写入" "\[writefile\] '/md.c' wrote" 40
+    gsend "micc /md.c /md.elf"
+    gwait "do-while 求和编译" "minicc: compiled OK" 40
+    gwait "do-while 求和 0..9==45 运行" "\[micc\] '/md.elf' exited code=0 PASS" 40
+    gsend "rm /md.c"; gsend "rm /md.elf"
+    # break：for 累加 0..4，i==5 早退 -> s==10
+    gsend "writefile <<M /mb.c"
+    gsend "int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i==5)break;s=s+i;}if(s==10)return 0;return 1;}"
+    gsend "M"
+    gwait "break 源写入" "\[writefile\] '/mb.c' wrote" 40
+    gsend "micc /mb.c /mb.elf"
+    gwait "break 早退编译" "minicc: compiled OK" 40
+    gwait "break 早退 s==10 运行" "\[micc\] '/mb.elf' exited code=0 PASS" 40
+    gsend "rm /mb.c"; gsend "rm /mb.elf"
+    # continue：跳偶累奇 1+3+5+7+9 ==25
+    gsend "writefile <<M /mc.c"
+    gsend "int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i%2==0)continue;s=s+i;}if(s==25)return 0;return 1;}"
+    gsend "M"
+    gwait "continue 源写入" "\[writefile\] '/mc.c' wrote" 40
+    gsend "micc /mc.c /mc.elf"
+    gwait "continue 跳偶编译" "minicc: compiled OK" 40
+    gwait "continue 累奇 1+3+5+7+9==25 运行" "\[micc\] '/mc.elf' exited code=0 PASS" 40
+    gsend "rm /mc.c"; gsend "rm /mc.elf"
+    # 嵌套 break：内层 j==1 早退只断内层 -> 每轮外层只加 1，共 3
+    gsend "writefile <<M /mn.c"
+    gsend "int main(){int i;int j;int s;s=0;for(i=0;i<3;i=i+1){for(j=0;j<3;j=j+1){if(j==1)break;s=s+1;}}if(s==3)return 0;return 1;}"
+    gsend "M"
+    gwait "嵌套break 源写入" "\[writefile\] '/mn.c' wrote" 40
+    gsend "micc /mn.c /mn.elf"
+    gwait "嵌套break 编译" "minicc: compiled OK" 40
+    gwait "嵌套 break 只断内层 s==3 运行" "\[micc\] '/mn.elf' exited code=0 PASS" 40
+    gsend "rm /mn.c"; gsend "rm /mn.elf"
     # 任务9：patch 原语 —— 多行源文件按行替换后 micc 重编
     #   heredoc 先写"错"（return 1）得 FAIL 基线，patch 改第 2 行成 return 0 后重编应 PASS
     #   （源码 <128B 每行，绕开 writefile 单行截断；验证"增行编辑 → 重编"闭环）

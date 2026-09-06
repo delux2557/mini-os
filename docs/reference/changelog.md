@@ -3,6 +3,35 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4/minicc] - 2026-09-06 · minicc 循环控制补齐（do-while / break / continue）
+
+> minicc（自研 MIT 编译器）循环控制按 C 习惯补齐：新增 `do`-while 后测循环 + 循环内
+> `break`（提前退出）与 `continue`（跳到下一次迭代）。基于 AST 的单遍 codegen 用"循环帧栈"
+> 记录未决跳转位置，循环收尾统一回填相对位移——支持嵌套与同层多次 break/continue。
+> 语义与 C 一致：break 跳最内层循环出口、continue 跳到该循环"下次迭代入口"（while/for 为回测
+> 条件或执行 step，do-while 为回测 body 后的条件）。
+
+**Changed**（`tools/minicc/minicc.c`）
+
+* **Node 枚举**：新增 `ND_DO` / `ND_BREAK` / `ND_CONTINUE`。
+* **CC 上下文**：新增循环帧栈 `loop_brk/loop_cont/nloop`（未决跳转位置，规避 labs[] 单补丁限制）。
+* **`stmt()`**：新增 `do <body> while(<expr>);`、`break;`、`continue;` 解析。
+* **`gen_stmt`**：`ND_DO`（post-test，`jnz` 直接回 body）、`ND_BREAK`/`ND_CONTINUE`（帧内记录 +
+  收尾回填）；`ND_WHILE`/`ND_FOR` 接入循环帧（continue 目标 for 指向 step、while 指向条件）。
+* **循环外 break/continue → 编译期报错** `break/continue outside loop`。
+
+**Added**（Tests，`tests/test_minicc.sh`）
+
+* 宿主错误路径：`break`/`continue` 循环外 → FAIL。
+* 宿主成功路径：do / break / continue / do+break 编译层 PASS。
+* guest 运行语义（heredoc 多行源）：do-while 累 0..9==45、for+break 累 0..4==10、
+  continue 跳偶累奇==25、嵌套 break 只断内层 s==3，均 `code=0 PASS`。
+
+**Engineering / Docs**
+
+* `docs/design/minicc-design.md` §6.1 Feature Matrix：语句支持加 `for`/`do`/`break`/`continue`，拒绝列表摘除。
+* `changelog.md`：本条目。
+
 ## [v1.4·netif] - 2026-09-06 · 虚拟 TCP 下行滑动窗口（host→guest 停-等→滑动窗口，吞吐 W/RTT）
 
 > 下行可靠由 v1.2 停-等升级为**滑动窗口**（与 v1.3 上行镜像）：转发器发送窗口 `DWIN=8`（=guest
