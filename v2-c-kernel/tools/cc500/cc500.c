@@ -898,9 +898,126 @@ void type_name()
  *     if ( expression ) statement
  *     if ( expression ) statement else statement
  *     while ( expression ) statement
+ *     do statement while ( expression ) ;
+ *     for ( expression-opt ; expression-opt ; expression-opt ) statement
+ *     break ;
+ *     continue ;
  *     return ;
  *     expr ;
  */
+
+/* ---- 教学里程碑 M5：break / continue 循环控制（2026-09-06）----
+ * 无 AST 单遍发射下，break/continue 用"循环帧栈"管理未决跳转：
+ *   - 进入每层循环压一帧，记录该层起始时 break/continue 挂起的"水位"（计数）；
+ *   - body 内 break/continue 各自 emit `jmp` 并把指令终点位置(codepos)记入挂起池；
+ *   - 循环退出 / continue 目标确定后，把本帧水位之后新增的挂起位置统一回填。
+ * 帧栈与挂起池存于堆（malloc 出的 char*，4 字节手工打包）——cc500 无数组声明，
+ * 仅支持指针下标（且下标按字节），故绕道堆缓冲。任意嵌套 while/do/for 的
+ * break/continue 都能回填到正确目标。
+ * 纪律：仅新增分支、不改任何既有发射路径；cc500.c 自身用新语法 → P1==P2 不变式成立。
+ * 工程惯例：辅助函数内变量一律单声明（`int x;` 一句一个——cc500 只支持单声明）。 */
+int loop_depth;
+char *loop_frames;   /* 帧栈：每帧 8B=2×int（br_mark 水位, cont_mark 水位） */
+char *loop_breaks;   /* 挂起 break 的 jmp 位置池（每项 4B） */
+char *loop_conts;    /* 挂起 continue 的 jmp 位置池（每项 4B） */
+int loop_break_cnt;  /* 挂起 break 总数（=池顶游标） */
+int loop_cont_cnt;   /* 挂起 continue 总数（=池顶游标） */
+
+/* 4 字节手工打包（与 save_int/load_ptr 同源，保证 cc500 自举可编） */
+void bput4(char *b, int o, int v)
+{
+  b[o] = v & 255;
+  b[o + 1] = (v >> 8) & 255;
+  b[o + 2] = (v >> 16) & 255;
+  b[o + 3] = (v >> 24) & 255;
+}
+
+int bget4(char *b, int o)
+{
+  return (b[o] & 255) + ((b[o + 1] & 255) << 8) +
+         ((b[o + 2] & 255) << 16) + ((b[o + 3] & 255) << 24);
+}
+
+/* 进入一层循环：压帧，记录当前两池水位（作为本层 break/continue 起始标记） */
+void loop_push()
+{
+  int fb;
+  if (loop_depth >= 16)
+    error();                       /* 循环嵌套过深拒绝 */
+  fb = loop_depth * 8;
+  bput4(loop_frames, fb, loop_break_cnt);
+  bput4(loop_frames, fb + 4, loop_cont_cnt);
+  loop_depth = loop_depth + 1;
+}
+
+/* body 内某次 break：只循环内合法，emit jmp 并把位置记入挂起池 */
+void stmt_break()
+{
+  int n;
+  if (loop_depth <= 0)
+    error();                       /* 循环外 break */
+  n = loop_break_cnt;
+  if (n >= 256)
+    error();                       /* 挂起池满拒绝，防堆越界 */
+  emit(5, "\xe9....");             /* jmp（退出点回填） */
+  bput4(loop_breaks, n * 4, codepos);
+  loop_break_cnt = n + 1;
+  expect(";");
+}
+
+/* body 内某次 continue：逻辑同 break，记入 continue 挂起池 */
+void stmt_continue()
+{
+  int n;
+  if (loop_depth <= 0)
+    error();                       /* 循环外 continue */
+  n = loop_cont_cnt;
+  if (n >= 256)
+    error();
+  emit(5, "\xe9....");             /* jmp（continue 目标回填） */
+  bput4(loop_conts, n * 4, codepos);
+  loop_cont_cnt = n + 1;
+  expect(";");
+}
+
+/* 循环退出点确定后，回填本帧新增的全部 break jmp 到 codepos（=退出点） */
+void loop_patch_break()
+{
+  int fb;
+  int mark;
+  int i;
+  int pos;
+  fb = (loop_depth - 1) * 8;
+  mark = bget4(loop_frames, fb);
+  for (i = mark; i <= loop_break_cnt - 1; i = i + 1) {
+    pos = bget4(loop_breaks, i * 4);
+    save_int(code + pos - 4, codepos - pos);
+  }
+  loop_break_cnt = mark;           /* 回退到本层起点，交还内层空间 */
+}
+
+/* continue 目标 ct 确定后，回填本帧新增的全部 continue jmp 到 ct */
+void loop_patch_continue(int ct)
+{
+  int fb;
+  int mark;
+  int i;
+  int pos;
+  fb = (loop_depth - 1) * 8;
+  mark = bget4(loop_frames, fb + 4);
+  for (i = mark; i <= loop_cont_cnt - 1; i = i + 1) {
+    pos = bget4(loop_conts, i * 4);
+    save_int(code + pos - 4, ct - pos);
+  }
+  loop_cont_cnt = mark;
+}
+
+/* 离开循环：退帧 */
+void loop_pop()
+{
+  loop_depth = loop_depth - 1;
+}
+
 void statement()
 {
   int p1;
@@ -943,21 +1060,31 @@ void statement()
   }
   else if (accept("while")) {
     expect("(");
-    p1 = codepos;
+    p1 = codepos;                  /* cond 顶：continue 目标 */
     promote(expression());
     emit(8, "\x85\xc0\x0f\x84...."); /* test %eax,%eax ; je ... */
     p2 = codepos;
     expect(")");
+    loop_push();                   /* M5：压 while 帧 */
     statement();
-    emit(5, "\xe9...."); /* jmp ... */
+    emit(5, "\xe9...."); /* jmp 回 cond 顶 */
     save_int(code + codepos - 4, p1 - codepos);
-    save_int(code + p2 - 4, codepos - p2);
+    loop_patch_continue(p1);       /* continue → cond 顶 */
+    loop_patch_break();            /* break → 当前 codepos（退出点） */
+    loop_pop();
+    save_int(code + p2 - 4, codepos - p2); /* cond je → 退出点 */
   }
   else if (accept("do")) {        /* M1：do-while */
     stmt_do();
   }
   else if (accept("for")) {       /* M1：for(init;cond;step) */
     stmt_for();
+  }
+  else if (accept("break")) {     /* M5：break（循环内） */
+    stmt_break();
+  }
+  else if (accept("continue")) {  /* M5：continue（循环内） */
+    stmt_continue();
   }
   else if (accept("return")) {
     if (peek(";") == 0)
@@ -1015,32 +1142,43 @@ int stmt_for()
   emit(5, "\xe9....");               /* jmp L_top */
   save_int(code + codepos - 4, p_top - codepos);
   p_body = codepos;                  /* L_body */
+  loop_push();                       /* M5：压 for 帧 */
   statement();                       /* body */
   emit(5, "\xe9....");               /* jmp L_step（回 step 区） */
   save_int(code + codepos - 4, p_step - codepos);
+  loop_patch_continue(p_step);       /* M5：continue → step */
+  loop_patch_break();                /* M5：break → 当前 codepos（退出点） */
+  loop_pop();                        /* M5：退 for 帧 */
   save_int(code + pj - 4, p_body - pj);      /* 回填 jmp L_body */
   if (pexit != 0 - 1)
     save_int(code + pexit - 4, codepos - pexit); /* 回填 cond je → L_exit */
   return 0;
 }
 
-/* do body while ( cond ) ; —— 与 while 同构，仅方向相反：先执行一次再判条件。 */
+/* do body while ( cond ) ; —— 与 while 同构，仅方向相反：先执行一次再判条件。
+ * M5：do 的 continue 目标 = 每次回跳的 cond 求值起点（pc）；break = 整个构造后的退出点。 */
 int stmt_do()
 {
   int p1;
   int p2;
+  int pc;      /* M5：cond 求值起点 = continue 目标 */
   p1 = codepos;                      /* body 顶 */
-  statement();
+  loop_push();                       /* M5：压 do 帧 */
+  statement();                       /* body（内可 break/continue，先记 jmp 位置） */
   if (peek("while") == 0)
     error();                         /* 缺 while 关键字（do 的 body 无独立 else，正常返回时 token 应为 while） */
   accept("while");
   expect("(");
+  pc = codepos;                      /* M5：continue 在此回跳（先判 cond 再回 body 顶） */
   promote(expression());
   emit(8, "\x85\xc0\x0f\x85....");   /* test; jne body 顶（条件非零跳回） */
   p2 = codepos;
   expect(")");
   expect(";");
   save_int(code + p2 - 4, p1 - codepos);
+  loop_patch_continue(pc);           /* M5：continue → cond 求值起点 */
+  loop_patch_break();                /* M5：break → 当前 codepos（退出点） */
+  loop_pop();                        /* M5：退 do 帧 */
   return 0;
 }
 
@@ -1254,6 +1392,11 @@ int main1(char *argv, int argc)
    * `token[i]=0` 会写 NULL -> SIGSEGV(139)（而非干净报错）。预分配后空源走干净 error。 */
   token = malloc(32);
   token_size = 32;
+  /* v0.36 M5：预分配 break/continue 循环帧栈堆缓冲（cc500 无数组声明，唯有指针下标）。
+   * 18 层帧×8B + 两侧挂起池各 256×4B，测试源足够；越界由 stmt_break/continue 的计数守卫兜底。 */
+  loop_frames = malloc(144);
+  loop_breaks = malloc(1024);
+  loop_conts = malloc(1024);
   be_start();
   nextc = getchar();
   get_token();

@@ -97,6 +97,15 @@ hrun t_ca_load 'int main(){int x;x=5;x+=3;return x;}' 0 'compiled OK' ''
 hrun t_ca_nolv 'int main(){int x;x=3+=1;return x;}' 1 'cc500: error' 'compiled OK'
 # M4 边界：'/=' 不在 M4 范围，x/=2 须干净报错（'/' 走注释分支，按 '/' '=' 解析后语法错）
 hrun t_ca_sdeq 'int main(){int x;x=5;x/=2;return x;}' 1 'cc500: error' 'compiled OK'
+# ---- M5：break / continue 循环控制（2026-09-06）----
+# 编译路径：for+break（0..9 遇 5 断，求和 10）与 for+continue（跳过奇数，偶数求和 20）——
+# 语义断言在 [3/4] guest 段；此处仅验编译路径（rc=0=compiled OK）。
+hrun t_brk 'int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i==5)break;s=s+i;}if(s==10)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_cnt 'int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i%2)continue;s=s+i;}if(s==20)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_dobc 'int main(){int i;int s;s=0;i=0;do{i=i+1;if(i==3)continue;if(i==5)break;s=s+i;}while(1);if(s==7)return 0;return 1;}' 0 'compiled OK' ''
+# M5 纪律#1：循环外 break / continue 必须 error 不静默（不得产出坏码）
+hrun t_brk_oob 'int main(){int i;i=0;break;i=i+1;return 0;}' 1 'cc500: error' 'compiled OK'
+hrun t_cnt_oob 'int main(){int i;i=0;continue;i=i+1;return 0;}' 1 'cc500: error' 'compiled OK'
 # OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
 # 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
 # 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
@@ -216,6 +225,40 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tcalf.c /tcalf.elf"
     gwait "guest M4 char下标 编译" "cc500: compiled OK" 60
     gwait "guest M4 s[0]+=1 exit0" "'/tcalf.elf' exited code=0 PASS" 90
+    # M5：for+break 运行语义——0..9 遇 i==5 断，求和 0+1+2+3+4==10（break 跳转错即 FAIL）。
+    # 注：M5 源较长，/128B 单行 writefile 会截断导致 compile 错（此前误匹配累计"compiled OK"），
+    # 故一律走 heredoc（shell_heredoc.h），并加"源写入"确认锚点规避累计 grep 误判。
+    gsend "writefile <<M /tbrk.c"
+    gsend "int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i==5)break;s=s+i;}if(s==10)return 0;return 1;}"
+    gsend "M"
+    gwait "M5 for-break 源写入" "\[writefile\] '/tbrk.c' wrote" 40
+    gsend "ccrun /tbrk.c /tbrk.elf"
+    gwait "guest M5 for-break s==10 exit0" "'/tbrk.elf' exited code=0 PASS" 90
+    gsend "rm /tbrk.c"; gsend "rm /tbrk.elf"
+    # M5：for+continue 运行语义——跳过奇数，偶数求和 0+2+4+6+8==20
+    gsend "writefile <<M /tcnt.c"
+    gsend "int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i%2)continue;s=s+i;}if(s==20)return 0;return 1;}"
+    gsend "M"
+    gwait "M5 for-continue 源写入" "\[writefile\] '/tcnt.c' wrote" 40
+    gsend "ccrun /tcnt.c /tcnt.elf"
+    gwait "guest M5 for-continue s==20 exit0" "'/tcnt.elf' exited code=0 PASS" 90
+    gsend "rm /tcnt.c"; gsend "rm /tcnt.elf"
+    # M5：do-while+break 运行语义——i 累到 i==5 断，求和 1+2+3+4==10
+    gsend "writefile <<M /tdob.c"
+    gsend "int main(){int i;int s;s=0;i=0;do{i=i+1;if(i==5)break;s=s+i;}while(1);if(s==10)return 0;return 1;}"
+    gsend "M"
+    gwait "M5 do-break 源写入" "\[writefile\] '/tdob.c' wrote" 40
+    gsend "ccrun /tdob.c /tdob.elf"
+    gwait "guest M5 do-break s==10 exit0" "'/tdob.elf' exited code=0 PASS" 90
+    gsend "rm /tdob.c"; gsend "rm /tdob.elf"
+    # M5：嵌套 for+continue 运行语义——内层 j==1 continue（外层 2 轮 × 内层命中 2 次 = 4）
+    gsend "writefile <<M /tnest.c"
+    gsend "int main(){int i;int j;int s;s=0;for(i=0;i<2;i=i+1)for(j=0;j<3;j=j+1){if(j==1)continue;s=s+1;}if(s==4)return 0;return 1;}"
+    gsend "M"
+    gwait "M5 嵌套 源写入" "\[writefile\] '/tnest.c' wrote" 40
+    gsend "ccrun /tnest.c /tnest.elf"
+    gwait "guest M5 嵌套 s==4 exit0" "'/tnest.elf' exited code=0 PASS" 90
+    gsend "rm /tnest.c"; gsend "rm /tnest.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else

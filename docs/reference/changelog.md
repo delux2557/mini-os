@@ -38,6 +38,39 @@
   `cc500: undefined symbol`（rc=1），不再编出无入口的废 ELF。
 - 测试锚点：宿主新增 `t_empty` / `t_comment_nofn`（期望 FAIL + undefined symbol + 非 compiled OK）。
 
+## [v1.4.1·cc500-M5] - 2026-09-06 · cc500 循环控制（break / continue）补齐
+
+> cc500 拉开 for/do-while 后唯一缺的循环控制面 `break` / `continue`。无 AST 单遍发射下，
+> 用"循环帧栈"（进入每层循环压帧记录 break/continue 挂起水位）管理未决跳转：body 内
+> break/continue 各 emit `jmp` 并记位置，循环退出 / continue 目标点确定后统一回填 rel32。
+> 语义对齐 minicc/C：break=最内层循环出口；continue 目标 while=cond 顶、do=cond 求值起点、
+> for=step 起点。支持任意嵌套与同层多次 break/continue。
+>
+> 工程约束：cc500 无数组声明（`int a[N]` 会被拒）、无类型转换，故帧栈与挂起池一律存于
+> 堆（`malloc` 出的 `char*`，4 字节手工打包 `bput4`/`bget4`，与 `save_int`/`load_ptr` 同源）——
+> 保证新增源码仍是 cc500 可自编子集，`P1==P2` 自举不动点不受影响。
+
+**Changed**（`tools/cc500/cc500.c`）
+
+* **循环帧栈辅助**：`loop_push / stmt_break / stmt_continue / loop_patch_break / loop_patch_continue / loop_pop`；
+  `loop_frames / loop_breaks / loop_conts` 三个堆缓冲（`main1` 预 `malloc`，容量 18 帧 + 两侧各 256 项，
+  越界由 stmt_break/continue 计数守卫兜底）。
+* **`statement()`**：新增 `break ;` / `continue ;` 分支（`loop_depth<=0` 时 `error()`——循环外不得静默）；
+  `while` 分支改穿帧（push→body→回填 break→exit、continue→cond 顶→pop）。
+* **`stmt_for()`**：body 穿帧，continue→`p_step`（step 起点）、break→退出点。
+* **`stmt_do()`**：body 穿帧，continue→cond 求值起点（`pc`）、break→`p2`（构造后退出点）。
+
+**Changed**（Tests，`tests/test_cc500.sh`）
+
+* 宿主新增 `t_brk`/`t_cnt`/`t_dobc`（编译 OK）+ `t_brk_oob`/`t_cnt_oob`（循环外 break/continue 须 error
+  rc=1 非 compiled OK）。
+* guest 新增 4 个运行语义（for-break 求和 10 / for-continue 偶数求和 20 / do-break 求和 10 / 嵌套
+  continue s==4）。源码较长走 heredoc（`writefile <<M`）规避 128B 单行截断，并在每次 ccrun 后 `rm`
+  释放 guest FS inode（此前 4 用例连建的 .c/.elf 撑爆 mini-fs inode，`/tnest.c` create 返 -1）。
+
+**验证**：`make test-cc500` guest 全绿（含 M5 4 项）+ `ccboot` 自举不动点 PASS（break/continue 帧栈
+对 cc500 自编译逐字节零影响）。
+
 ## [v1.4/minicc] - 2026-09-06 · minicc 循环控制补齐（do-while / break / continue）
 
 > minicc（自研 MIT 编译器）循环控制按 C 习惯补齐：新增 `do`-while 后测循环 + 循环内
