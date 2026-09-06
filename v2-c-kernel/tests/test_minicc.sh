@@ -152,6 +152,24 @@ hrun t_decpost 'int main(){int a;int b;a=5;b=a--;return 0;}' 0 'compiled OK' ''
 hrun t_cpnolval 'int main(){int a;1+=2;return 0;}' 1 'assign to non-lvalue' 'compiled OK'
 hrun t_incnolval 'int main(){int a;1++;return 0;}' 1 'increment/decrement of non-lvalue' 'compiled OK'
 
+echo "== [2b2] 外部审计缺陷回归：边界必须受控报错，不得静默坏码 =="
+# MC-02：标识符 >31 字符须 FAIL + identifier too long（旧实现写穿 Sym/Node.name[32] → 栈溢出/静默错码）
+hrun t_id32 "int main(){int $(printf 'q%.0s' $(seq 1 32));return 0;}" 1 'identifier too long' 'compiled OK'
+# 31 字符临界合法，必须不误伤（仍 compiled OK）
+hrun t_id31 "int main(){int $(printf 'q%.0s' $(seq 1 31));return 0;}" 0 'compiled OK' ''
+# MC-03：局部数组字节数 int 溢出为负 → frame 守卫被绕过；须 FAIL + array too big
+hrun t_arrbigL 'int main(){int a[600000000];a[0]=1;return 0;}' 1 'array too big' 'compiled OK'
+# MC-03：全局数组溢出为 0 → 相邻全局互相覆盖；须 FAIL + array too big
+hrun t_arrbigG 'int g[1073741824];int h=5;int main(){g[0]=1;return 0;}' 1 'array too big' 'compiled OK'
+# 合法大全局数组（< 全局上限，未溢出）不得误伤
+hrun t_arrg_ok 'int g[100000];int main(){g[0]=7;if(g[99999]==0&&g[0]==7)return 0;return 1;}' 0 'compiled OK' ''
+# MC-05：数组长度十六进制解析（旧实现 int g[0x10] 十进制环 → 7210 元素 / 28KB 产物）
+hrun t_arrhexL 'int main(){int a[0x4];a[3]=9;if(a[3]==9)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_arrhex 'int g[0x10];int main(){g[15]=7;return 0;}' 0 'compiled OK' ''
+# MC-05：非数字/空十六进制数组长度仍须拒绝
+hrun t_arrhexbad 'int main(){int a[0xG];return 0;}' 1 'bad number' 'compiled OK'
+hrun t_arrhexempty 'int main(){int a[0x];return 0;}' 1 'bad number' 'compiled OK'
+
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
 # 注意源码含 % 与 ;，printf 须用 '%s' 格式防格式串解析
@@ -169,6 +187,21 @@ else echo "[FAIL] 宿主入口 stub 未检出 89 c3 31 c0 cd 80"; HOST_FAIL=$((H
 if [ "$(od -A n -t x1 "$VD/t_sys3.elf" | tr -d ' \n' | grep -o 'cd80' | wc -l)" -ge 2 ]; then
     HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 syscall3 stub cd 80 ×2"
 else echo "[FAIL] 宿主 syscall3 stub 未检出两处 cd 80"; HOST_FAIL=$((HOST_FAIL+1)); fi
+
+echo "== [2c2] 产物体检断言（外部审计 MC-01/05 回归：产物须可被内核 elf_load） =="
+# MC-01：空条件 for(;;) 产物 ELF 头必须完好（旧实现把未发射跳转立即数写进 e_ident → 内核拒载）
+printf '%s' 'int main(){int i;i=0;for(;;){i=i+1;if(i>3)return 0;}return 1;}' >"$VD/fe.c"
+"${RUN[@]}" "$VD/fe.c" "$VD/fe.elf" >/dev/null 2>&1
+if [ "$(od -An -tx1 -N 8 "$VD/fe.elf" | tr -d ' \n')" = "7f454c4601010100" ]; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   空条件 for 产物 ELF e_ident 完好 (MC-01)"
+else echo "[FAIL] 空条件 for 产物 ELF 头被覆写 (MC-01)"; HOST_FAIL=$((HOST_FAIL+1)); fi
+# MC-05：int g[0x10] 应为 16 元素（数据段 64B）；旧实现十进制环 = 7210 元素（~28KB 产物）
+printf '%s' 'int g[0x10];int main(){return 0;}' >"$VD/hexarr.c"
+"${RUN[@]}" "$VD/hexarr.c" "$VD/hexarr.elf" >/dev/null 2>&1
+FSZ=$(od -An -tu4 --endian=little -j 68 -N 4 "$VD/hexarr.elf" | tr -d ' ')
+if [ -n "$FSZ" ] && [ "$FSZ" -lt 1000 ]; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   int g[0x10] 产物 p_filesz=$FSZ < 1000 (MC-05)"
+else echo "[FAIL] int g[0x10] 产物 p_filesz=${FSZ:-?}（十进制环未修）(MC-05)"; HOST_FAIL=$((HOST_FAIL+1)); fi
 
 echo "== [3/4] guest：micc 编译并运行（return code 语义） =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
@@ -210,6 +243,12 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "for 求和 0..9 编译" "minicc: compiled OK" 40
     gwait "for 求和 0..9==45 运行" "\[micc\] '/mfo.elf' exited code=0 PASS" 40
     gsend "rm /mfo.c"; gsend "rm /mfo.elf"
+    # 空条件 for(;;) 真实运行语义（MC-01 回归：旧实现产物头损坏 → 内核拒载，根本跑不起来）
+    gsend "writefile /mfe.c int main(){int i;i=0;for(;;){i=i+1;if(i>4)return 0;}return 1;}"
+    gsend "micc /mfe.c /mfe.elf"
+    gwait "空条件for 编译" "minicc: compiled OK" 40
+    gwait "空条件for 运行" "\[micc\] '/mfe.elf' exited code=0 PASS" 40
+    gsend "rm /mfe.c"; gsend "rm /mfe.elf"
     # 循环控制（do-while / break / continue）运行语义，均用 heredoc 多行源绕开 128B 单行截断
     # do-while：0..9 求和 ==45（post-test 至少执行一次）
     gsend "writefile <<M /md.c"
