@@ -187,6 +187,12 @@ hrun t_while1ret 'int f(){while(1){return 3;}}int main(){return 0;}' 0 'compiled
 hrun t_mainarg 'int main(int argc){return 0;}' 1 'main takes no arguments' 'compiled OK'
 # MC-08#3：main() 正常零参不误伤
 hrun t_main0 'int main(){return 0;}' 0 'compiled OK' ''
+# MC-08#1/p+p：双指针相加（C 禁止）须拒绝 pointer + pointer（结果卡/D1 点名的静默接受）
+hrun t_ppadd 'int main(){int x;int x2;int* p;p=&x;int* q;q=&x2;p+q;return 0;}' 1 'pointer + pointer' 'compiled OK'
+# MC-08#1/p-p：双指针相减（C 属 ptrdiff，本子集不支持）须拒绝 invalid pointer subtraction
+hrun t_ppsub 'int main(){int x;int x2;int* p;p=&x;int* q;q=&x2;p-q;return 0;}' 1 'invalid pointer subtraction' 'compiled OK'
+# MC-08#1：指针 + 整数 / 整数 + 指针 合法不误伤
+hrun t_paddok 'int main(){int x;int* p;p=&x;int* q;q=p+1;return 0;}' 0 'compiled OK' ''
 # MC-09：深表达式嵌套须受控报错 expression nesting too deep（旧实现递归打爆 28KB guest 栈 → SIGSEGV）
 hrun t_deepnest 'int main(){int a;a=((((((((((((((((((((((((((((((1)))))))))))))))))))))))))));return a-1;}' 1 'expression nesting too deep' 'compiled OK'
 # MC-09：深语句块嵌套须受控报错 statement nesting too deep（>STMT_DEPTH_MAX=128 触发）

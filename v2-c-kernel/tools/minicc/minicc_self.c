@@ -644,6 +644,9 @@ int bin(int l, int r, int kind) {
     nl[n] = l; nr[n] = r;
     if ((kind == ND_ADD || kind == ND_SUB) &&
         (nty[l] == TY_PTR || nty[r] == TY_PTR)) {
+        /* 审计 MC-08（结果卡/D1）：p+p 指针相加静默接受（C 禁止）——双指针加法宁拒不坑 */
+        if (kind == ND_ADD && nty[l] == TY_PTR && nty[r] == TY_PTR)
+            fail("invalid operands: pointer + pointer");
         nty[n] = TY_PTR;
         if (nty[l] == TY_PTR) nbty[n] = nbty[l]; else nbty[n] = nbty[r];
     }

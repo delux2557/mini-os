@@ -879,6 +879,10 @@ static Node *bin(Node *l, Node *r, int kind) {
     /* 指针算术只对 +/- 传播指针类型（bty 随指针侧）；其余运算结果为 int */
     if ((kind == ND_ADD || kind == ND_SUB) &&
         (l->ty == TY_PTR || r->ty == TY_PTR)) {
+        /* 审计 MC-08（结果卡/D1）：p+p 指针相加静默接受（C 禁止）——双指针加法宁拒不坑；
+         * 双指针相减在 C 属 ptrdiff，本子集不支持（codegen 已 `invalid pointer subtraction` 拒）。 */
+        if (kind == ND_ADD && l->ty == TY_PTR && r->ty == TY_PTR)
+            fail("invalid operands: pointer + pointer");
         n->ty = TY_PTR;
         n->bty = l->ty == TY_PTR ? l->bty : r->bty;
     }
