@@ -96,6 +96,11 @@ typedef struct {
      * 0 = 无限制；bit i = 禁用 syscall i。语义三件套：fork 继承 / exec 保留 / 只能单向收窄
      * （sys_limit 仅 |=，无清位/放宽路径）。uint64 以覆盖到 SYS_LIMIT(36) 的编号。 */
     uint64_t sc_mask;
+    /* 挂起看门狗（本地调试用，非门禁逻辑）：记录"最近被调度运行"与"最近经 syscall 有实质
+     * 进展"的心跳，供调度层检测"被 wait 的子进程只被调度却无 syscall 进展"的挂起死锁，
+     * 卡死时 dump 全部 PCB 现场。字段由 fork/spawn 清零，schedule/syscall 刷新。 */
+    uint32_t last_run_tick;
+    uint32_t last_prog_tick;
 } pcb_t;
 
 /* 由 isr.s 提供：无条件切到目标 esp 并 ret（不返回） */
@@ -123,6 +128,7 @@ int  sched_exec(registers_t *r, const char *name, uint32_t pd,
 void sched_tick(registers_t *r);  /* 定时器心跳：唤醒阻塞 + 抢占 + 回收 */
 void sched_yield(registers_t *r); /* 主动让出（不返回） */
 void sched_sleep(registers_t *r, uint32_t ticks);  /* 阻塞若干心跳（不返回） */
+void sched_mark_progress(void); /* 挂起看门狗：syscall 入口刷新当前进程进展心跳 */
 void sched_block(registers_t *r, uint32_t reason, uint32_t arg); /* 阻塞当前进程等待事件（不返回） */
 void sched_wake(uint32_t pid);                    /* 唤醒阻塞进程入就绪队列（eax=0） */
 void sched_wake_with(uint32_t pid, uint32_t eax); /* 唤醒并指定其系统调用返回值 */
