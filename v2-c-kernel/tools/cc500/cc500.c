@@ -219,6 +219,12 @@ char *code;
 int code_size;
 int codepos;
 int code_offset;
+/* v0.34 M4：入口 stub call 须指向「第一个函数」。be_start 按「stub 后即首函数」
+ * 假设计算 rel32；但顶层全局变量（如 `int g;`）会在 stub 后先 emit 4 字节存储，
+ * 使首函数被推迟，be_start 的 rel32 便落在全局存储上→入口跳到数据→运行即挂。
+ * 故在 program() 首个函数体开始处把入口 call 重定位到该函数（函数在前的旧源
+ * 重算值与 be_start 相同，零改动；全局在前者修复入口跳转）。 */
+int entry_call_done;
 
 void save_int(char *p, int n)
 {
@@ -1083,6 +1089,13 @@ void program()
 	accept(","); /* ignore trailing comma */
       }
       if (accept(";") == 0) {
+	if (entry_call_done == 0) {
+	  entry_call_done = 1;
+	  /* 首个函数：把入口 stub 的 call rel32 重定位到该函数起点。codepos-99
+	   * 同 be_start 公式（文件偏移 codepos → 目标 vaddr=0x800A0000+codepos，
+	   * call 下一条 0x63，rel32=codepos-0x63=codepos-99）。 */
+	  save_int(code + 95, codepos - 99);
+	}
 	sym_define_global(current_symbol);
 	statement();
 	emit(1, "\xc3"); /* ret */

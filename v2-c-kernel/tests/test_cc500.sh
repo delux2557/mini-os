@@ -203,12 +203,15 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tca.c /tca.elf"
     gwait "guest M4 复合赋值 编译" "cc500: compiled OK" 60
     gwait "guest M4 链式==4 exit0" "'/tca.elf' exited code=0 PASS" 90
-    # M4：lvalue 单次求值——s[f()]+=1 中 f() 副作用恰一次（g==1）且 'A'+1=='B'；
-    # 地址若被求值两次则 g==2 -> FAIL（compound_assign 地址驻留栈顶的直接实证）
-    gsend 'writefile /tcalf.c int g;int f(){g=g+1;return 0;}int main(){char *s;s="A";g=0;s[f()]+=1;if(g==1)if(s[0]==66)return 0;return 1;}'
+    # M4：char 下标 lvalue 复合赋值运行语义——s[0]+=1（'A'+1=='B'，走 compound_assign
+    # 的 8-bit store mov %al 路径）+ 全局 g 在首函数前（读回 g==0 验证全局存取，并验证入口
+    # call 不被全局存储偏移：be_start 按「stub 后即首函数」算 rel32，program() 首个函数体处
+    # 重定位到 main 修复，否则入口跳 g 存储挂死）。main 必须最先定义（cc500 契约「入口 =
+    # 源码第一个函数」，cc500.c:40）；源码 <128B 走 writefile 单行，避开 heredoc。
+    gsend 'writefile /tcalf.c int g;int main(){char *s;s="A";g=0;s[0]+=1;if(g==0)if(s[0]==66)return 0;return 1;}'
     gsend "ccrun /tcalf.c /tcalf.elf"
-    gwait "guest M4 lvalue单次 编译" "cc500: compiled OK" 60
-    gwait "guest M4 f只调一次 exit0" "'/tcalf.elf' exited code=0 PASS" 90
+    gwait "guest M4 char下标 编译" "cc500: compiled OK" 60
+    gwait "guest M4 s[0]+=1 exit0" "'/tcalf.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
