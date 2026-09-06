@@ -28,6 +28,16 @@
 **验证**：`make test-cc500` 宿主 PASS=28 + guest 全绿 + `ccboot` 自举不动点 PASS（入口重定位
 对 cc500 自编译逐字节零影响）。
 
+### F-4：空输入/无入口源干净报错（修复 SIGSEGV）
+
+- 原缺陷：全局 `token`（`char *token`）惰性分配——首次 `takechar()` 才经 `my_realloc` 分配。
+  对空/纯空白源一次 takechar 都不触发，`get_token()` 末尾 `token[i]=0` 写 NULL → SIGSEGV
+  （host rc=139 而非报错）。
+- 修复（`cc500.c`）：`main1` 先 `token = malloc(32)` 预分配，杜绝 NULL 写；`program()` 后若
+  `entry_call_done == 0`（无任何函数定义 = 无入口，含空/纯空白/仅注释源）→ 干净报错
+  `cc500: undefined symbol`（rc=1），不再编出无入口的废 ELF。
+- 测试锚点：宿主新增 `t_empty` / `t_comment_nofn`（期望 FAIL + undefined symbol + 非 compiled OK）。
+
 ## [v1.4/minicc] - 2026-09-06 · minicc 循环控制补齐（do-while / break / continue）
 
 > minicc（自研 MIT 编译器）循环控制按 C 习惯补齐：新增 `do`-while 后测循环 + 循环内
