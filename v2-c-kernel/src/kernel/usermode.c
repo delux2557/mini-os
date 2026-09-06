@@ -469,6 +469,10 @@ void syscall_dispatch(registers_t *r) {
     uint32_t num = r->eax;
     uint32_t a = r->ebx, b = r->ecx, c = r->edx;
 
+    /* 挂起看门狗：一次成功的 syscall 即视为"本进程有实质进展"，刷新 last_prog_tick，
+     * 供调度层判别"被 wait 的子进程只被调度却无 syscall 进展"（本质空转/死循环）。 */
+    sched_mark_progress();
+
     /* ---- A-2 ② 参数语义表（BUG-067 延续，逐类处理原则）----
      * syscall 入参全是 uint32（ebx/ecx/edx）。分五类，原则如下：
      * ① id/slot/fd 类：一律先 `a==0 || a>=N` 下界(0 保留为守护/未用)+上界检查，越界 -1
