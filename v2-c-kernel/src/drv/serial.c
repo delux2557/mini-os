@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/serial.c
+/* mini-os/v2-c-kernel/src/drv/serial.c
  * 串口 COM1 (0x3F8) 驱动：
  *  - 输出：无图形界面环境下的内核调试输出通道（serial_puts/printf）
  *  - v0.10 输入：IRQ4 接收中断 -> 读走字符 -> 经钩子送入行缓冲（如 kb_feed_char），

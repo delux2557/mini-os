@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/heap.c
+/* mini-os/v2-c-kernel/src/mm/heap.c
  * 内核堆分配器：
  *   - 空闲块链表 + 首次适配，支持分裂与相邻合并
  *   - 内存不足时向物理帧分配器申请连续页（v0.9 起支持跨多页的大块，

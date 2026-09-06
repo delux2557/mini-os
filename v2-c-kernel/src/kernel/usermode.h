@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/usermode.h
+/* mini-os/v2-c-kernel/src/kernel/usermode.h
  * 用户态支持：
  *  - 重建 GDT（含 ring3 代码/数据段与 TSS 段）
  *  - 系统调用分发（int 0x80）

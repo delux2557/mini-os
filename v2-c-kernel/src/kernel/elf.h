@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/elf.h
+/* mini-os/v2-c-kernel/src/kernel/elf.h
  * ELF32 加载器（v0.9）：解析可执行文件、拷贝 PT_LOAD 段、返回入口。
  *  - 纯逻辑（只依赖内存拷贝），可在宿主环境单元测试（tests/test_elf.c）
  *  - 内核侧通过 mapfn 钩子为加载目标区映射物理页；

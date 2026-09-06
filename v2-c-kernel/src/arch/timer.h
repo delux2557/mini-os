@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/timer.h */
+/* mini-os/v2-c-kernel/src/arch/timer.h */
 #ifndef _TIMER_H
 #define _TIMER_H
 #include <stdint.h>

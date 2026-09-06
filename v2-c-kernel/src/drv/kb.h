@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/kb.h
+/* mini-os/v2-c-kernel/src/drv/kb.h
  * PS/2 键盘驱动（scan code set 1）。
  *  - 原始字符环形缓冲：kb_getchar() 轮询
  *  - v0.9 行缓冲：kb_feed_scan 同时组装行（退格/回车），供阻塞式 sys_readline 使用

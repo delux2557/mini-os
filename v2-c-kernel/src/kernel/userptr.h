@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/userptr.h
+/* mini-os/v2-c-kernel/src/kernel/userptr.h
  * 用户指针安全访问（v0.17）：syscall 边界校验（copyin/copyout）。
  * 内核按低地址恒等映射（内核内存全部 < USER_SPACE_BASE），用户内存位于高地址半区；
  * copyin/copyout 先校验 [p, p+len) 完整落在用户空间内，再直接拷贝

@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/fsdemo.c
+/* mini-os/v2-c-kernel/src/app/fsdemo.c
  * v0.14 文件系统增强演示（目录层级 / 追加写 / seek / 间接块）：
  *  1) mkdir /etc、mkdir /etc/sub，把文件建进子目录
  *  2) 追加写：open(mode=2) 把两段配置追加到 /etc/conf.txt

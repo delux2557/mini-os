@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/vga.h */
+/* mini-os/v2-c-kernel/src/drv/vga.h */
 #ifndef _VGA_H
 #define _VGA_H
 #include <stdint.h>

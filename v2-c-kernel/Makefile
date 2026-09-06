@@ -264,7 +264,7 @@ $(BUILD)/apps/cc500_crt.o: src/app/cc500_crt.c
 $(BUILD)/apps/cc500.elf: $(BUILD)/apps/cc500.o $(BUILD)/apps/cc500_crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/cc500_crt.o $<
 
-# ---- V1 自研工具链：minicc 编译器（MIT，替代 cc500 的路线） ----
+# ---- V1 自研工具链：minicc 编译器（MIT，cc500 保留为教学对照） ----
 #  - 源码在 tools/minicc/minicc.c（全新实现，非 cc500 派生，SPDX: MIT）
 #  - 用专用 minicc_crt.o（_start 以 minicc_main 返回值 sys_exit），普通 crt 吞退出码
 #  - 源码为严格 C（不依赖 libc，仅 syscall3），无需 -w 豁免；-fno-stack-protector

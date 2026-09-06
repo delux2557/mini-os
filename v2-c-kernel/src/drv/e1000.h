@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/e1000.h
+/* mini-os/v2-c-kernel/src/drv/e1000.h
  * Intel 82540EM (e1000) 驱动（v0.18）：QEMU 默认网卡，MMIO + 描述符环，纯轮询。
  */
 #ifndef _E1000_H

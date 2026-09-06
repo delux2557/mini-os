@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/netutil.h
+/* mini-os/v2-c-kernel/src/net/netutil.h
  * 极简以太网/ARP 帧构建与解析（v0.18）：纯逻辑，不依赖内核/硬件，可宿主单测。
  * 为 v0.19 的 ARP/IP/ICMP/UDP 协议栈铺路。
  */
