@@ -22,10 +22,12 @@ static int rbool(void){ return (int)(rnd()&1u); }
 enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
        F_LOGIC=1<<4, F_IF=1<<5, F_WHILE=1<<6, F_FOR=1<<7, F_BIT=1<<8,
        F_GLOBAL=1<<9, F_ARRAY=1<<10, F_PTR=1<<11, F_FUNC=1<<12,
-       F_MOD=1<<13, F_NEG=1<<14 };
+       F_MOD=1<<13, F_NEG=1<<14, F_CHAR=1<<15 };
 /* 评审 P1：F_MOD（% idiv+取余发射路径）、F_NEG（一元负号）显式入网；
- * `<<` 有意排除——有符号左移溢出是 UB，与无 UB 三纪律冲突（评审亦认可刻意排除）。 */
-#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC|F_MOD|F_NEG)
+ * `<<` 有意排除——有符号左移溢出是 UB，与无 UB 三纪律冲突（评审亦认可刻意排除）。
+ * F_CHAR（评审 §5 类型面盲区）：char 变量/char 数组/字符串定点读取入网——
+ * 走 movzbl 存取 + 字符串池 codegen（minicc 出错高发区），全为只读源、复用退出码观测。 */
+#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC|F_MOD|F_NEG|F_CHAR)
 /* cc500 保守基座（2026-09-05 实测校准：hostcc 探测 rc——global/array/ptr/for/~/^ 全部拒，
  * 支持 & | << 与 char；故不给 cc500 开 F_GLOBAL/F_ARRAY/F_PTR/F_FOR/F_BIT，与实测一致） */
 #define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE)
@@ -41,9 +43,15 @@ static unsigned used_flags;
 #define MAXG 2
 #define MAXA 2
 #define MAXP 2
-#define ASZ  5                 /* 数组容量（下标 0..ASZ-1，指针解引用不越界） */
+#define MAXC 3          /* char 变量数（只读源，不作文写目标——避免 int→char 赋值类型不匹配） */
+#define MAXCA 2         /* char 数组数 */
+#define ASZ  5          /* 数组容量（下标 0..ASZ-1，指针解引用不越界） */
+/* 字符串池覆盖：定点下标 `*("lit"+k)`（k 为编译期常量 < len 必有界无 UB）。
+ * 实测 minicc 接受 `*("lit"+k)`，但**不支持** char* 指针下标语法 `s[i]` → 用 deref 形式。 */
+static const char *STRS[] = {"ab","xy","qwerty","hello","zap","mnpo"};
+#define NSTRS ((int)(sizeof STRS/sizeof STRS[0]))
 static char varnames[MAXV][4];
-static int nvars, ng, na, npa, nf;
+static int nvars, ng, na, npa, nf, nc, nca;
 
 #define CLAMP_MAX (1<<28)
 static void clamp_iv(long *lo,long *hi){ if(*lo<-CLAMP_MAX)*lo=-CLAMP_MAX; if(*hi>CLAMP_MAX)*hi=CLAMP_MAX; }
@@ -69,18 +77,24 @@ static const char *pick_lval(void){ return lvals[rndi(0,nlv-1)]; }
 
 static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
     enum { E_CON,E_VAR,E_GVAR,E_IDX,E_DREF,E_CALL,
-           E_ADD,E_SUB,E_MUL,E_DIV,E_MOD,E_NEG,E_CMP,E_LOG,E_AND,E_OR,E_XOR,E_SHR,E_NOT };
+           E_ADD,E_SUB,E_MUL,E_DIV,E_MOD,E_NEG,E_CMP,E_LOG,E_AND,E_OR,E_XOR,E_SHR,E_NOT,
+           E_CVAR,E_CIDX,E_STR };
     enum { MAXDEPTH=4 };
     if(depth>=MAXDEPTH){
         int c=rndi(1,100); sprintf(dst,"%d",c); *lo=*hi=c; return;
     }
-    int np=0,picks[18];
+    int np=0,picks[24];
     picks[np++]=E_CON;
     if(has(F_VAR)  && nvars>0) picks[np++]=E_VAR;
     if(has(F_GLOBAL)&&ng>0)    picks[np++]=E_GVAR;
     if(has(F_ARRAY)&&na>0)      picks[np++]=E_IDX;
     if(has(F_PTR)  && npa>0)    picks[np++]=E_DREF;
     if(has(F_FUNC) && nf>0)     picks[np++]=E_CALL;
+    if(has(F_CHAR)){            /* 只读 char 源（见 emit_program，不作文写目标） */
+        if(nc>0)  picks[np++]=E_CVAR;
+        if(nca>0) picks[np++]=E_CIDX;
+        picks[np++]=E_STR;
+    }
     if(has(F_ARITH)){ picks[np++]=E_ADD; picks[np++]=E_SUB; if(nvars>0)picks[np++]=E_MUL; }
     if(has(F_ARITH)&&!suppress_div&&nvars>0) picks[np++]=E_DIV;
     if(has(F_MOD)&&nvars>0) picks[np++]=E_MOD;
@@ -97,6 +111,11 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
         sprintf(dst,"a%d[%s]",i,ix); *lo=0;*hi=100; used_flags|=F_ARRAY; return; }
     case E_DREF:{ int i=rndi(0,npa-1); char ix[24]; idx_expr(ix,idx_var());
         sprintf(dst,"*(p%d+%s)",i,ix); *lo=0;*hi=100; used_flags|=F_PTR; return; }
+    case E_CVAR:{ int i=rndi(0,nc-1); sprintf(dst,"c%d",i); *lo=0;*hi=127; used_flags|=F_CHAR; return; }
+    case E_CIDX:{ int i=rndi(0,nca-1); char ix[24]; idx_expr(ix,idx_var());
+        sprintf(dst,"ca%d[%s]",i,ix); *lo=0;*hi=255; used_flags|=F_CHAR; return; }
+    case E_STR:{ int si=rndi(0,NSTRS-1); const char *s=STRS[si];
+        int k=rndi(0,(int)strlen(s)-1); sprintf(dst,"*(\"%s\"+%d)",s,k); *lo=0;*hi=255; used_flags|=F_CHAR; return; }
     case E_CALL:{ int i=rndi(0,nf-1); char a[128]; long l0,h0v;
         /* 递归参数 = 任意窄值表达式，再按位掩码限幅到非负窄区间 (e & m)：
          * e 由生成器保证无 UB；m ∈ {3,7} ⇒ 结果 ∈ [0,3]/[0,7]，深度/值域有界（sum≤28/fib≤21），
@@ -169,17 +188,24 @@ static void emit_program(int nv,int nstmts){
     ng  = has(F_GLOBAL)?MAXG:0;
     na  = has(F_ARRAY)?MAXA:0;
     npa = has(F_PTR)&&na>0?MAXP:0;
+    nc  = has(F_CHAR)?MAXC:0;
+    nca = has(F_CHAR)?MAXCA:0;
     if(ng>0)  used_flags|=F_GLOBAL;      /* 声明即强制发射的顶层特性：计数即可证被产出 */
     if(na>0)  used_flags|=F_ARRAY;
     if(npa>0) used_flags|=F_PTR;
+    if(nc>0 || nca>0) used_flags|=F_CHAR;
     for(int i=0;i<nvars;i++) sprintf(varnames[i],"v%d",i);
     emit_funcs();
     if(ng>0){ printf("int G0;\n"); if(ng>1) printf("int G1;\n"); }
     printf("int main(){\n");
     for(int i=0;i<nvars;i++) printf("  int %s;\n",varnames[i]);
     for(int i=0;i<nvars;i++) printf("  %s=%d;\n",varnames[i],rndi(1,9)); /* 声明即初始化 */
+    for(int i=0;i<nc;i++){ printf("  char c%d;\n",i); }
+    for(int i=0;i<nc;i++) printf("  c%d=%d;\n",i,rndi(0,127));          /* char 只读源：窄值 0..127 */
     for(int i=0;i<na;i++){ printf("  int a%d[%d];\n",i,ASZ);
         for(int j=0;j<ASZ;j++) printf("  a%d[%d]=%d;\n",i,j,rndi(1,9)); } /* 全元素初始化 → 防读未初始化 */
+    for(int i=0;i<nca;i++){ printf("  char ca%d[%d];\n",i,ASZ);
+        for(int j=0;j<ASZ;j++) printf("  ca%d[%d]=%d;\n",i,j,rndi(0,127)); }
     for(int i=0;i<npa;i++){ int bm=i%na; printf("  int* p%d; p%d=&a%d[0];\n",i,i,bm); } /* 指针 bind 数组基址 */
     build_lvals();
     for(int i=0;i<nstmts;i++) stmt_gen(0);
@@ -196,7 +222,7 @@ static void coverage_probe(int count){
         {"F_CONST",F_CONST},{"F_VAR",F_VAR},{"F_ARITH",F_ARITH},{"F_CMP",F_CMP},
         {"F_LOGIC",F_LOGIC},{"F_IF",F_IF},{"F_WHILE",F_WHILE},{"F_FOR",F_FOR},
         {"F_BIT",F_BIT},{"F_GLOBAL",F_GLOBAL},{"F_ARRAY",F_ARRAY},{"F_PTR",F_PTR},{"F_FUNC",F_FUNC},
-        {"F_MOD",F_MOD},{"F_NEG",F_NEG}
+        {"F_MOD",F_MOD},{"F_NEG",F_NEG},{"F_CHAR",F_CHAR}
     };
     unsigned nsz=sizeof(feats)/sizeof(feats[0]);
     for(unsigned i=0;i<nsz;i++)
