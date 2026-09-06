@@ -49,36 +49,38 @@ if [ -z "$HOSTMINICC" ] || [ ! -x "$HOSTMINICC" ]; then
 fi
 
 rm -f "$out"/prog_*.c
+rm -f "$out/diffsynth.log"                                   # 失败留档：本 run 违例行追加写此文件（artifact 据此归档现场）
 "$GEN" --seed "$seed" --count "$count" --target "$target" --vars "$nv" --stmts "$nstmts" --out "$out" || { echo "[ERR] gen 失败"; exit 2; }
 
 total=0; gcc_reject=0; minic_reject=0; det_fail=0; sig_fail=0
+LOG_D="$out/diffsynth.log"     # 违例留档：tee -a 每次触达；净 stdout（test_diffsynth 看退出码不受扰）
 for f in "$out"/prog_*.c; do
   [ -e "$f" ] || continue
   total=$((total+1))
   # 哨兵 + 参考：gcc -O0 -m32 编译（本机无 ia32 exec → 用 qemu-i386 跑）
   exe="${f%.c}.x"
   if ! gcc -O0 -m32 -w -o "$exe" "$f" 2>/dev/null; then
-    gcc_reject=$((gcc_reject+1)); echo "[哨兵] gcc 拒 '$f'（生成器 bug，应修 gen）"; continue
+    gcc_reject=$((gcc_reject+1)); echo "[哨兵] gcc 拒 '$f'（生成器 bug，应修 gen）" | tee -a "$LOG_D"; continue
   fi
   r1=$({ timeout 5 qemu-i386 "$exe"; echo $?; } 2>/dev/null | tail -1)
-  if [ "$r1" -eq 124 ]; then sig_fail=$((sig_fail+1)); echo "[纪律] '$f' 超时/挂起 (rc=124)"; continue; fi
+  if [ "$r1" -eq 124 ]; then sig_fail=$((sig_fail+1)); echo "[纪律] '$f' 超时/挂起 (rc=124)" | tee -a "$LOG_D"; continue; fi
   r2=$({ timeout 5 qemu-i386 "$exe"; echo $?; } 2>/dev/null | tail -1)
-  [ "$r1" != "$r2" ] && { det_fail=$((det_fail+1)); echo "[确定] '$f' 两次不一致 $r1/$r2"; }
+  [ "$r1" != "$r2" ] && { det_fail=$((det_fail+1)); echo "[确定] '$f' 两次不一致 $r1/$r2" | tee -a "$LOG_D"; }
   # 差分：minicc 接受否（hostminicc 是 32 位二进制，宿主无 ia32 exec，用 qemu-i386 跑）
   elf="${f%.c}.elf"
   mout=$({ timeout 20 qemu-i386 "$HOSTMINICC" "$f" "$elf"; } 2>&1); mrc=$?
   if [ $mrc -ne 0 ]; then
-    minic_reject=$((minic_reject+1)); echo "[差分] minicc 拒 '$f'（gcc 接受）：$(echo "$mout" | tail -1)"
+    minic_reject=$((minic_reject+1)); echo "[差分] minicc 拒 '$f'（gcc 接受）：$(echo "$mout" | tail -1)" | tee -a "$LOG_D"
   fi
 done
 
-echo "== [diffsynth] seed=$seed target=$target total=$total "
-echo "   ref(gcc) 有效=$((total-gcc_reject)) 无效=$gcc_reject  纪律违例(挂/信号)=$sig_fail 确定性错=$det_fail"
-echo "   minicc acceptance 差分：拒绝=$minic_reject"
+echo "== [diffsynth] seed=$seed target=$target total=$total " | tee -a "$LOG_D"
+echo "   ref(gcc) 有效=$((total-gcc_reject)) 无效=$gcc_reject  纪律违例(挂/信号)=$sig_fail 确定性错=$det_fail" | tee -a "$LOG_D"
+echo "   minicc acceptance 差分：拒绝=$minic_reject" | tee -a "$LOG_D"
 if [ "$minic_reject" -eq 0 ] && [ "$sig_fail" -eq 0 ] && [ "$det_fail" -eq 0 ] && [ "$gcc_reject" -eq 0 ]; then
-  echo "[diffsynth] PASS"
+  echo "[diffsynth] PASS" | tee -a "$LOG_D"
   exit 0
 else
-  echo "[diffsynth] FAIL: minic_reject=$minic_reject sig=$sig_fail det=$det_fail gcc_reject=$gcc_reject"
+  echo "[diffsynth] FAIL: minic_reject=$minic_reject sig=$sig_fail det=$det_fail gcc_reject=$gcc_reject" | tee -a "$LOG_D"
   exit 1
 fi
