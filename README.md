@@ -28,14 +28,14 @@
 
 ### cc500 方言边界（guest 内写-编-跑须知）
 
-- **数组声明不支持（局部与全局均不支持）**：cc500 的声明文法只有 `type id [=expr] ;`，无 `[` 分支，
-  `int arr[4];`、`char s[8];` 在文法层面一律被拒（C 子集边界，非缺陷）。对**已有缓冲**（如 `malloc` 取来
-  的字节区、`token`/字符串）的**下标访问 `p[i]` 是支持的**——批量/集合数据用独立变量 + 手动缓冲 + 下标模拟；
-  详见 `v2-c-kernel/tools/cc500/` 方言实现边界
-- **编译错误诊断**：v0.32 起 `error()` 打印 `cc500: error at <token>`（此前裸 `exit(1)` 零诊断，
-  排错靠二分试错）；未闭合字符串→`bad string`、未定义符号→`undefined symbol` 均有专项消息
-- **argv 路径已通**：入口桩自 v0.30 起编组 argc/argv，gcc 版与自编译产物（P1）exec
-  带 argv 均正确（历史 BUG-032 已修复）
+> 完整语言快照（类型/字面量/运算符/语句/函数）、已知限制与教学里程碑见
+> [`v2-c-kernel/tools/cc500/README.md`](v2-c-kernel/tools/cc500/README.md)（★ 权威事实源）。
+> 以下仅列 guest 写代码最常踩的边界：
+
+- **数组声明不支持**：`int arr[4]` / `char s[8]` 在文法层被拒（C 子集边界，非缺陷）；
+  但**对已有缓冲的下标访问 `p[i]` 受支持**——集合数据用独立变量 + 手动缓冲 + 下标模拟。
+- **编译错误诊断**：`error()` 打印 `cc500: error at <token>`（未闭合字符串→`bad string`、未定义符号→`undefined symbol`）。
+- **argv 已通**：入口桩自 v0.30 起编组 argc/argv（历史 BUG-032 已修复）。
 
 ## 目录结构
 
@@ -90,14 +90,13 @@ make            # 构建内核 -> build/kernel.elf
 make run        # 带图形界面运行（QEMU）
 make run-serial # 无图形界面运行，串口日志写到 build/serial.log
 
-make test-host  # 宿主单元测试（纯逻辑，秒级）
-make test-qemu  # QEMU 自动回归（串口日志关键字校验）
-make test-serial # QEMU 串口终端回归（模拟外部 agent 经串口驱动 shell）
-make test-persist # QEMU ATA 真盘持久化回归（两次运行共享磁盘镜像）
-make test-net   # QEMU 网络回归（e1000 + ARP + UDP + ICMP 与宿主端到端）
-make test       # 以上全部（五层）
+make test       # 全量测试（= CI 主链，覆盖 Makefile TEST_LAYERS 全部层）
 make clean      # 清理 build/
 ```
+
+> 测试层清单随 CI 矩阵演进，**以 Makefile 的 `TEST_LAYERS`（约 L438）为唯一事实源**。
+> 运行 `make test-layers` 查看当前全部层名；单跑某层用 `make test-<层名>`
+> （如 `make test-cc500`、`make test-diffsynth`）。本文档不再手抄层列表，避免与 CI 脱节。
 
 ## 技术栈
 
