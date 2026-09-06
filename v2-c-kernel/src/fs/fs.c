@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/fs.c
+/* mini-os/v2-c-kernel/src/fs/fs.c
  * 极简文件系统实现（v0.8，v0.14 增强）。
  * 磁盘布局（块 4KB）：
  *    块 0: 超级块（magic / 总块数 / inode 数）

@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/timer.c
+/* mini-os/v2-c-kernel/src/arch/timer.c
  * PIT(8254) 定时器驱动：产生周期性时钟中断，作为"心跳" */
 #include "timer.h"
 #include "idt.h"

@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/crash.c
+/* mini-os/v2-c-kernel/src/app/crash.c
  * 内存保护演示：ring3 下直接写内核显存 0xB8000（内核页，无 user 位）
  * -> 触发页错误 -> 内核隔离终止该进程。 */
 #include "user_lib.h"

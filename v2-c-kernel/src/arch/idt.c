@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/idt.c
+/* mini-os/v2-c-kernel/src/arch/idt.c
  * 中断系统：
  *  - IDT：32 个 CPU 异常 + 16 个硬件 IRQ（重映射到 0x20~0x2F）
  *  - PIC 8259 初始化

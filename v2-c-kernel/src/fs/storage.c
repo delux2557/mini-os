@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/storage.c
+/* mini-os/v2-c-kernel/src/fs/storage.c
  * 存储子系统（v0.16）：ramdisk 块设备 + ATA 真盘持久化。
  *  - 无盘（无 -hda）：纯内存盘，格式化 + initramfs（v0.8/v0.9 原行为，重启丢失）
  *  - 有盘：整盘读入 ramdisk；若盘上有有效 FS（超级块 magic）则直接挂载

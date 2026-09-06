@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/userprog.c
+/* mini-os/v2-c-kernel/src/app/userprog.c
  * 用户程序集（v0.6 新增 IPC/同步演示）：
  *  - 独立编译、链接到 0x80000000，以 flat binary 内嵌进内核
  *  - 运行在 CPU ring 3，只能通过 int 0x80 系统调用请求内核服务

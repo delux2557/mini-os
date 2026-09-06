@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/isol.c
+/* mini-os/v2-c-kernel/src/app/isol.c
  * v0.11 每进程地址空间 / 物理内存隔离演示。
  *
  * 核心断言：两个并发实例把"同一个虚拟地址"经 sys_map_page 映射，

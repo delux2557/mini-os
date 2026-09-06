@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/sem.c
+/* mini-os/v2-c-kernel/src/kernel/sem.c
  * 信号量实现（v0.6）：纯逻辑，无内核依赖，可宿主单测。
  * 采用"计数 + 环形前移等待队列"：
  *  - wait 时若 count>0 直接递减；否则把 pid 追加到等待队列队尾；

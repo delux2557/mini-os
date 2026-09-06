@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/elf.c
+/* mini-os/v2-c-kernel/src/kernel/elf.c
  * ELF32 加载器实现（v0.9）。
  *
  * 支持子集（教学内核所需）：

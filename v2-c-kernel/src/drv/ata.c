@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/ata.c
+/* mini-os/v2-c-kernel/src/drv/ata.c
  * ATA PIO 驱动（v0.16）：主通道 master 盘，LBA28，轮询模式。
  *   - 端口：数据 0x1F0 / 特性 0x1F1 / 扇区数 0x1F2 / LBA 0x1F3-0x1F5 /
  *           盘选 0x1F6 / 状态|命令 0x1F7；控制 0x3F6

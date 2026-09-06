@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/vga.c
+/* mini-os/v2-c-kernel/src/drv/vga.c
  * VGA 80x25 文本模式驱动：直接写显存 0xB8000，带光标与滚动 */
 #include "vga.h"
 #include <stdarg.h>

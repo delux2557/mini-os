@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/mem.h
+/* mini-os/v2-c-kernel/src/mm/mem.h
  * 内存管理子系统：
  *  - 物理帧分配器（位图管理 4KB 帧，位于 1MB 之上）
  *  - 分页（页目录/页表，内核恒等映射整个物理内存 + 动态映射）

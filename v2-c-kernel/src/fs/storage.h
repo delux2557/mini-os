@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/storage.h
+/* mini-os/v2-c-kernel/src/fs/storage.h
  * 存储子系统（v0.16）：ramdisk 块设备 + ATA 真盘持久化。
  *  - storage_init()：探测 ATA -> 整盘读入 ramdisk -> 有有效 FS 则挂载，
  *    否则格式化 + 写入 initramfs（首启并落盘一次）

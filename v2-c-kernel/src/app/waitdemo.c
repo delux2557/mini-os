@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/waitdemo.c
+/* mini-os/v2-c-kernel/src/app/waitdemo.c
  * v0.15 wait 语义演示：经典 wait()（等待任意子进程）+ waitpid(pid)。
  *  - 父进程 fork 出 3 个子进程，各自 sys_exit(7/9/11)
  *  - 父进程循环 sys_wait(-1, &code)：每次回收"任意一个"已退出的子进程，

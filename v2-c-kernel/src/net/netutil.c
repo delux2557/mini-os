@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/netutil.c
+/* mini-os/v2-c-kernel/src/net/netutil.c
  * 极简以太网/ARP 帧构建与解析（v0.18）。
  * 布局（全部大端，网络字节序）：
  *   以太网 II：dst[6] | src[6] | type[2]

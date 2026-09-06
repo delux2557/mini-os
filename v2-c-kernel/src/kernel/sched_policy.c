@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/sched_policy.c
+/* mini-os/v2-c-kernel/src/kernel/sched_policy.c
  * 调度策略实现：纯逻辑、无内核依赖（只依赖 stdint 与自有头），
  * 可在宿主环境编译运行单元测试（见 tests/test_sched.c）。
  * 就绪队列用环形数组实现：head 指向队头，tail 指向队尾，

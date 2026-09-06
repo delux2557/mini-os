@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/sched.c
+/* mini-os/v2-c-kernel/src/kernel/sched.c
  * 进程调度器实现（v0.5）。
  *
  * 设计要点：

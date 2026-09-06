@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/sem.h
+/* mini-os/v2-c-kernel/src/kernel/sem.h
  * 信号量（v0.6）：纯逻辑对象，只做"计数 + 等待队列"簿记，
  * 不依赖调度器/中断，可在宿主环境编译运行单元测试（tests/test_sem.c）。
  *

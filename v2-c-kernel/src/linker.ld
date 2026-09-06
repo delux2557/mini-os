@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/linker.ld
+/* mini-os/v2-c-kernel/src/linker.ld
  * 把内核链接到 1MB 处（x86 传统约定），multiboot 头放在最前 */
 ENTRY(_start)
 

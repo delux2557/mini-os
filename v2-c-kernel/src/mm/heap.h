@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/heap.h
+/* mini-os/v2-c-kernel/src/mm/heap.h
  * 内核堆分配器：kmalloc/kfree（首次适配 + 分裂 + 合并） */
 #ifndef _HEAP_H
 #define _HEAP_H

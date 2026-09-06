@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/abuse.c
+/* mini-os/v2-c-kernel/src/app/abuse.c
  * v0.17 syscall 边界校验（copyin/copyout）演示：用内核低地址 / 回绕地址调用
  * 各类涉用户指针的系统调用，校验它们全部被内核拒绝（返回 -1），
  * 证明用户程序无法借 syscall 读写内核内存（防越权）。

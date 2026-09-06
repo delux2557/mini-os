@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/hello.c
+/* mini-os/v2-c-kernel/src/app/hello.c
  * 最简 ELF 应用：打印问候语与 pid 后退出（演示"从文件系统加载程序"）。 */
 #include "user_lib.h"
 

@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/blockdev.h
+/* mini-os/v2-c-kernel/src/fs/blockdev.h
  * 块设备抽象（v0.8）：
  *  - 以"块"为单位的读写接口，屏蔽后端差异
  *  - 当前后端：内存盘（ramdisk），数据区是一段连续内存，可直接寻址

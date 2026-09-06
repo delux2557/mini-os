@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/fs.h
+/* mini-os/v2-c-kernel/src/fs/fs.h
  * 极简文件系统（v0.8，v0.14 增强）：类 Unix 磁盘布局
  *   超级块 / inode 位图 / 数据块位图 / inode 表 / 数据区
  *  - v0.14 起支持目录层级（绝对路径 /a/b/c、. 与 ..、重复斜杠）

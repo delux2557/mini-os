@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/guard.c
+/* mini-os/v2-c-kernel/src/kernel/guard.c
  * v0.13 用户栈守卫页判定（v0.26 扩为三态）：纯逻辑（只依赖 mem.h 布局常量），可宿主单测。
  * 用户栈区按 32KB 槽错开（v0.26 起）：槽底 4KB 守卫页永不映射（硬底），
  * 其上 28KB 为可生长栈区，栈从槽顶向下增长，初始只映射槽顶一页。

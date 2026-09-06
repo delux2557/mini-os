@@ -1,27 +1,25 @@
 /* mini-os/v2-c-kernel/tools/minicc/minicc.c
- * minicc —— mini-os 自研小型 C 编译器（V2d：数组 int a[N] 局部/全局 + a[i] 读写）。
+ * minicc —— mini-os 自研小型 C 编译器（当前子集/能力矩阵见 docs/design/minicc-design.md §6）。
  *
  * 版权与许可：
  *   Copyright (C) 2026 mini-os authors
  *   SPDX-License-Identifier: MIT
- *   本项目（mini-os）整体为 MIT 许可。cc500 为 GPL 工具链组件，minicc 是
- *   全新的独立实现（MIT），用于逐步取代 cc500 作为 mini-os 的板载编译器。
+ *   本项目（mini-os）整体为 MIT 许可。cc500 为 GPL 工具链组件；minicc 是
+ *   全新 MIT 独立实现（非 cc500 派生），cc500 长期保留为教学对照（不退役）。
  *
- * 架构（详见 docs/design/minicc-design.md）：
- *   V1 为单遍直接生成（无 AST）；V2a 起引入显式 AST：Parser 建树、Codegen 遍历；
- *   V2b 引入类型系统与指针（TY_INT/TY_PTR）；V2c 引入 TY_CHAR 与字符串字面量、
- *     并为隐式声明的 syscall3 生成 int $0x80 包装（产物可观察 I/O）；
- *   V2d 引入 TY_ARRAY：局部/全局定长数组（int/char 元素），a[i] 读写，&a[i]
- *     可作指针；帧布局由"4 字节槽"改为"字节偏移"（数组按元素尺寸紧凑分配）。
+ * 架构与特性矩阵（**唯一事实来源**，勿在此头注释复制枚举——一改两处必漂）：
+ *   - 语言子集/能力矩阵/版本演进 → docs/design/minicc-design.md §6、§11
+ *   - 差分对拍网（能力集 CAPS）→ tools/minicc/diffsynth/gen.c
+ *   - 单遍→AST 等结构决策历史 → 同上 doc，不在此重述
  *
- * 当前子集（V2d）：
- *   类型 int / char / int* / char*（无多级指针）/ int[N] / char[N]（无数组初始化）；
- *   字面量十进制 + 字符串 + 字符；字符串字面量（\n \t \\ \" \' \0 \xNN 转义，
- *   ≤254 字节，入只读数据段，隐式 char*）；局部/参数/全局变量（全局仅常量初始化）；
- *   + - * / % < <= > >= == != && || ! 一元负号、赋值；& 取地址、* 解引用、a[i] 下标
- *   （下标边界不检查，UB 由用户负责）；{} if/else while for return 表达式语句；
- *   多参数函数、递归、前向调用；块注释与 // 行注释；隐式声明并调用
- *   syscall3(n,a,b,c)（编译器生成机器码 stub）。
+ * 头注释只声明"为何/不变式"，不随子集逐版改写：
+ *   - 子集**契约式锁定**：拒绝必为编译期静态报错，绝不产出坏码；
+ *   - 三层验证：宿主(秒级) + guest(真机语义) + 自举不动点(P1==P2)；
+ *   - 新增语法须"三同步"（见下方【开发规约】），并同步 §6 特性矩阵。
+ *
+ * 当前能力速览（逐特性测试矩阵请读 §6）：int/char/数组/指针/全局、
+ * 字符串与字符、位运算（& | ^ << >> ~）、if/while/for/return、函数/递归、
+ * 隐式声明并调用 syscall3(n,a,b,c) stub。拒绝即编译期静态报错（契约式锁定）。
  *
  * 【开发规约 · 新增语法特性须"三同步"】⚠ dev 常看这里：
  *   给 minicc 加新语法时，一并：

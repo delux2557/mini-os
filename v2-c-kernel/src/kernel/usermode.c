@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/usermode.c
+/* mini-os/v2-c-kernel/src/kernel/usermode.c
  * 用户态支持：
  *  1) 重建 GDT：kernel cs/ds(0x08/0x10) + user cs/ds(0x18/0x20) + TSS(0x28)
  *  2) 初始化 TSS：ss0/esp0 指向内核栈，供中断时从 ring3 切回 ring0；

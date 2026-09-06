@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/pci.c
+/* mini-os/v2-c-kernel/src/drv/pci.c
  * PCI type-1 配置空间访问（v0.18）。
  * QEMU `-kernel` 引导不经 SeaBIOS，PCI BAR 不会预分配：驱动须自行探测大小、
  * 在 PCI MMIO 洞（约 0xFEB00000 起）分配地址并写回 BAR，再使能 MEM|BUSMASTER。
