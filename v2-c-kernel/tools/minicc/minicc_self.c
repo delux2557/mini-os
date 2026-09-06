@@ -418,8 +418,30 @@ int array_suffix(int ty, int* len) {
     if (accept_s("[") == 0) return 0;
     if (ty == TY_PTR) fail("unsupported: array of pointers");
     if (tok_is_num == 0) fail("array size must be a constant");
-    int n = 0; int i = 0;
-    while (tok[i]) { n = n * 10 + (tok[i] - '0'); i = i + 1; }
+    /* FIX-A（minicc.c 同步）：十六进制数组长度（旧实现十进制环 → 0x10=7210）；非数字一律拒绝 */
+    int n = 0; int i; int d; int v;
+    if (tok[0] == '0' && (tok[1] == 'x' || tok[1] == 'X')) {
+        if (tok[2] == 0) fail("bad number");
+        i = 2;
+        while (tok[i]) {
+            d = tok[i]; v = 0;
+            if (d >= '0' && d <= '9') v = d - '0';
+            else if (d >= 'a' && d <= 'f') v = d - 'a' + 10;
+            else if (d >= 'A' && d <= 'F') v = d - 'A' + 10;
+            else fail("bad number");
+            if (n > 0x0fffffff) fail("array size overflow");
+            n = n * 16 + v;
+            i = i + 1;
+        }
+    } else {
+        i = 0;
+        while (tok[i]) {
+            if (tok[i] < '0' || tok[i] > '9') fail("bad number");
+            if (n > 0x0fffffff) fail("array size overflow");
+            n = n * 10 + (tok[i] - '0');
+            i = i + 1;
+        }
+    }
     if (n < 1) fail("array size must be positive");
     next_tok();
     expect_s("]");
@@ -427,12 +449,16 @@ int array_suffix(int ty, int* len) {
     return 1;
 }
 
-int size_of(int ty, int bty, int len) {
-    if (ty == TY_ARRAY) {
-        if (bty == TY_INT) return len * 4;
-        return len;
-    }
-    return 4;
+/* FIX-B（minicc.c 同步）：数组字节数 int 乘法可溢出为 0/负值 → 相邻全局踩踏 / frame 守卫绕过。
+ * 唯一入口做上限校验（宁拒绝勿产出坏码）。 */
+int LOCAL_BYTES_MAX = 4096;
+int GLOBAL_BYTES_MAX = 16777216;   /* 16MB（自举版无前处理，全局初始化须字面量；勿写 16*1024*1024） */
+int bytes_of(int ty, int bty, int len, int limit) {
+    int esz;
+    if (ty != TY_ARRAY) return 4;
+    if (bty == TY_INT) esz = 4; else esz = 1;
+    if (len > limit / esz) fail("array too big");
+    return len * esz;
 }
 
 int type_eq(int t1, int b1, int t2, int b2) {
@@ -727,7 +753,7 @@ int stmt() {
         next_tok();
         if (array_suffix(nty[n], &nlen[n])) { nbty[n] = nty[n]; nty[n] = TY_ARRAY; }
         if (nty[n] == TY_ARRAY && peek_s("=")) fail("array init not supported");
-        int size = size_of(nty[n], nbty[n], nlen[n]);
+        int size = bytes_of(nty[n], nbty[n], nlen[n], LOCAL_BYTES_MAX);  /* FIX-B */
         cur_frame = cur_frame + size;
         if (cur_frame > 4096) fail("frame too big");
         nval[n] = cur_frame;
@@ -1043,12 +1069,14 @@ int gen_stmt(int n) {
     if (nkind[n] == ND_FOR) {
         if (nl[n] != 0) gen(nl[n]);
         int top = code_len;
-        int en = new_lab();
-        if (nr[n] != 0) { gen(nr[n]); emit_test(); emit_cond(0x84, en); }
+        /* FIX-C1（minicc.c 同步，MC-01）：条件为空不申请 en（en=-1）→ 未 emit 标签不回填，
+         * 否则 lpos 保持 0，finish 按 pos+2 把跳转立即数写进 ELF 头，产物被内核拒载 */
+        int en = -1;
+        if (nr[n] != 0) { en = new_lab(); gen(nr[n]); emit_test(); emit_cond(0x84, en); }
         gen_stmt(nb[n]);
         if (na[n] != 0) gen(na[n]);
         emit_jmp_to(top);
-        patch_lab(en, code_len);
+        if (en >= 0) patch_lab(en, code_len);
         return 0;
     }
     if (nkind[n] == ND_RET) {
@@ -1064,7 +1092,7 @@ int gen_stmt(int n) {
 int gen_global(int n) {
     int si = nval[n];
     int pos = code_len;
-    int size = size_of(nty[n], nbty[n], nlen[n]);
+    int size = bytes_of(nty[n], nbty[n], nlen[n], GLOBAL_BYTES_MAX);  /* FIX-B */
     int i = 0;
     while (i < size) { emit1(0); i = i + 1; }
     /* 标量常量初始化（数组仅 0 填充）；初值存于 nlen[g]（与数组长度互斥） */
@@ -1090,6 +1118,8 @@ int finish() {
     int i = 0;
     while (i < nlab) {
         int lab = i + 1;
+        /* FIX-C2（minicc.c 同步，MC-01 类）：lpos < 95 ⇔ 标签分配未发射 → 内部缺陷，显式失败 */
+        if (lpos[lab] < 95) fail("internal: label not emitted");
         int imm;
         if (lkind[lab] == L_COND) imm = lpos[lab] + 2; else imm = lpos[lab] + 1;
         int rel;
