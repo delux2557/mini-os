@@ -203,6 +203,23 @@
 
   * 编译产物 × 持久化：test\_persist.sh S10（writefile→ccrun→save→重启→run）已覆盖
 
+* **内核挂起看门狗（观测原语：PR #121 引入；泛化未开始）**：为定位 persist 层
+  「子进程被 `wait` 却空转/不被调度」的挂死而落的**纯诊断**原语（`sched.c` 内联，不参与门禁判定）：
+  - 语义：`pcb_t` 增 `last_run_tick`（schedule 弹按时刷新）/ `last_prog_tick`（syscall 入口刷新）；
+    `sched_tick` 每 16 心跳扫描被 `BLOCK_WAIT` 等待的子进程——`READY` 且 ≥60 心跳未被调度 → **kind=1**
+    （就绪队列入队/pid 复用竞态），`RUNNING` 且 ≥60 心跳无 syscall 进展 → **kind=2**（用户态/内核态空转）。
+  - dump：触发即打印全量 PCB（pid/name/state/reason/arg/last_run/last_prog/保存帧 eip/eflags/kesp），
+    只报一次。本地 `test_persist.sh` 全绿零误报；触发用例（fork→`while(1){}` 空转）正确捕获 kind=2
+    并定位子进程用户态 eip。
+  - **泛化方向（未开始，低成本高回报，作为长期观测原语沉淀）**：
+    ① **放宽触发面**：从「BLOCK_WAIT 父子等待」扩到「任意进程长时间不被调度 / 无 syscall 进展」，
+      即可抓非 wait 关系的挂起/饥饿（如两进程信号量互等）；② **加栈回溯**：dump 时沿各进程保存的
+      `kernel_esp` 走动内核栈 → 把「大致 eip」升级为「调用链」；③ **加 kind=3**：就绪队列空但存在
+      非 idle/FREE 进程 → 捕获「调度器假死」形态；④ **`last_*` 公共遥测化**：作为零成本常开字段，
+      供 FS/sem/net 等其它子系统故障诊断复用同一数据。
+  - 局限：tick 驱动——guest 整体冻结（IF 关 / tick 停摆）时看门狗随停摆不可探测；「tick 仍前进但
+    停滞」型（已知）已完全覆盖。
+
 ### 能力边界：宿主代理——把 https/ssh「接进」demo（讨论定论）
 
 > 背景：guest 只有极简虚拟 TCP、落 http 明文，**原生实现 https（TLS 证书链、握手/suite、E2E 加密）成本过高**。
