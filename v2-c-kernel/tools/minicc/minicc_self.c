@@ -127,6 +127,10 @@ int seq(int off, char* s) {     /* strtab[off] 与字面量相等 */
 }
 
 int stradd(char* s) {           /* 拷贝入名字池，返回偏移 */
+    /* 有意架构差异（勿当 FIX-D 遗漏）：与 host 完整版 minicc.c 的 `char name[32]`（每符号定长大数组，
+     * MC-02 要求词法拒绝 >31 字符标识符）不同，本自举版把名字统一拷入共享 strtab[20480] 名字池，无
+     * 每符号固定大小数组，故 MC-02（写穿 name[32]）在结构上不适用、无需 identifier too long 检查。
+     * host/guest 因此对 >31 字符标识符的接受性不同，属预期的行为分叉而非回归。 */
     int off = nstr;
     int i = 0;
     while (*(s+i)) { strtab[nstr] = *(s+i); nstr = nstr + 1; i = i + 1; }
