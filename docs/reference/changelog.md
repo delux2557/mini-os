@@ -62,10 +62,35 @@
 * guest 运行语义（heredoc 多行源）：do-while 累 0..9==45、for+break 累 0..4==10、
   continue 跳偶累奇==25、嵌套 break 只断内层 s==3，均 `code=0 PASS`。
 
+**Added**（Tests，`tests/test_minicc_mock.c` 白盒）
+
+* 新增 `t_stmt_do` / `t_stmt_break` / `t_stmt_continue`：断言 do→`ND_DO`（body/cond）、
+  break→`ND_BREAK`、continue→`ND_CONTINUE` 的 AST 形状。
+
+**Added**（差分对拍，`tools/minicc/diffsynth/gen.c`）
+
+* 新特性入网：`F_DO/F_BRK/F_CNT`（仅 `CAPS_MINIC`，cc500 保守基座不加）；
+  `stmt_gen` 新增 do-while + break/continue 语句模板（`_d<20` 限幅保终止），
+  使差分/自覆盖探针覆盖 do/break/continue（gcc↔minicc 差分 + 确定性）。
+
 **Engineering / Docs**
 
 * `docs/design/minicc-design.md` §6.1 Feature Matrix：语句支持加 `for`/`do`/`break`/`continue`，拒绝列表摘除。
 * `changelog.md`：本条目。
+
+## [v1.4·minicc-sugar] - 2026-09-06 · minicc 复合赋值（+= -= *= /= %=）与前/后缀 ++/--（纯语法糖）
+
+> **纯语法糖，无新 emit 原语**：`lv op= rhs` 在 parser 层改写成 `lv = (lv op rhs)`（`ND_ASSIGN` 套
+> 二元 `ND_ADD/SUB/MUL/DIV/MOD`），前缀 `++lv/--lv` 改写成 `lv = lv±1`；后缀 `lv++/lv--` 因 C 语义
+> **值为旧值**而引入单节点 `ND_POST_INC/ND_POST_DEC`，其 codegen 仅复用现有 load/store 指令（ebx 暂存
+> 左值地址，读旧值→±1→写回→弹回旧值），**不新增任何 emit 字节原语**。词法新增两字符运算符
+> `+= -= *= /= %= ++ --`。
+> - 契约：非左值复合赋值/自增自减 → 编译期静态报错（`assign to non-lvalue` /
+>   `increment/decrement of non-lvalue`），绝不出坏码。
+> - 差分对拍（diffsynth）新增 `F_SUGAR` 入网：安全子集 `+=(2..9) -= (2..9) /= %%=(2..9) ++ --`；
+>   刻意排除 `*=`（重复累乘会令值域逃逸有符号溢出，与"无 UB 三纪律"冲突）。
+> - 三层验证（三同步）：host（test_minicc.sh 编译层）、Mock 白盒（AST 形状 + 全管线 codegen，断言
+>   76→96）、guest（test_minicc.sh 运行语义：前缀新值/后缀旧值/复合链/指针 p+=1）。
 
 ## [v1.4·netif] - 2026-09-06 · 虚拟 TCP 下行滑动窗口（host→guest 停-等→滑动窗口，吞吐 W/RTT）
 
