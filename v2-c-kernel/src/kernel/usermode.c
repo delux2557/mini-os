@@ -28,6 +28,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* v0.4x（PR #120 CI 归因）串口降噪：
+ * TCG 满载（Layers 22 job 并行 QEMU 争用同一真串口）下，syscall 出口的"常规成功/空返回"
+ * 观测打印——sockdemo/netping 每 tick 轮询 recvfrom 的空回包、fs/mm/msg/sem 的逐个成功
+ * 路径——会显著抬升串口延迟 → wait_for 超时 → desync 级联（qemu.log 无 #GP/#DF/#PF-
+ * livelock、客体全程 alive；失败 run 里对象其实稍后就产出了目标串并完成补丁重编）。
+ * 故这些观测噪音按 debug 开关编译期剔除（默认关）；错误/拒绝/阻塞跃迁，以及被 QEMU 回归
+ * 脚本靠断的权威输出（[ls] / [elf] load / [audit] / [storage]/[netsock] 等）保持无条件。
+ * 需要全量 syscall 轨迹调试时：`make BUILD=build CFLAGS+=-DSYSLOG_SYSCALL` 一键还原。 */
+#ifdef SYSLOG_SYSCALL
+#  define SYSLOG(...) serial_printf(__VA_ARGS__)
+#else
+#  define SYSLOG(...) ((void)0)
+#endif
+
 /* ---- v0.6 IPC/同步：内核信号量表（用户通过固定 id 引用，id 0 保留） ---- */
 #define SEM_MAX_OBJ 16
 typedef struct {
@@ -397,8 +411,8 @@ static __attribute__((noinline)) void sys_sendto_case(registers_t *r, uint32_t a
     uint8_t pbuf[1400];
     if (iov.len && copyin(iov.buf, pbuf, iov.len) < 0) { r->eax = (uint32_t)-1; return; }
     int n = netsock_send((int)a, iov.dst_ip, iov.dst_port, pbuf, iov.len);
-    serial_printf("[net] sendto sock=%d %uB -> %x:%u rc=%d\n",
-                  (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
+    SYSLOG("[net] sendto sock=%d %uB -> %x:%u rc=%d\n",
+           (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
     r->eax = (uint32_t)n;
 }
 
@@ -500,7 +514,7 @@ void syscall_dispatch(registers_t *r) {
 
     switch (num) {
     case 0:   /* sys_exit(code) */
-        serial_printf("[user] sys_exit(%u) pid=%u\n", a, sched_current_pid());
+        SYSLOG("[user] sys_exit(%u) pid=%u\n", a, sched_current_pid());
         sched_exit(r, a);
         __asm__ volatile ("cli; hlt");   /* 不可达 */
         return;
@@ -542,7 +556,7 @@ void syscall_dispatch(registers_t *r) {
         if (!sem_objects[a].used) {
             sem_objects[a].used = 1;
             sem_init(&sem_objects[a].sem, (int32_t)b);
-            serial_printf("[sem] create id=%u init=%d\n", a, (int32_t)b);
+            SYSLOG("[sem] create id=%u init=%d\n", a, (int32_t)b);
         }
         r->eax = a;
         return;
@@ -553,7 +567,7 @@ void syscall_dispatch(registers_t *r) {
         uint32_t pid = sched_current_pid();
         int rc = sem_wait_try(&sem_objects[a].sem, pid);
         if (rc == 0) {
-            serial_printf("[sem] wait pid=%u id=%u ok\n", pid, a);
+            SYSLOG("[sem] wait pid=%u id=%u ok\n", pid, a);
             r->eax = 0;
             return;
         }
@@ -572,10 +586,10 @@ void syscall_dispatch(registers_t *r) {
         }
         uint32_t wpid = sem_signal_wake(&sem_objects[a].sem);
         if (wpid != SEM_NO_PID) {
-            serial_printf("[sem] signal id=%u -> wake pid=%u\n", a, wpid);
+            SYSLOG("[sem] signal id=%u -> wake pid=%u\n", a, wpid);
             sched_wake(wpid);
         } else {
-            serial_printf("[sem] signal id=%u ok (count++)\n", a);
+            SYSLOG("[sem] signal id=%u ok (count++)\n", a);
         }
         r->eax = 0;
         return;
@@ -591,8 +605,8 @@ void syscall_dispatch(registers_t *r) {
             if (!shmem_phys[a]) { r->eax = 0; return; }
             uint32_t *p = (uint32_t *)shmem_phys[a];
             for (int i = 0; i < 1024; i++) p[i] = 0;   /* 清零 */
-            serial_printf("[sem] shmem slot=%u alloc phys=%x (zeroed)\n",
-                          a, shmem_phys[a]);
+            SYSLOG("[sem] shmem slot=%u alloc phys=%x (zeroed)\n",
+                   a, shmem_phys[a]);
         }
         map_page(SHMEM_VBASE + a * 0x1000, shmem_phys[a], 0x7);  /* 当前进程页目录 */
         r->eax = SHMEM_VBASE + a * 0x1000;
@@ -603,7 +617,7 @@ void syscall_dispatch(registers_t *r) {
         if (!msg_objects[a].used) {
             msg_objects[a].used = 1;
             msg_init(&msg_objects[a].q, (uint32_t)b);
-            serial_printf("[msg] create id=%u capacity=%u\n", a, (uint32_t)b);
+            SYSLOG("[msg] create id=%u capacity=%u\n", a, (uint32_t)b);
         }
         r->eax = a;
         return;
@@ -617,11 +631,11 @@ void syscall_dispatch(registers_t *r) {
             uint32_t outv;
             uint32_t wpid = msg_send_wake(&msg_objects[a].q, &outv);
             if (wpid != MSG_NO_PID) {
-                serial_printf("[msg] send id=%u -> handoff consumer pid=%u val=%u\n",
-                              a, wpid, outv);
+                SYSLOG("[msg] send id=%u -> handoff consumer pid=%u val=%u\n",
+                       a, wpid, outv);
                 sched_wake_with(wpid, outv);   /* 消费者 recv 直接返回该消息 */
             }
-            serial_printf("[msg] send pid=%u id=%u -> ok\n", pid, a);
+            SYSLOG("[msg] send pid=%u id=%u -> ok\n", pid, a);
             r->eax = 0;
             return;
         }
@@ -643,10 +657,10 @@ void syscall_dispatch(registers_t *r) {
         if (rc == 0) {   /* 取出成功：若有暂存生产者且有空位，搬入并唤醒它 */
             uint32_t wpid = msg_recv_wake(&msg_objects[a].q);
             if (wpid != MSG_NO_PID) {
-                serial_printf("[msg] recv id=%u -> wake producer pid=%u\n", a, wpid);
+                SYSLOG("[msg] recv id=%u -> wake producer pid=%u\n", a, wpid);
                 sched_wake(wpid);   /* 生产者 send 返回 0=成功 */
             }
-            serial_printf("[msg] recv pid=%u id=%u -> val=%u\n", pid, a, val);
+            SYSLOG("[msg] recv pid=%u id=%u -> val=%u\n", pid, a, val);
             r->eax = val;
             return;
         }
@@ -662,7 +676,7 @@ void syscall_dispatch(registers_t *r) {
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
         int ino = fs_create(fs_device(), path);
-        serial_printf("[fs] create '%s' inode=%d\n", path, ino);
+        SYSLOG("[fs] create '%s' inode=%d\n", path, ino);
         r->eax = (uint32_t)ino;
         return;
     }
@@ -680,8 +694,8 @@ void syscall_dispatch(registers_t *r) {
         fdt[a].inode = (uint32_t)ino;
         fdt[a].pos   = (c == 2) ? fs_size(fs_device(), (uint32_t)ino) : 0;
         fdt[a].mode  = c;
-        serial_printf("[fs] open fd=%u '%s' inode=%u mode=%u pos=%u (pid=%u)\n",
-                      a, path, ino, c, fdt[a].pos, sched_current_pid());
+        SYSLOG("[fs] open fd=%u '%s' inode=%u mode=%u pos=%u (pid=%u)\n",
+               a, path, ino, c, fdt[a].pos, sched_current_pid());
         r->eax = 0;
         return;
     }
@@ -693,7 +707,7 @@ void syscall_dispatch(registers_t *r) {
         if (!user_ptr_valid((const void *)b, c)) { r->eax = (uint32_t)-1; return; }
         int n = fs_write(fs_device(), f->inode, (const void *)b, f->pos, c);
         if (n > 0) f->pos += (uint32_t)n;
-        serial_printf("[fs] write fd=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
+        SYSLOG("[fs] write fd=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
         r->eax = (uint32_t)n;
         return;
     }
@@ -705,7 +719,7 @@ void syscall_dispatch(registers_t *r) {
         if (!user_ptr_valid((const void *)b, c)) { r->eax = (uint32_t)-1; return; }
         int n = fs_read(fs_device(), f->inode, (void *)b, f->pos, c);
         if (n > 0) f->pos += (uint32_t)n;
-        serial_printf("[fs] read fd=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
+        SYSLOG("[fs] read fd=%u inode=%u pos=%u +%d\n", a, f->inode, f->pos, n);
         r->eax = (uint32_t)n;
         return;
     }
@@ -713,7 +727,7 @@ void syscall_dispatch(registers_t *r) {
         fs_file_t *fdt = cur_fdt();
         if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
         fdt[a].used = 0;
-        serial_printf("[fs] close fd=%u\n", a);
+        SYSLOG("[fs] close fd=%u\n", a);
         r->eax = 0;
         return;
     }
@@ -727,7 +741,7 @@ void syscall_dispatch(registers_t *r) {
         blockdev_t *bd = fs_device();
         int ino = fs_lookup(bd, path);        /* 解析实际对象（成功删除后供 revoke 悬垂 fd） */
         int rc = fs_delete(bd, path);
-        serial_printf("[fs] delete '%s' rc=%d\n", path, rc);
+        SYSLOG("[fs] delete '%s' rc=%d\n", path, rc);
         /* D4（红队 RBT-2026-014，BUG-068）：删除成功即回收指向该 inode 的悬垂 fd，
          * 防 inode 最低位复用后被旧 fd 写落到新文件（跨文件写、无告警）。 */
         if (rc == 0 && ino >= 0) sched_fd_revoke((uint32_t)ino);
@@ -751,7 +765,7 @@ void syscall_dispatch(registers_t *r) {
             __asm__ volatile ("cli; hlt");       /* 不可达 */
         }
         int n = kb_line_take(out, max);
-        serial_printf("[kb] readline pid=%u -> %d bytes\n", sched_current_pid(), n);
+        SYSLOG("[kb] readline pid=%u -> %d bytes\n", sched_current_pid(), n);
         r->eax = (uint32_t)n;
         return;
     }
@@ -788,11 +802,11 @@ void syscall_dispatch(registers_t *r) {
                 pcb_t *c = sched_get(i);
                 if (!c || c->state != PROC_ZOMBIE || c->parent_pid != cur) continue;
                 uint32_t code = c->exit_code;
-                serial_printf("[dbg] fastpath pid=%u st=%u ppid=%u exit=%u\n",
-                              i, c->state, c->parent_pid, c->exit_code);
+                SYSLOG("[dbg] fastpath pid=%u st=%u ppid=%u exit=%u\n",
+                           i, c->state, c->parent_pid, c->exit_code);
                 if (status) *status = code;      /* 当前地址空间即父进程，直接写 */
                 sched_reap(i);
-                serial_printf("[user] wait any -> pid=%u code=%u (reaped)\n", i, code);
+                SYSLOG("[user] wait any -> pid=%u code=%u (reaped)\n", i, code);
                 r->eax = i;
                 return;
             }
@@ -807,7 +821,7 @@ void syscall_dispatch(registers_t *r) {
                 uint32_t code = ch->exit_code;
                 if (status) *status = code;
                 sched_reap(a);
-                serial_printf("[user] wait pid=%u -> reaped code=%u\n", a, code);
+                SYSLOG("[user] wait pid=%u -> reaped code=%u\n", a, code);
                 r->eax = a;
                 return;
             }
@@ -856,7 +870,7 @@ void syscall_dispatch(registers_t *r) {
         for (int i = 0; i < 1024; i++) p[i] = 0;               /* 清零 */
         map_page(a, phys, 0x7);                                /* 当前进程地址空间 */
         if (p_) p_->map_frames[p_->map_fcount++] = phys;
-        serial_printf("[vm] map_page pid=%u addr=%x phys=%x\n",
+        SYSLOG("[vm] map_page pid=%u addr=%x phys=%x\n",
                       sched_current_pid(), a, phys);
         r->eax = a;
         return;
@@ -877,7 +891,7 @@ void syscall_dispatch(registers_t *r) {
         fs_file_t *fdt = cur_fdt();
         if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
         fdt[a].pos = b;
-        serial_printf("[fs] seek fd=%u -> pos=%u\n", a, fdt[a].pos);
+        SYSLOG("[fs] seek fd=%u -> pos=%u\n", a, fdt[a].pos);
         r->eax = fdt[a].pos;
         return;
     }
@@ -885,7 +899,7 @@ void syscall_dispatch(registers_t *r) {
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
         int ino = fs_mkdir(fs_device(), path);
-        serial_printf("[fs] mkdir '%s' inode=%d\n", path, ino);
+        SYSLOG("[fs] mkdir '%s' inode=%d\n", path, ino);
         r->eax = (uint32_t)ino;
         return;
     }
@@ -895,7 +909,7 @@ void syscall_dispatch(registers_t *r) {
         blockdev_t *bd = fs_device();
         int ino = fs_lookup(bd, path);        /* 解析实际对象（成功删除后供 revoke 悬垂 fd） */
         int rc = fs_rmdir(bd, path);
-        serial_printf("[fs] rmdir '%s' rc=%d\n", path, rc);
+        SYSLOG("[fs] rmdir '%s' rc=%d\n", path, rc);
         /* D4（红队 RBT-2026-014，BUG-068）：删空目录成功即回收指向该 inode 的悬垂 fd */
         if (rc == 0 && ino >= 0) sched_fd_revoke((uint32_t)ino);
         r->eax = (uint32_t)rc;
@@ -903,7 +917,7 @@ void syscall_dispatch(registers_t *r) {
     }
     case 29: { /* sys_fs_sync()：把 ramdisk 全量写回真盘（v0.16 持久化）；无盘返回 -1 */
         int rc = storage_sync();
-        serial_printf("[fs] sync -> %d\n", rc);
+        SYSLOG("[fs] sync -> %d\n", rc);
         r->eax = (uint32_t)rc;
         return;
     }
@@ -911,7 +925,7 @@ void syscall_dispatch(registers_t *r) {
         if (b || c) { r->eax = (uint32_t)-1; return; }
         int s = netsock_open((uint16_t)a);
         if (s < 0) serial_printf("[net] socket table full\n");   /* v0.31 观测：表满专项日志 */
-        serial_printf("[net] socket port=%u -> id=%d\n", (uint16_t)a, s);
+        SYSLOG("[net] socket port=%u -> id=%d\n", (uint16_t)a, s);
         r->eax = (uint32_t)s;
         return;
     }
@@ -926,7 +940,7 @@ void syscall_dispatch(registers_t *r) {
         if (iov.max && !user_ptr_valid(iov.buf, iov.max)) { r->eax = (uint32_t)-1; return; }
         int n = netsock_recv((int)a, iov.buf, iov.max, &iov.src_ip, &iov.src_port);
         if (n > 0) copyout(&iov, (void *)b, sizeof(iov));   /* 回写出参 */
-        serial_printf("[net] recvfrom sock=%d -> %dB\n", (int)a, n);
+        SYSLOG("[net] recvfrom sock=%d -> %dB\n", (int)a, n);
         r->eax = (uint32_t)n;
         return;
     }
@@ -981,7 +995,7 @@ void syscall_dispatch(registers_t *r) {
             }
         }
         p->heap_brk = a;
-        serial_printf("[heap] brk pid=%u %x -> %x pages=%u\n", p->pid, old, a, p->heap_fcount);
+        SYSLOG("[heap] brk pid=%u %x -> %x pages=%u\n", p->pid, old, a, p->heap_fcount);
         r->eax = 0;
         return;
     }
@@ -990,7 +1004,7 @@ void syscall_dispatch(registers_t *r) {
                  若本进程已禁用位 36，则入口检查会挡住本调用（只能继续收窄）——单向语义自洽。 */
         pcb_t *p = sched_get(sched_current_pid());
         if (p) p->sc_mask |= ((uint64_t)(uint32_t)b << 32) | (uint32_t)a;
-        serial_printf("[syscall] pid=%u limit -> mask=%08x%08x\n",
+        SYSLOG("[syscall] pid=%u limit -> mask=%08x%08x\n",
                       sched_current_pid(), (uint32_t)(p ? (uint32_t)(p->sc_mask >> 32) : 0),
                       (uint32_t)(p ? (uint32_t)p->sc_mask : 0));
         r->eax = 0;
