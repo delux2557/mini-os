@@ -5,9 +5,9 @@
 # 产物即为 mini-os 里可 `run` 的 ELF；其语义退码由 guest run 拿取，与 gcc 参考差分。
 #
 # 产物命名 ds00..ds(N-1).c / .elf / _elf.o（storage.c 的 #ifdef GUEST_DIFF 用 _binary_dsXX_elf 引用）。
-# 用法: gen_guest_elfs.sh <DIR> <GEN_BIN> [count]
+# 用法: gen_guest_elfs.sh <DIR> <GEN_BIN> [count] [seed]
 set -u
-DIR="${1:?DIR}"; GEN_BIN="${2:?GEN_BIN}"; count="${3:-12}"
+DIR="${1:?DIR}"; GEN_BIN="${2:?GEN_BIN}"; count="${3:-12}"; seed="${4:-7}"
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOOLS_MINI="$(dirname "$SELF_DIR")"                 # .../tools/minicc
 
@@ -23,8 +23,9 @@ if [ "$need" -eq 1 ]; then
       "$TOOLS_MINI/minicc.c" "$TOOLS_MINI/host_crt.c" || { echo "[ERR] hostminicc 构建失败"; exit 2; }
 fi
 
-# 1) 生成 count 个随机源（prog_001.c..，见 gen.c --out）
-"$GEN_BIN" --seed 7 --target minicc --vars 4 --stmts 6 --count "$count" --out "$DIR" || { echo "[ERR] gen 失败"; exit 2; }
+# 1) 生成 count 个随机源（prog_001.c..，见 gen.c --out）；seed 可传（评审 P2：guest 样本 seed 参数化，
+#    多 seed 轮换避免固定 seed 与特定 bug 长期"错峰"），默认 7 保持既有 CI 种子。
+"$GEN_BIN" --seed "$seed" --target minicc --vars 4 --stmts 6 --count "$count" --out "$DIR" || { echo "[ERR] gen 失败"; exit 2; }
 
 # 2) 重命名并逐个 minicc 编译成 dsNN.elf（hostminicc 是 32 位，宿主无 ia32 exec → qemu-i386）
 for ((i=0;i<count;i++)); do
