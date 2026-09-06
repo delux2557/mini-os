@@ -42,12 +42,17 @@ wait_for() {   # wait_for <日志> <说明> <正则> [超时秒]
 }
 
 boot() {   # boot <日志>：启动 QEMU（-hda 共享磁盘镜像），返回后即可发命令
-    local log="$1"
-    rm -f "$log" "$TIN" "$TOUT"
+    # 停顿归因（#120 追回 CI 特有 guest 硬停滞）：每轮 QEMU 以 `-d int,cpu_reset,
+    # guest_errors -D <LOG>.qemu.log` 把中断/异常/复位轨迹写盘（随 build/*.log 一并
+    # 上传）。若 guest 在二次 micc fork 处硬停，该文件会直接给出终止向量(#08 双错/
+    # #0d #GP/#0e #PF)与出错 eip，或 cpu_reset=三重复位⇒QEMU 退出。持久化解挂后删除。
+    local log="$1" qt="${1%.log}.qemu.log"
+    rm -f "$log" "$qt" "$TIN" "$TOUT"
     mkfifo "$TIN" "$TOUT"
     (cat "$TOUT" > "$log") & CAT_PID=$!
     qemu-system-i386 -kernel "$BUILD/kernel.elf" -hda "$IMG" -display none -vga std \
         -no-reboot -no-shutdown -m 64 -serial stdio -monitor none \
+        -d int,cpu_reset,guest_errors -D "$qt" \
         < "$TIN" > "$TOUT" 2>/dev/null &
     QPID=$!
     exec 9>"$TIN"
