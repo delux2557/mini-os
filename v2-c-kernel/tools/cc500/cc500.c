@@ -90,6 +90,7 @@ void get_token()
 {
   int w = 1;
   int str_done;
+  int c0;
   while (w) {
     w = 0;
     while ((nextc == ' ') | (nextc == 9) | (nextc == 10))
@@ -98,10 +99,35 @@ void get_token()
     while ((('a' <= nextc) & (nextc <= 'z')) |
 	   (('0' <= nextc) & (nextc <= '9')) | (nextc == '_'))
       takechar();
-    if (i == 0)
-      while ((nextc == '<') | (nextc == '=') | (nextc == '>') |
-	     (nextc == '|') | (nextc == '&') | (nextc == '!'))
+    /* M2：operator 词法精确化——原 while 把 <>=|&! 集合连续吞并，导致 "=!" 被合成
+     * 单 token（x=!x 无法解析）。现只合成合法双字符运算符（== != <= >= << >> && ||），
+     * 其余按单字符返回。对旧语法合法输入的 token 流不变（字节零变化由用例锁定）。 */
+    if (i == 0) {
+      c0 = nextc;
+      if ((c0 == '<') | (c0 == '>') | (c0 == '=') | (c0 == '|') | (c0 == '&') | (c0 == '!')) {
 	takechar();
+	if (nextc == '=') {
+	  if ((c0 == '<') | (c0 == '>') | (c0 == '=') | (c0 == '!'))
+	    takechar();
+	}
+	else if (nextc == '<') {
+	  if (c0 == '<')
+	    takechar();
+	}
+	else if (nextc == '>') {
+	  if (c0 == '>')
+	    takechar();
+	}
+	else if (nextc == '&') {
+	  if (c0 == '&')
+	    takechar();
+	}
+	else if (nextc == '|') {
+	  if (c0 == '|')
+	    takechar();
+	}
+      }
+    }
     if (i == 0) {
       if (nextc == 39) {
 	takechar();
@@ -552,6 +578,37 @@ int postfix_expr()
   return type;
 }
 
+/* ---- 教学里程碑 M2：一元 - ! ~（2026-09-06）----
+ * 标准 C 优先级：postfix > unary > multiplicative…，故 unary 夹在 postfix 与
+ * additive 之间；对非前缀 token 直接透传 postfix_expr()（透传路径与旧一致，保证
+ * 旧语法产物字节不变）。操作数若是 lval（type 1/2）须先 promote 装载再运算。
+ * 教学点：一元减与二元减共享 token '-'，靠"先试前缀、失败回退"消歧——这是
+ * 递归下降处理同一 token 不同文法的经典手法。 */
+int unary_expr()
+{
+  int type;
+  if (accept("-")) {
+    type = unary_expr();
+    promote(type);
+    emit(2, "\xf7\xd8");            /* neg %eax */
+    return 3;
+  }
+  if (accept("!")) {
+    type = unary_expr();
+    promote(type);
+    emit(2, "\x85\xc0");            /* test %eax,%eax */
+    emit(6, "\x0f\x94\xc0\x0f\xb6\xc0"); /* sete %al ; movzbl %al,%eax */
+    return 3;
+  }
+  if (accept("~")) {
+    type = unary_expr();
+    promote(type);
+    emit(2, "\xf7\xd0");            /* not %eax */
+    return 3;
+  }
+  return postfix_expr();
+}
+
 /*
  * additive-expr:
  *         postfix-expr
@@ -560,15 +617,15 @@ int postfix_expr()
  */
 int additive_expr()
 {
-  int type = postfix_expr();
+  int type = unary_expr();
   while (1) {
     if (accept("+")) {
       binary1(type); /* pop %ebx ; add %ebx,%eax */
-      type = binary2(postfix_expr(), 3, "\x5b\x01\xd8");
+      type = binary2(unary_expr(), 3, "\x5b\x01\xd8");
     }
     else if (accept("-")) {
       binary1(type); /* pop %ebx ; sub %eax,%ebx ; mov %ebx,%eax */
-      type = binary2(postfix_expr(), 5, "\x5b\x29\xc3\x89\xd8");
+      type = binary2(unary_expr(), 5, "\x5b\x29\xc3\x89\xd8");
     }
     else
       return type;
@@ -680,6 +737,19 @@ int bitwise_and_expr()
   return type;
 }
 
+/* ---- 教学里程碑 M2：位异或 ^（2026-09-06）----
+ * 标准 C 位运算优先级：& > ^ > |。cc500 原只有 & 与 | 两层（& 直接挂 | 下），
+ * 此处按标准插入 ^ 层：| 调 ^、^ 调 &。与 & / | 发射同构，仅 opcode 不同。 */
+int bitxor_expr()
+{
+  int type = bitwise_and_expr();
+  while (accept("^")) {
+    binary1(type); /* pop %ebx ; xor %ebx,%eax */
+    type = binary2(bitwise_and_expr(), 3, "\x5b\x31\xd8");
+  }
+  return type;
+}
+
 /*
  * bitwise-or-expr:
  *         bitwise-and-expr
@@ -687,10 +757,10 @@ int bitwise_and_expr()
  */
 int bitwise_or_expr()
 {
-  int type = bitwise_and_expr();
+  int type = bitxor_expr();
   while (accept("|")) {
     binary1(type); /* pop %ebx ; or %ebx,%eax */
-    type = binary2(bitwise_and_expr(), 3, "\x5b\x09\xd8");
+    type = binary2(bitxor_expr(), 3, "\x5b\x09\xd8");
   }
   return type;
 }
