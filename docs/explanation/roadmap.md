@@ -291,12 +291,12 @@
 
 ### 网络抽象层与虚拟 TCP（netif + 间接 TCP）——已完成主线
 
-> **状态：主线已全部落地**（v1.1 四步 → v1.2 可靠收发 → v1.3 上行滑动窗口；changelog v1.1~v1.3）。
+> **状态：主线已全部落地**（v1.1 四步 → v1.2 可靠收发 → v1.3 上行滑动窗口 → v1.4 下行滑动窗口；changelog v1.1~v1.3 + v1.4·netif）。
 > 完整决策史（D1-D6 + Step 1-4 + 薄→厚演进预留）已归档：[history/netif-roadmap-v1.1.md](../history/netif-roadmap-v1.1.md)（只读）。
 > 协议契约以 `docs/tcp-session-proto.md` / `tcp-thin-api.md` / `tcp-mtu-fail.md` 为准（动码前定稿）。
 
 - **✅ 上行滑动窗口（v1.3）**：停-等 → N 在途（guest 发送窗口 `TCP_TXWIN=8` + 累计 ACK + 超时重传），吞吐 1/RTT → W/RTT。
-- **候选（未做）——下行滑动窗口**：host→guest 下行仍停-等（转发器 ≤1 报在途）。提速需转发器发送侧窗口 + guest 接收窗口/累计 ACK（现只回单一期望 seq）。上限由 SLIP 慢通道 L2 与两端缓冲决定，初期取保守小值；与上行正交、技术镜像，可独立推进，不破坏薄包装 API、会话表与协议头结构。
+- **✅ 下行滑动窗口（v1.4）**：host→guest 停-等 → 滑动窗口（转发器发送窗口 `DWIN=8` + guest 接收窗口 `TCP_RXWIN=8` 重排缓冲 + 累计 ACK + 最老槽超时重传），与上行镜像。宿主确定性与端到端覆盖见 `tests/test_downlink_window.py` / `test_tcp_dl`。
 - **残余待收口**：e1000 DHCP BOOTP 组帧（`e1000_dhcp_tick` 直调）推迟到 HAL 阶段（红线：无真实 ARM 硬件前不做 HAL）。
 ### 红线（明确不做）
 

@@ -3,6 +3,49 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4·netif] - 2026-09-06 · 虚拟 TCP 下行滑动窗口（host→guest 停-等→滑动窗口，吞吐 W/RTT）
+
+> 下行可靠由 v1.2 停-等升级为**滑动窗口**（与 v1.3 上行镜像）：转发器发送窗口 `DWIN=8`（=guest
+> `TCP_RXWIN`）×独立下行 seq，最多 8 报同时在途；guest 接收侧为滑动窗口接收端（seq 落窗口内即缓存
+> 进 `rx_win` 重排缓冲，`rx_flush` 凑齐连续后依序送 `rxb`、累计推进 `rx_next`），回累计 ACK（下一
+> 期望下行 seq）推进转发器 `dl_base` 腾窗续发；最老未确认槽超时重传。`MSG_ACK` 累计语义复用、
+> **不新增消息类型、不改协议头结构**。吞吐从"1/RTT"提至"W/RTT"。
+
+**Changed**（guest 薄包装，`src/app/tcp.h`）
+
+* **新增** **`rx_slot_t`** **结构体**：下行接收侧重排缓冲槽（busy/len/data），`rx_win` 下标 = `seq % TCP_RXWIN`。
+* **新增** **`TCP_RXWIN`** **宏**：`#define TCP_RXWIN 8`，下行接收窗口最大允许"乱序暂存"的包数上限（镜像 `TCP_TXWIN`）。
+* **`tcp_conn_t`** 新增 `rx_win[TCP_RXWIN]` 字段（重排缓冲）；`rx_next` 语义从"严格期望单值"升级为"最老未交付下界/累计确认边界"。
+
+**Changed**（guest 薄包装，`src/app/tcp.c`）
+
+* **新增** **`rx_flush`** **辅助函数**：从 `rx_next` 起交付"连续已到"的重排缓冲并推进 `rx_next`。
+* **`drain`** **MSG\_DATA 处理重写**：从"只收 `seq==rx_next`、否则丢弃"升级为"窗口内缓存 + 凑齐连续交付 + 累计 ACK"；
+  窗口外（超窗/已交付区重复）丢弃载荷、仅重发 ACK 自愈。
+* **`tcp_open`** 初始化：新增 `for` 循环清空 `rx_win[i].busy`（防上次连接残留）。
+
+**Changed**（宿主转发器，`tests/tcp_proxy.py`）
+
+* **Session 下行状态重构**：移除停-等单槽 `pending/seq/inflight/inflight_seq/inflight_t`，新增
+  `dl_pending` / `dl_seq`（递增分配器）/ `dl_base`（累计确认边界）/ `dl_win={}`（在途副本 `{seq:(payload,t)}`）。
+* **Proxy 类**：新增 `DWIN = 8` 常量（与 guest `TCP_RXWIN` 对齐）。
+* **新增** **`_dl_fill`**：填满窗口（≤DWIN）即发，窗口满停；eof 且数据发尽、窗口空后发 `MSG_CLOSED`（保证不缺尾）。
+* **新增** **`_dl_retrans`**：最老未确认下行槽超时重传（SR 风格）。
+* **`MSG_ACK`** **处理**：从"单报 ack==inflight+1"升级为累计推进——`advance=(ack-dl_base)` 内在途范围内
+  清槽、`dl_base=ack`，随后 `_dl_fill` 决定续发/发 `MSG_CLOSED`。
+* **`_tcp_read`/`_sweep`**：引用改 `dl_pending`/`_dl_fill`/`_dl_retrans`。
+
+**Added**（Tests）
+
+* **`tests/test_downlink_window.py`**：宿主侧**下行发送窗口**确定性单测（自包含，拉起 proxy）——首轮在序填满
+  DWIN 后满窗不再爆；不发 ACK → 最老未确认槽超时重传（seq0 重复）；累计 ACK 逐窗推进至 MSG_CLOSED；
+  全量按序不重不漏 == 上游 BLOB。验证"窗口上限/累计推进/最老槽重传/不缺尾"。
+
+**Engineering / Docs**
+
+* `tcp-session-proto.md`：头部注记 v1.4 + §6 重写（6.1 下行滑动窗口、6.3 候选→✅ 已落地）、附录 A.5 项 5 更新。
+* `changelog.md`：本条目。
+
 ## [v1.4.17] - 2026-09-05 · OBS 观察工程化（R1/R2/R3）+ 加固 A-2（BUG-073+）
 
 > **OBS 观察工程化**（红队/评估观察入库收尾）：

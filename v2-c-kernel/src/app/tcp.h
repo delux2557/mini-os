@@ -21,6 +21,8 @@
 #define TCP_RECV_TICKS 500    /* recv/发送让步阻塞超时上限（100Hz * 5s = 500 tick） */
 #define TCP_TX_TICKS   250    /* 上行超时重传间隔（tick，100Hz*2.5s=250）：须 ≥ 慢通道单报回环 */
 #define TCP_TXWIN      8      /* v1.3 上行滑动窗口：最多 W 个数据报同时在途（未确认） */
+#define TCP_RXWIN      8      /* v1.4 下行滑动窗口：接收侧允许窗口内"乱序暂存"的包数上限
+                                   （镜像 TCP_TXWIN=8；index 取 seq % TCP_RXWIN） */
 
 /* 运行期发送槽：保存一个已发送、尚未被累计 ACK 确收的上行数据报载荷副本（重传依据）。
    seq = 该载荷的上行序列号；len = 载荷字节数；tick = 最近一次发送/重传时刻。 */
@@ -31,6 +33,14 @@ typedef struct {
     uint8_t  busy;            /* 槽在途（seq ∈ [tx_base, tx_seq)） */
     uint8_t  data[TCP_MAX_PAYLOAD];
 } tx_slot_t;
+
+/* v1.4 下行滑动窗口：接收侧重排缓冲槽。保存"窗口内、未按序交付"的一个下行数据报副本
+   （乱序先到缓存，凑齐连续后经 rx_flush 依序送 rxb）。index = seq % TCP_RXWIN；busy=1 表示该槽占。 */
+typedef struct {
+    uint8_t  busy;            /* 槽占：已收到该 seq、尚未交付 */
+    uint16_t len;             /* 载荷字节数（≤ TCP_MAX_PAYLOAD） */
+    uint8_t  data[TCP_MAX_PAYLOAD];
+} rx_slot_t;
 
 /* 连接对象（docs/tcp-thin-api.md §2；本实现为用户态 per-process，故不含内核 pid/内核栈缓冲） */
 typedef enum {
@@ -44,7 +54,9 @@ typedef struct {
     uint32_t     dst_ip;        /* open 目标（仅薄包装侧语义记录；wire 只在 MSG_OPEN 传一次） */
     uint16_t     dst_port;
     uint8_t      rxb[TCP_RXB];  uint16_t rx_head, rx_tail;
-    uint16_t     rx_next;       /* v1.2 可靠下行：下一个期望的数据序列号 seq（stop-and-wait） */
+    uint16_t     rx_next;       /* v1.2/1.4 可靠下行：下一个期望的数据序列号 seq（累计确认边界，
+                                   窗口接收后是"最老未交付"的下界） */
+    rx_slot_t    rx_win[TCP_RXWIN]; /* v1.4 下行滑动窗口：接收侧重排缓冲（index=seq%TCP_RXWIN） */
     /* v1.3 上行滑动窗口：guest 是发送方，保留至多 TCP_TXWIN 个在途载荷副本（各带独立 seq），
        发满窗口即让步等累计 ACK（host→guest MSG_ACK = 下一期望上行 seq）推进 tx_base；
        最老未确认槽每 TCP_TX_TICKS 超时重传（幂等，转发器遇重复/乱序 seq 丢弃并回累计 ACK）。
