@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/sched_policy.h
+/* mini-os/v2-c-kernel/src/kernel/sched_policy.h
  * 调度策略（纯逻辑，无内核依赖，可宿主单测）：
  *  - 定长环形就绪队列：push / pop / remove / contains / count / empty
  *  - 约定：运行中的进程不在队列中，只有"可运行但未运行"的进程在队列中；

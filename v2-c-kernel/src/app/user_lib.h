@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/user_lib.h
+/* mini-os/v2-c-kernel/src/app/user_lib.h
  * 用户态共享库（v0.9）：系统调用号、syscall 内联封装、打印/字符串小工具。
  * 由 shell / hello / echo / crash 等独立编译的 ELF 应用 #include。
  * 与内核 usermode.c 的 syscall 分发表严格对应。

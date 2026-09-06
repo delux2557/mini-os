@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/sched.h
+/* mini-os/v2-c-kernel/src/kernel/sched.h
  * 进程调度器（v0.5）：
  *  - PCB 表 + 就绪队列（轮转策略见 sched_policy.c）
  *  - 定时器抢占、主动让出(yield)、sleep 阻塞、退出/故障终止、僵尸回收

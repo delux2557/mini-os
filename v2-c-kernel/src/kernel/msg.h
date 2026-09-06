@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/msg.h
+/* mini-os/v2-c-kernel/src/kernel/msg.h
  * 有界消息队列（v0.7）：纯逻辑对象，只做"环形缓冲 + 双等待队列 + 暂存消息"簿记，
  * 不依赖调度器/中断，可在宿主环境编译运行单元测试（tests/test_msg.c）。
  *

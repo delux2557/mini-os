@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/echo.c
+/* mini-os/v2-c-kernel/src/app/echo.c
  * 演示用户态阻塞式 I/O：用 sys_readline 读一行并回显。 */
 #include "user_lib.h"
 

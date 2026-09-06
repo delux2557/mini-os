@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/userptr.c
+/* mini-os/v2-c-kernel/src/kernel/userptr.c
  * 用户指针安全访问实现（v0.17）：syscall 边界校验。
  * 校验通过后内核直接读/写用户内存（当前 CR3 即用户页目录，用户半区已映射）。
  * v0.17 修复：预检从"纯区间"升级为"区间 + 逐页已映射"，见 user_ptr_valid 注释。

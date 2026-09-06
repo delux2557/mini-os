@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/mem.c
+/* mini-os/v2-c-kernel/src/mm/mem.c
  * 内存管理实现：
  *  1) mem_init  : 从 multiboot 读内存大小，位图标记内核区已用
  *  2) frame_*   : 4KB 物理帧分配器（首次适配，地址位于 1MB 之上）

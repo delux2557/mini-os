@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/kb.c
+/* mini-os/v2-c-kernel/src/drv/kb.c
  * PS/2 键盘驱动（scan code set 1）：
  *  IRQ1 中断里读扫描码 -> 查表转 ASCII -> 放入环形缓冲
  *  主循环通过 kb_getchar() 轮询读取 */

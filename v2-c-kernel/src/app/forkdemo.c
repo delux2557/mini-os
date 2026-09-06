@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/forkdemo.c
+/* mini-os/v2-c-kernel/src/app/forkdemo.c
  * v0.12 fork 进程模型演示：
  *  - sys_fork() 复制当前进程：父子从 fork 调用点分叉继续执行
  *    * 父进程 fork 返回子 pid；子进程返回 0

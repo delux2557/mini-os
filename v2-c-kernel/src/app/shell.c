@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/shell.c
+/* mini-os/v2-c-kernel/src/app/shell.c
  * 交互式 Shell（v0.9）：从文件系统加载 ELF 应用并运行的"用户程序"。
  *  - 独立编译链接到 0x80000000，由内核在启动时从 fs 加载
  *  - 阻塞式 readline 读命令；命令：help / ls / cat / run / exit

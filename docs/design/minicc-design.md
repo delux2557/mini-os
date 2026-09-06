@@ -271,7 +271,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 | V1 ✅ | `int main(){return 0;}` 起逐特性打通 int-only | 700 行编译器 + `micc` 命令 + `make test-minicc` 全绿                                                 |
 | V2 ✅ | 指针/字符串/数组/下标 → 产物可调 `syscall3`（I/O 可观察） | AST（V2a）+ 指针（V2b）+ 字符串/char/syscall3 stub（V2c）+ 数组（V2d）完成，guest 已断言产物运行期输出与数组运行语义；L4 语义对照待上线 |
 | V3 ✅ | 编译器自举                                   | `minicc_self.c` 全子集编写（并行数组 + int 句柄）+ P1==P2 不动点验证（`miccboot`）+ L3 启用（`test_miccboot.sh` 全绿） |
-| V4+  | struct、`for/switch` 扩展（位运算已并入 V3a）     | 特性↔测试清单滚动更新；cc500 退役评估                                                                       |
+| V4+  | struct、`for/switch` 扩展（位运算已并入 V3a）     | 特性↔测试清单滚动更新；cc500 教学对照·许可边界 ADR                                                      |
 
 风险提示：V2 的 AST 引入是对 V1 单遍生成的**结构性重构**，应在一个切片内完成并保持 L1/L2 全绿后合入，避免长分支。
 

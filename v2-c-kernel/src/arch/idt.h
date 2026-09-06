@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/idt.h */
+/* mini-os/v2-c-kernel/src/arch/idt.h */
 #ifndef _IDT_H
 #define _IDT_H
 #include <stdint.h>

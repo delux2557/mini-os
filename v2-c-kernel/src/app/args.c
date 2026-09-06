@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/args.c
+/* mini-os/v2-c-kernel/src/app/args.c
  * v0.12 argv 参数传递演示：
  *  - 内核以 cdecl 进入 app_main(int argc, char **argv)
  *  - argv[0]=程序名，argv[1..] 为 exec 传参

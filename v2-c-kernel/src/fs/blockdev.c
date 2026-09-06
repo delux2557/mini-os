@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/blockdev.c
+/* mini-os/v2-c-kernel/src/fs/blockdev.c
  * 块设备抽象实现：当前后端为内存盘（一段连续内存，物理地址即线性地址，
  * 落在内核低 16MB 恒等映射区内）。 */
 #include "blockdev.h"

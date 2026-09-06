@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/apps/stackovf.c
+/* mini-os/v2-c-kernel/src/app/stackovf.c
  * v0.13 用户栈守卫页 / 栈溢出检测演示（v0.26 更新为 32KB 槽）：
  *  - 每个用户进程的栈槽 32KB = [守卫页 4KB(未映射，槽底硬底) | 可生长栈区 28KB]
  *  - 程序故意往本进程栈槽底部的守卫页写入 -> 页错误

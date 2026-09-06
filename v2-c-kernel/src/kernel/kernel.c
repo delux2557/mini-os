@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/kernel.c
+/* mini-os/v2-c-kernel/src/kernel/kernel.c
  * 主内核（v0.5）：初始化各子系统 -> 内存自检 -> 创建多进程 -> 调度器接管
  * 由 boot.s 以 multiboot 协议加载，cdecl 传入 (magic, multiboot_info) */
 #include "vga.h"

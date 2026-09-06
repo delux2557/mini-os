@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/msg.c
+/* mini-os/v2-c-kernel/src/kernel/msg.c
  * 有界消息队列实现（v0.7）：纯逻辑，无内核依赖，可宿主单测。
  * 设计：环形缓冲 + 两个 FIFO 等待队列。
  *  - send：缓冲有空位则直接入队；否则把 {pid, 消息} 暂存到生产者队列并等待。

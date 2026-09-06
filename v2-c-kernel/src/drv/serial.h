@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/serial.h */
+/* mini-os/v2-c-kernel/src/drv/serial.h */
 #ifndef _SERIAL_H
 #define _SERIAL_H
 #include <stdint.h>

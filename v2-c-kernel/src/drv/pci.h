@@ -1,4 +1,4 @@
-/* mini-os/v2-c-kernel/src/pci.h
+/* mini-os/v2-c-kernel/src/drv/pci.h
  * PCI 总线访问（v0.18）：type-1 配置空间读写（0xCF8/0xCFC）。
  * 用于在启动时定位 e1000 网卡并分配其 MMIO BAR（QEMU -kernel 不经 BIOS，
  * BAR 未预分配，须由内核写入）。
