@@ -22,12 +22,17 @@ static int rbool(void){ return (int)(rnd()&1u); }
 enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
        F_LOGIC=1<<4, F_IF=1<<5, F_WHILE=1<<6, F_FOR=1<<7, F_BIT=1<<8,
        F_GLOBAL=1<<9, F_ARRAY=1<<10, F_PTR=1<<11, F_FUNC=1<<12,
-       F_MOD=1<<13, F_NEG=1<<14, F_CHAR=1<<15 };
+       F_MOD=1<<13, F_NEG=1<<14, F_CHAR=1<<15, F_SUGAR=1<<16,
+       F_DO=1<<17, F_BRK=1<<18, F_CNT=1<<19 };   /* 循环控制：do/break/continue（仅 minicc） */
 /* 评审 P1：F_MOD（% idiv+取余发射路径）、F_NEG（一元负号）显式入网；
  * `<<` 有意排除——有符号左移溢出是 UB，与无 UB 三纪律冲突（评审亦认可刻意排除）。
  * F_CHAR（评审 §5 类型面盲区）：char 变量/char 数组/字符串定点读取入网——
- * 走 movzbl 存取 + 字符串池 codegen（minicc 出错高发区），全为只读源、复用退出码观测。 */
-#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC|F_MOD|F_NEG|F_CHAR)
+ * 走 movzbl 存取 + 字符串池 codegen（minicc 出错高发区），全为只读源、复用退出码观测。
+ * V3b F_SUGAR（复合赋值/自增自减）：纯语法糖 lv op= rhs→lv=lv op rhs、++/--。差分网只
+ * 用无 UB 安全子集：+=(2..9) -= (2..9) /= (%)= 除非零小常量 ++ -- ——刻意排除 `*=`（重复
+ * 累乘会让值域逃逸有符号溢出）。值被丢弃的语句态 ++/-- 也够覆盖 emit 路径。
+ * F_DO/F_BRK/F_CNT（循环控制）：do-while + break/continue 模板，_d 限幅保终止；仅 minicc。 */
+#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC|F_MOD|F_NEG|F_CHAR|F_SUGAR|F_DO|F_BRK|F_CNT)
 /* cc500 保守基座（2026-09-05 实测校准：hostcc 探测 rc——global/array/ptr/for/~/^ 全部拒，
  * 支持 & | << 与 char；故不给 cc500 开 F_GLOBAL/F_ARRAY/F_PTR/F_FOR/F_BIT，与实测一致） */
 #define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE)
@@ -164,14 +169,39 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
 
 static void stmt_gen(int depth){
     char b[512]; long lo,hi;
-    int kind=rndi(0,3);
     const char *lv=pick_lval();
+    /* V3b F_SUGAR：偶尔产出一条语法糖语句（rbool 门控，不独吞其他特性） */
+    if(has(F_SUGAR) && rbool()){
+        int ks=rndi(0,5);
+        if(ks==0){ used_flags|=F_SUGAR; printf("  (%s) += %d; (%s) -= %d;\n", lv, rndi(2,9), lv, rndi(2,9)); }
+        else if(ks==1){ used_flags|=F_SUGAR; printf("  (%s) /= %d; (%s) %%= %d;\n", lv, rndi(2,9), lv, rndi(2,9)); } /* /,% 除以非零小常量，值域收敛无溢出 */
+        else if(ks==2){ used_flags|=F_SUGAR; printf("  (%s)++;\n", lv); }
+        else if(ks==3){ used_flags|=F_SUGAR; printf("  (%s)--;\n", lv); }
+        else if(ks==4){ used_flags|=F_SUGAR; printf("  ++(%s);\n", lv); }
+        else          { used_flags|=F_SUGAR; printf("  --(%s);\n", lv); }
+        return;
+    }
+    /* 能力集门控的语句 pick 列表：do/break/continue 仅 minicc 入网（cc500 保守基座不加） */
+    int kinds[6], nk=0;
+    kinds[nk++]=0;                                       /* 赋值 */
+    if(has(F_IF))    kinds[nk++]=1;
+    if(has(F_WHILE)) kinds[nk++]=2;
+    if(has(F_FOR))   kinds[nk++]=3;
+    if(has(F_DO))    kinds[nk++]=4;                      /* do-while + break/continue */
+    int kind=kinds[rndi(0,nk-1)];
     if(kind==0){ expr_gen(b,depth+1,&lo,&hi,0); printf("  %s=(%s);\n",lv,b); }
     else if(kind==1){ used_flags|=F_IF; expr_gen(b,depth+1,&lo,&hi,1);
         printf("  if((%s)){ %s=1; } else { %s=0; }\n",b,lv,pick_lval()); }
     else if(kind==2){ used_flags|=F_WHILE; expr_gen(b,depth+1,&lo,&hi,1);
         printf("  {int _g; _g=0; while((%s)&&_g<20){ _g=_g+1; %s=%s+1; }}\n",b,lv,lv); }
-    else{ used_flags|=F_FOR; printf("  {int _i; for(_i=0;_i<8;_i=_i+1){ %s=%s+1; }}\n",lv,lv); }
+    else if(kind==3){ used_flags|=F_FOR; printf("  {int _i; for(_i=0;_i<8;_i=_i+1){ %s=%s+1; }}\n",lv,lv); }
+    else /*kind==4*/{ /* do-while + break/continue：_d 限幅保终止；break/continue 各以随机条件触发 */
+        char b1[128],b2[128]; long l,h;
+        expr_gen(b1,depth+1,&l,&h,1); expr_gen(b2,depth+1,&l,&h,1);
+        used_flags|=F_DO|F_BRK|F_CNT;
+        printf("  {int _d; _d=0; do{ %s=%s+1; _d=_d+1; if(%s)break; if(%s)continue; } while(_d<20); }\n",
+               lv,lv,b1,b2);
+    }
 }
 
 /* 递归辅助函数：固定安全模板，纯函数、参数作深度界限。
@@ -222,7 +252,8 @@ static void coverage_probe(int count){
         {"F_CONST",F_CONST},{"F_VAR",F_VAR},{"F_ARITH",F_ARITH},{"F_CMP",F_CMP},
         {"F_LOGIC",F_LOGIC},{"F_IF",F_IF},{"F_WHILE",F_WHILE},{"F_FOR",F_FOR},
         {"F_BIT",F_BIT},{"F_GLOBAL",F_GLOBAL},{"F_ARRAY",F_ARRAY},{"F_PTR",F_PTR},{"F_FUNC",F_FUNC},
-        {"F_MOD",F_MOD},{"F_NEG",F_NEG},{"F_CHAR",F_CHAR}
+        {"F_MOD",F_MOD},{"F_NEG",F_NEG},{"F_CHAR",F_CHAR},{"F_SUGAR",F_SUGAR},
+        {"F_DO",F_DO},{"F_BRK",F_BRK},{"F_CNT",F_CNT}
     };
     unsigned nsz=sizeof(feats)/sizeof(feats[0]);
     for(unsigned i=0;i<nsz;i++)

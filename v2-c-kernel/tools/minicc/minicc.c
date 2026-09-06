@@ -19,6 +19,7 @@
  *
  * 当前能力速览（逐特性测试矩阵请读 §6）：int/char/数组/指针/全局、
  * 字符串与字符、位运算（& | ^ << >> ~）、if/while/for/return、函数/递归、
+ * 复合赋值（+= -= *= /= %=）、前/后缀 ++/--（V3b 语法糖）、
  * 隐式声明并调用 syscall3(n,a,b,c) stub。拒绝即编译期静态报错（契约式锁定）。
  *
  * 【开发规约 · 新增语法特性须"三同步"】⚠ dev 常看这里：
@@ -357,6 +358,7 @@ enum {
     ND_ASSIGN,
     ND_ADDR, ND_DEREF,         /* V2b：& 取地址 / * 解引用 */
     ND_INDEX,                  /* V2d：a[i] 下标（l=数组 VAR，r=下标表达式，左值） */
+    ND_POST_INC, ND_POST_DEC,  /* V3b：后缀 ++/--（需返回旧值，l=左值，见 gen()） */
     ND_EXPR_STMT, ND_BLOCK, ND_IF, ND_WHILE, ND_FOR, ND_RET,
     ND_DECL, ND_FUNC, ND_GVAR,
     ND_DO, ND_BREAK, ND_CONTINUE   /* 循环语句补齐：do-while / break / continue */
@@ -535,7 +537,11 @@ static void next_tok(void) {
     if ((c == '=' && d == '=') || (c == '!' && d == '=') ||
         (c == '<' && d == '=') || (c == '>' && d == '=') ||
         (c == '<' && d == '<') || (c == '>' && d == '>') ||
-        (c == '&' && d == '&') || (c == '|' && d == '|')) {
+        (c == '&' && d == '&') || (c == '|' && d == '|') ||
+        (c == '+' && d == '=') || (c == '-' && d == '=') ||
+        (c == '*' && d == '=') || (c == '/' && d == '=') ||
+        (c == '%' && d == '=') || (c == '+' && d == '+') ||
+        (c == '-' && d == '-')) {
         tok[0] = (char)c; tok[1] = (char)d; tok[2] = 0;
         src_pos++;
         toklen = 2;
@@ -738,7 +744,16 @@ static Node *primary(void) {
     return NULL;
 }
 
+static Node *prefix_incdec(Node *operand, int ck);   /* V3b 前置声明（相互递归） */
+static Node *postfix(void);
+
 static Node *unary(void) {
+    if (accept("++")) {                 /* V3b：前缀 ++lv → 语法糖 lv = lv+1（值=新值） */
+        return prefix_incdec(unary(), ND_ADD);
+    }
+    if (accept("--")) {                 /* V3b：前缀 --lv → 语法糖 lv = lv-1 */
+        return prefix_incdec(unary(), ND_SUB);
+    }
     if (accept("-")) {
         Node *n = node_new(ND_NEG);
         n->l = unary();
@@ -771,7 +786,29 @@ static Node *unary(void) {
         n->ty = n->l->bty;              /* 解引用结果类型 = 指针基类型 */
         return n;
     }
-    return primary();
+    return postfix();
+}
+
+/* V3b：后缀 ++/-- 构造 ND_POST_INC / ND_POST_DEC（表达式值为旧值，见 gen()）。
+ * 左值校验与赋值族一致（contract：只作用于可寻址左值）。 */
+static Node *post_incdec(Node *operand, int kind) {
+    if (operand->kind != ND_VAR && operand->kind != ND_DEREF &&
+        operand->kind != ND_INDEX)
+        fail("increment/decrement of non-lvalue");
+    Node *n = node_new(kind);
+    n->l = operand;
+    n->ty = operand->ty;
+    return n;
+}
+
+/* V3b：后缀表达式 = primary 后接任意 ++/--（优先级高于一元；函数调用/下标已由 primary 消化） */
+static Node *postfix(void) {
+    Node *n = primary();
+    for (;;) {
+        if (accept("++"))      n = post_incdec(n, ND_POST_INC);
+        else if (accept("--")) n = post_incdec(n, ND_POST_DEC);
+        else return n;
+    }
 }
 
 static Node *bin(Node *l, Node *r, int kind) {
@@ -865,6 +902,21 @@ static Node *lor(void) {
     return n;
 }
 
+/* V3b：复合赋值运算符（+= -= *= /= %=）→ 对应二元节点 kind；否则 -1。
+ * 仅在当前 token 是这些两字符运算符时命中（字面量 token 不参与，与 accept 同一禁止面）。 */
+static int compound_op(void) {
+    if (tok_is_word || tok_is_num || tok_is_str || tok_is_char) return -1;
+    if (tok[0] == '+' && tok[1] == '=') return ND_ADD;
+    if (tok[0] == '-' && tok[1] == '=') return ND_SUB;
+    if (tok[0] == '*' && tok[1] == '=') return ND_MUL;
+    if (tok[0] == '/' && tok[1] == '=') return ND_DIV;
+    if (tok[0] == '%' && tok[1] == '=') return ND_MOD;
+    return -1;
+}
+
+/* V3b：构造 ND_ASSIGN 并统一做左值/类型静态检查（`=`、复合赋值、前缀 ++/-- 共用） */
+static Node *mk_assign(Node *lv, Node *rhs);
+
 static Node *expr(void) {
     Node *n = lor();
     if (accept("=")) {
@@ -877,7 +929,36 @@ static Node *expr(void) {
             fail("type mismatch in assignment");
         return a;
     }
+    /* V3b：复合赋值 lv op= rhs → 语法糖改写为 lv = (lv op rhs)。右操作数右结合递归。 */
+    int ck = compound_op();
+    if (ck >= 0) {
+        next_tok();                     /* 消费复合赋运算符 */
+        Node *rhs = expr();             /* 右结合 */
+        Node *op = bin(n, rhs, ck);     /* lv op rhs（含指针/取模语义；bin 参数序 (l,r,kind)） */
+        return mk_assign(n, op);
+    }
     return n;
+}
+
+/* V3b：构造 ND_ASSIGN 并统一做左值/类型静态检查（`=`、复合赋值、前缀 ++/-- 共用） */
+static Node *mk_assign(Node *lv, Node *rhs) {
+    Node *a = node_new(ND_ASSIGN);
+    a->l = lv;
+    a->r = rhs;
+    if (lv->kind != ND_VAR && lv->kind != ND_DEREF && lv->kind != ND_INDEX)
+        fail("assign to non-lvalue");
+    if (!type_eq(lv->ty, lv->bty, rhs->ty, rhs->bty))
+        fail("type mismatch in assignment");
+    return a;
+}
+
+/* V3b：前缀 ++/-- → 语法糖 `++lv = lv = lv±1`。ND_ASSIGN 求值后值留在 eax（新值），
+ * 恰为前缀表达式的值。`lv±1` 用 bin(lv, 1, ADD/SUB)，注意 bin 参数序为 (l,r,kind)。 */
+static Node *prefix_incdec(Node *operand, int ck) {
+    Node *one = node_new(ND_NUM);
+    one->val = 1;               /* ND_NUM 数值存 val（gen 读 n->val），非 ival */
+    one->ty = TY_INT;
+    return mk_assign(operand, bin(operand, one, ck));
 }
 
 /* ---- 语句 ---- */
@@ -1137,6 +1218,22 @@ static void gen(Node *n) {
         gen(n->r);
         if (n->l->ty == TY_CHAR) emit_store8(); else emit_store();
         return;
+    case ND_POST_INC: /* fallthrough */
+    case ND_POST_DEC: {
+        /* 后缀 ++/--：表达式值为旧值。ebx 暂存左值地址；仅复用现有 store/load 指令，无新 emit 原语。 */
+        int width = (n->l->ty == TY_CHAR) ? 1 : 4;
+        gen_addr(n->l);            /* eax = 左值地址 */
+        emit_op("\x89\xc3");       /* mov %eax,%ebx */
+        if (width == 1) emit_op("\x0f\xb6\x03");   /* movzbl (%ebx),%eax */
+        else emit_op("\x8b\x03");                  /* mov (%ebx),%eax */
+        emit1(0x50);               /* push 旧值 */
+        if (n->kind == ND_POST_INC) emit_op("\x83\xc0\x01");  /* add $1,%eax */
+        else emit_op("\x83\xe8\x01");                          /* sub $1,%eax */
+        if (width == 1) emit_op("\x88\x03");       /* mov %al,(%ebx) */
+        else emit_op("\x89\x03");                  /* mov %eax,(%ebx) */
+        emit_op("\x58");           /* pop %eax：旧值 */
+        return;
+    }
     case ND_BITAND: gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x21\xd8"); return;
     case ND_BITOR:  gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x09\xd8"); return;
     case ND_BITXOR: gen(n->l); emit1(0x50); gen(n->r); emit_op("\x5b\x31\xd8"); return;

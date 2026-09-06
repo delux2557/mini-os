@@ -137,6 +137,20 @@ hrun t_arridx 'int main(){int a[3];a[0]=5;int i;i=1;if(a[i-1]==5)return 0;return
 hrun t_arrchar 'int main(){char s[3];s[0]=104;s[1]=105;s[2]=0;if(s[0]==104)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_arrg 'int a[2];int main(){a[0]=7;a[1]=8;return a[0]+a[1]-15;}' 0 'compiled OK' ''
 hrun t_arrptr 'int main(){int a[2];a[0]=9;int* p;p=&a[0];return *p-9;}' 0 'compiled OK' ''
+# V3b：复合赋值（+= -= *= /= %=）与前/后缀 ++/--（语法糖，运行语义见 guest/对拍）
+hrun t_cpadd 'int main(){int a;a=5;a+=7;return 0;}' 0 'compiled OK' ''
+hrun t_cpsub 'int main(){int a;a=5;a-=3;return 0;}' 0 'compiled OK' ''
+hrun t_cpmul 'int main(){int a;a=5;a*=4;return 0;}' 0 'compiled OK' ''
+hrun t_cpdiv 'int main(){int a;a=20;a/=5;return 0;}' 0 'compiled OK' ''
+hrun t_cpmod 'int main(){int a;a=17;a%=5;return 0;}' 0 'compiled OK' ''
+hrun t_cpptr 'int main(){int a[2];a[0]=5;int* p;p=&a[0];p+=1;if(*p==5)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_incpre 'int main(){int a;int b;a=5;b=++a;return 0;}' 0 'compiled OK' ''
+hrun t_decpre 'int main(){int a;int b;a=5;b=--a;return 0;}' 0 'compiled OK' ''
+hrun t_incpost 'int main(){int a;int b;a=5;b=a++;return 0;}' 0 'compiled OK' ''
+hrun t_decpost 'int main(){int a;int b;a=5;b=a--;return 0;}' 0 'compiled OK' ''
+# 非左值复合赋值/自增自减 -> 必须 FAIL（契约：静态报错，绝不出坏码）
+hrun t_cpnolval 'int main(){int a;1+=2;return 0;}' 1 'assign to non-lvalue' 'compiled OK'
+hrun t_incnolval 'int main(){int a;1++;return 0;}' 1 'increment/decrement of non-lvalue' 'compiled OK'
 
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
@@ -317,6 +331,25 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "micc /b1.c /b1.elf"
     gwait "位运算+hex 运行" "\[micc\] '/b1.elf' exited code=0 PASS" 40
     gsend "rm /b1.c"; gsend "rm /b1.elf"
+    # V3b：复合赋值 + 前/后缀 ++/-- 运行语义（纯语法糖 → lv=lv op rhs）
+    gsend "writefile /ca.c int main(){int a;a=10;a+=5;a-=3;a*=4;a/=2;a%=7;if(a==3)return 0;return 1;}"
+    gsend "micc /ca.c /ca.elf"
+    gwait "复合赋值 10+=5-=3*=4/=2%%=7==3" "\[micc\] '/ca.elf' exited code=0 PASS" 40
+    gsend "writefile /cb.c int main(){int a;int b;a=5;b=++a;if(a==6&&b==6)return 0;return 1;}"
+    gsend "micc /cb.c /cb.elf"
+    gwait "前缀 ++a 新值" "\[micc\] '/cb.elf' exited code=0 PASS" 40
+    gsend "writefile /cc.c int main(){int a;int b;a=5;b=a++;if(a==6&&b==5)return 0;return 1;}"
+    gsend "micc /cc.c /cc.elf"
+    gwait "后缀 a++ 旧值" "\[micc\] '/cc.elf' exited code=0 PASS" 40
+    gsend "writefile /cd.c int main(){int a;int b;a=5;b=--a;if(a==4&&b==4)return 0;return 1;}"
+    gsend "micc /cd.c /cd.elf"
+    gwait "前缀 --a 新值" "\[micc\] '/cd.elf' exited code=0 PASS" 40
+    gsend "writefile /ce.c int main(){int a;int b;a=5;b=a--;if(a==4&&b==5)return 0;return 1;}"
+    gsend "micc /ce.c /ce.elf"
+    gwait "后缀 a-- 旧值" "\[micc\] '/ce.elf' exited code=0 PASS" 40
+    gsend "writefile /cf.c int main(){int a[2];a[0]=5;int* p;p=&a[0];p+=1;a[1]=9;if(*p==9)return 0;return 1;}"
+    gsend "micc /cf.c /cf.elf"
+    gwait "指针 p+=1 移动" "\[micc\] '/cf.elf' exited code=0 PASS" 40
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest micc 端到端通过"
 else
