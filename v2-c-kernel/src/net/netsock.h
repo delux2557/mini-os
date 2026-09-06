@@ -10,7 +10,8 @@
 #define NET_RXMAX    2048    /* 单个数据报载荷上限（v1.1 Step 4 收尾：512->2048，
                                使转发器分块的 ≤1400B 会话数据报不被 dispatch 静默截断） */
 #define NET_RXQ      8      /* 每 socket 待收队列深度（v1.2 BUG-047 收尾：可靠下行改 stop-and-wait，
-                               每会话在途恒 1 报，环有效 7 足够；不必大环抗 burst） */
+                               每会话在途恒 1 报，环有效 7 足够；v1.4 下行滑动窗口 ≤8 报/窗，ring 浸盈
+                               由窗口超时重传自愈，不必大环抗 burst） */
 
 typedef struct {
     int      used;
