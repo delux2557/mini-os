@@ -170,6 +170,30 @@ hrun t_arrhex 'int g[0x10];int main(){g[15]=7;return 0;}' 0 'compiled OK' ''
 hrun t_arrhexbad 'int main(){int a[0xG];return 0;}' 1 'bad number' 'compiled OK'
 hrun t_arrhexempty 'int main(){int a[0x];return 0;}' 1 'bad number' 'compiled OK'
 
+echo "== [2b3] 外部审计 MC-08/09 回归：类型收口 + 落尾告警 + 深度守卫 =="
+# MC-08#1：char 函数返回类型须保留（旧实现抹平为 TY_INT → 调用点当 int，`int* p=cf()` 被
+#   "int→ptr 放宽"错接住）——正常情况下 `char cf()` 调用不得 type mismatch，必须 compiled OK
+hrun t_charrc 'char cf(){char c;c=200;return c;}int main(){char v;v=cf();return v;}' 0 'compiled OK' ''
+# MC-08#1：int* p = char 函数结果仍须按类型拒绝（返回类型保留后正确报 type mismatch）
+hrun t_charrcmis 'char cf(){char c;c=200;return c;}int main(){int* p;p=cf();return 0;}' 1 'type mismatch' 'compiled OK'
+# MC-08#2：函数落尾无 return → 告警 control reaches end，且不得误伤（仍 compiled OK）
+# （不设 mustn='compiled OK'：落尾告警本就伴随成功编译，二者共存属预期）
+hrun t_fallret 'int f(){int x;x=3;}int main(){return 0;}' 0 'control reaches end' ''
+# MC-08#2：正常以 return 收尾的函数不得误报
+hrun t_okret 'int f(){int x;x=3;return x;}int main(){return 0;}' 0 'compiled OK' ''
+# MC-08#2：while(1){...return} 无限循环惯用法不得误报（ends_in_ret 视其为不落尾）
+hrun t_while1ret 'int f(){while(1){return 3;}}int main(){return 0;}' 0 'compiled OK' ''
+# MC-08#3：main 带形参 → 必须 FAIL + main takes no arguments（入口 stub 恒 0 参 call main）
+hrun t_mainarg 'int main(int argc){return 0;}' 1 'main takes no arguments' 'compiled OK'
+# MC-08#3：main() 正常零参不误伤
+hrun t_main0 'int main(){return 0;}' 0 'compiled OK' ''
+# MC-09：深表达式嵌套须受控报错 expression nesting too deep（旧实现递归打爆 28KB guest 栈 → SIGSEGV）
+hrun t_deepnest 'int main(){int a;a=((((((((((((((((((((((((((((((1)))))))))))))))))))))))))));return a-1;}' 1 'expression nesting too deep' 'compiled OK'
+# MC-09：深语句块嵌套须受控报错 statement nesting too deep（>STMT_DEPTH_MAX=128 触发）
+hrun t_deepblk "int main(){int a;a=0;$(printf '{%.0s' $(seq 1 140))a=a+1;$(printf '}%.0s' $(seq 1 140))return a;}" 1 'statement nesting too deep' 'compiled OK'
+# MC-09：普通嵌套（< 上限）不得误伤，仍 compiled OK
+hrun t_deepnest_ok 'int main(){int a;a=((((((((1))))))));return a-1;}' 0 'compiled OK' ''
+
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
 # 注意源码含 % 与 ;，printf 须用 '%s' 格式防格式串解析

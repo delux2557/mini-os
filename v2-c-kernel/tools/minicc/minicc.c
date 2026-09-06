@@ -65,6 +65,17 @@
 #define LAB_MAX 4096
 #define TOK_MAX 256                 /* V2c：字符串字面量上限 254 字节（含解码） */
 
+/* MC-09 递归深度守卫 × guest 用户栈仅 28KB（src/mm/mem.h USER_STACK_SLOT 32KB - GURD 4KB）：
+ * 合法/畸形深表达式会让解析与 codegen 的递归打爆编译器自身栈（SIGSEGV，无编译期诊断）。
+ * 限幅按 28KB 预算反推（repro.sh MC-09：括号≥45 即崩、加法链≥1000 即崩）留出安全余量：
+ *   - EXPR_DEPTH_MAX 32  表达式/操作数嵌套（括号、一元链：primary 括号分支 + unary 入口）
+ *   - STMT_DEPTH_MAX 128 语句/块嵌套（block_stmt 入口）
+ *   - GEN_DEPTH_MAX  256 codegen AST 深度（深括号或长链，gen/gen_stmt 入口）
+ * 超限一律 fail("expression nesting too deep") / fail("statement nesting too deep") 受控报错。 */
+#define EXPR_DEPTH_MAX 32
+#define STMT_DEPTH_MAX 128
+#define GEN_DEPTH_MAX  256
+
 typedef struct {
     char name[32];
     int kind;
@@ -118,6 +129,8 @@ typedef struct {
     int loop_brk[32][64]; int loop_brk_n[32];
     int loop_cont[32][64]; int loop_cont_n[32];
     int nloop;
+    /* MC-09 递归深度计数器：解析（edepth/sdepth）与 codegen（gdepth）各自守卫，超限受控报错 */
+    int edepth, sdepth, gdepth;
     /* 字符串池 */
     unsigned char *strpool; int nstrpool, strpool_cap, strpool_base;
     /* AST 链表 */
@@ -663,6 +676,11 @@ static int type_eq(int t1, int b1, int t2, int b2) {
 /* ================= 语法分析（建树） ================= */
 
 static Node *expr(void);
+/* MC-09 深度守卫 wrappers 前向声明（被定义其前的递归体引用，不可缺失） */
+static Node *unary(void);
+static Node *primary(void);
+static Node *block_stmt(void);
+static void gen_stmt(Node *n);
 
 /* 字符串池（V2c）：字面量解码字节线性累积，codegen 时整体 emit 进数据段（只读）。
  * strpool_base：池在 code 缓冲内的起始偏移（ELF 头 95 字节之后），ND_STR 寻址用。
@@ -728,6 +746,9 @@ static Node *primary(void) {
             if (si >= 0 && syms[si].kind != K_FUNC) fail("call to non-function");
             if (si < 0) sym_add(name, K_FUNC, TY_INT, 0, 0, -1);   /* 隐式声明 */
             n->val = si < 0 ? nsym - 1 : si;         /* 符号下标 */
+            /* MC-08#1：调用点类型 = 函数返回类型（旧实现恒 TY_INT，char 返回被抹平） */
+            n->ty = syms[n->val].ty;
+            n->bty = (syms[n->val].ty == TY_PTR) ? syms[n->val].bty : 0;
             expect("(");
             Node *head = NULL, **tail = &head;
             while (!is_sym(")")) {
@@ -779,7 +800,7 @@ static Node *primary(void) {
 static Node *prefix_incdec(Node *operand, int ck);   /* V3b 前置声明（相互递归） */
 static Node *postfix(void);
 
-static Node *unary(void) {
+static Node *unary_inner(void) {
     if (accept("++")) {                 /* V3b：前缀 ++lv → 语法糖 lv = lv+1（值=新值） */
         return prefix_incdec(unary(), ND_ADD);
     }
@@ -819,6 +840,14 @@ static Node *unary(void) {
         return n;
     }
     return postfix();
+}
+
+/* MC-09 守卫 wrapper：一元链（-、!、~、*、&、++/-- 前缀）每重嵌套 +1，与 expr 共享 edepth */
+static Node *unary(void) {
+    if (cc.edepth++ >= EXPR_DEPTH_MAX) fail("expression nesting too deep");
+    Node *r = unary_inner();
+    cc.edepth--;
+    return r;
 }
 
 /* V3b：后缀 ++/-- 构造 ND_POST_INC / ND_POST_DEC（表达式值为旧值，见 gen()）。
@@ -949,7 +978,7 @@ static int compound_op(void) {
 /* V3b：构造 ND_ASSIGN 并统一做左值/类型静态检查（`=`、复合赋值、前缀 ++/-- 共用） */
 static Node *mk_assign(Node *lv, Node *rhs);
 
-static Node *expr(void) {
+static Node *expr_inner(void) {
     Node *n = lor();
     if (accept("=")) {
         Node *a = node_new(ND_ASSIGN);
@@ -970,6 +999,14 @@ static Node *expr(void) {
         return mk_assign(n, op);
     }
     return n;
+}
+
+/* MC-09 守卫 wrapper：括号/赋值右结合/复合赋右操作数每重嵌套 +1，>EXPR_DEPTH_MAX 受控报错 */
+static Node *expr(void) {
+    if (cc.edepth++ >= EXPR_DEPTH_MAX) fail("expression nesting too deep");
+    Node *r = expr_inner();
+    cc.edepth--;
+    return r;
 }
 
 /* V3b：构造 ND_ASSIGN 并统一做左值/类型静态检查（`=`、复合赋值、前缀 ++/-- 共用） */
@@ -998,7 +1035,7 @@ static Node *prefix_incdec(Node *operand, int ck) {
 
 static Node *stmt(void);
 
-static Node *block_stmt(void) {
+static Node *block_stmt_inner(void) {
     int mark = nsym;
     Node *head = NULL, **tail = &head;
     while (!is_sym("}")) {
@@ -1011,6 +1048,14 @@ static Node *block_stmt(void) {
     Node *n = node_new(ND_BLOCK);
     n->a = head;
     return n;
+}
+
+/* MC-09 守卫 wrapper：语句块嵌套（{...} 内含 {...}）每层 +1，>STMT_DEPTH_MAX 受控报错 */
+static Node *block_stmt(void) {
+    if (cc.sdepth++ >= STMT_DEPTH_MAX) fail("statement nesting too deep");
+    Node *r = block_stmt_inner();
+    cc.sdepth--;
+    return r;
 }
 
 static Node *stmt(void) {
@@ -1104,6 +1149,33 @@ static Node *stmt(void) {
 /* ---- 程序（全局声明 + 函数定义） ---- */
 /* （funcs / funcs_tail / gvars / gvars_tail 已收进顶部 CC 上下文，见文件头） */
 
+/* MC-08#2 落尾可达性：语句 s 是否保证以 return 收尾（不落到函数末尾）？
+ * 近似（保守）：BLOCK 看最后一条、IF 双分支皆 return 才成立；while(字面量非零)/for(;;) 近似无限
+ * 循环视为不落到末尾（mul/add 等 `while(1){...else return}` 惯用法不应报假告警）；其余视为可落到末尾。 */
+static int ends_in_ret(Node *s) {
+    if (!s) return 0;
+    if (s->kind == ND_RET) return 1;
+    if (s->kind == ND_BLOCK) {
+        Node *last = s->a;
+        if (!last) return 0;
+        while (last->next) last = last->next;
+        return ends_in_ret(last);
+    }
+    if (s->kind == ND_IF)
+        return s->b && ends_in_ret(s->r) && ends_in_ret(s->b);
+    if (s->kind == ND_WHILE) {
+        Node *c = s->l;         /* while(l) body=r */
+        if (c && c->kind == ND_NUM && c->val != 0) return 1;   /* 字面量非零条件 ≈ 永不落尾 */
+        return 0;
+    }
+    if (s->kind == ND_FOR) {
+        Node *c = s->r;         /* for(init;r;step) body=b，条件空 = for(;;) */
+        if (c == NULL || (c->kind == ND_NUM && c->val != 0)) return 1;
+        return 0;
+    }
+    return 0;
+}
+
 static void parse_program(void) {
     for (;;) {
         if (tok[0] == 0) return;
@@ -1120,8 +1192,13 @@ static void parse_program(void) {
             int si = sym_find(name);
             if (si >= 0) {
                 if (syms[si].kind != K_FUNC || syms[si].val >= 0) fail("redefined");
+                /* MC-08#1：先前隐式声明（调用先于定义）带 TY_INT，真定义来了补写真实返回类型 */
+                syms[si].ty = ty;
+                syms[si].bty = (ty == TY_PTR) ? bty_top : 0;
             } else {
-                si = sym_add(name, K_FUNC, TY_INT, 0, 0, -1);
+                /* MC-08#1：返回类型不再抹平为 TY_INT（旧实现 decl_type 的返回值被丢弃，
+                 * 使 `char cf()` 在调用点被当 int → "int→ptr 放宽"错接住 `int* p=cf()`）。 */
+                si = sym_add(name, K_FUNC, ty, bty_top, 0, -1);
             }
             Node *fn = node_new(ND_FUNC);
             s_cpy(fn->name, name);
@@ -1149,8 +1226,18 @@ static void parse_program(void) {
             expect(")");
             fn->nargs = cur_nargs;
             fn->a = params;
+            /* MC-08#3：入口 stub 是 `call main` 不带参，main 带形参时 argc 读到垃圾/0（与 gcc 参考差 1 位），
+             * 用户无从知晓 —— 宁拒不坑（契约：main() 固定无参）。 */
+            if (s_eq(fn->name, "main") && cur_nargs > 0)
+                fail("main takes no arguments");
             if (!accept("{")) fail("expected function body");
             fn->b = block_stmt();
+            /* MC-08#2：落尾可达 return 检查（非致命告警，不中断编译；与 -Wreturn-type 精神一致） */
+            if (!ends_in_ret(fn->b)) {
+                sys_print("minicc: warning: function '");
+                sys_print(fn->name);
+                sys_print("' control reaches end of function without return (returns residual eax)\n");
+            }
             fn->nlocals = cur_frame;    /* 帧大小（字节） */
             nsym = func_scope;
             *funcs_tail = fn; funcs_tail = &fn->next;
@@ -1226,7 +1313,7 @@ static void gen_addr(Node *n) {
     fail("assign to non-lvalue");
 }
 
-static void gen(Node *n) {
+static void gen_inner(Node *n) {
     switch (n->kind) {
     case ND_NUM: emit_mov_imm(n->val); return;
     case ND_STR:
@@ -1338,6 +1425,13 @@ static void gen(Node *n) {
     }
 }
 
+/* MC-09 守卫 wrapper：codegen 随 AST 深度递归（深括号或长加法链都汇聚于此），>GEN_DEPTH_MAX 受控报错 */
+static void gen(Node *n) {
+    if (cc.gdepth++ >= GEN_DEPTH_MAX) fail("expression nesting too deep");
+    gen_inner(n);
+    cc.gdepth--;
+}
+
 /* ================= 循环 break/continue 目标栈 =================
  * 进入循环时 loop_enter；body 内 break/continue 各自记下一个"正向 E9（占位 rel=0）"的
  * code 位置；循环收尾用 loop_patch_break(出口)/loop_patch_continue(续点) 批量回填。
@@ -1349,7 +1443,7 @@ static void loop_cont_add(void){ int i=cc.nloop-1; if(cc.loop_cont_n[i]>=64) fai
 static void loop_patch_break(int target){ int i=cc.nloop-1; for(int j=0;j<cc.loop_brk_n[i];j++){ int p=cc.loop_brk[i][j]; save32(p+1, target-(p+5)); } }
 static void loop_patch_continue(int target){ int i=cc.nloop-1; for(int j=0;j<cc.loop_cont_n[i];j++){ int p=cc.loop_cont[i][j]; save32(p+1, target-(p+5)); } }
 
-static void gen_stmt(Node *n) {
+static void gen_stmt_inner(Node *n) {
     switch (n->kind) {
     case ND_EXPR_STMT: gen(n->l); return;
     case ND_BLOCK:
@@ -1438,6 +1532,13 @@ static void gen_stmt(Node *n) {
     default:
         fail("internal: bad stmt node");
     }
+}
+
+/* MC-09 守卫 wrapper：gen_stmt 随语句嵌套（BLOCK/IF/循环）递归，与 gen 共享 gdepth */
+static void gen_stmt(Node *n) {
+    if (cc.gdepth++ >= GEN_DEPTH_MAX) fail("expression nesting too deep");
+    gen_stmt_inner(n);
+    cc.gdepth--;
 }
 
 /* 全局数据（ND_GVAR）：emit 变量字节（数组 0 填充；标量回写初值），登记符号偏移 */

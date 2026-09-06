@@ -74,6 +74,13 @@ int ND_INDEX = 28;
 int ND_EXPR_STMT = 29; int ND_BLOCK = 30; int ND_IF = 31; int ND_WHILE = 32; int ND_FOR = 33; int ND_RET = 34;
 int ND_DECL = 35; int ND_FUNC = 36; int ND_GVAR = 37;
 
+/* MC-09 递归深度守卫（与 host minicc.c 同步；guest 用户栈仅 28KB，超限受控报错非 SIGSEGV）：
+ *   EXPR_DEPTH_MAX 32  表达式/操作数嵌套（expr/unary 入口）
+ *   STMT_DEPTH_MAX 128 语句/块嵌套（block_stmt 入口）
+ *   GEN_DEPTH_MAX  256 codegen AST 深度（gen/gen_stmt 入口） */
+int EXPR_DEPTH_MAX = 32; int STMT_DEPTH_MAX = 128; int GEN_DEPTH_MAX = 256;
+int edepth; int sdepth; int gdepth;
+
 int print_num(int v) {
     char buf[16]; int bi = 0; int i;
     if (v < 0) { sys_print("-"); v = 0 - v; }
@@ -542,6 +549,9 @@ int primary() {
             if (si < 0) sym_add(noff, K_FUNC, TY_INT, 0, 0, -1);
             nval[n] = si;
             if (si < 0) nval[n] = nsym - 1;
+            /* MC-08#1：调用点类型 = 函数返回类型（旧实现恒 TY_INT，char 返回被抹平） */
+            nty[n] = sty[nval[n]];
+            if (sty[nval[n]] == TY_PTR) nbty[n] = sbty[nval[n]]; else nbty[n] = 0;
             next_tok();
             int head = 0; int tail = 0;
             while (is_sym_s(")") == 0) {
@@ -585,7 +595,7 @@ int primary() {
     return 0;
 }
 
-int unary() {
+int unary_inner() {
     if (accept_s("-")) {
         int n = node_new(ND_NEG);
         nl[n] = unary();
@@ -618,6 +628,15 @@ int unary() {
         return n;
     }
     return primary();
+}
+
+/* MC-09 守卫 wrapper：一元链（-、!、~、*、&）每重嵌套 +1，与 expr 共享 edepth */
+int unary() {
+    if (edepth >= EXPR_DEPTH_MAX) fail("expression nesting too deep");
+    edepth = edepth + 1;
+    int r = unary_inner();
+    edepth = edepth - 1;
+    return r;
 }
 
 int bin(int l, int r, int kind) {
@@ -709,7 +728,7 @@ int lor() {
     return n;
 }
 
-int expr() {
+int expr_inner() {
     int n = lor();
     if (accept_s("=")) {
         int a = node_new(ND_ASSIGN);
@@ -723,7 +742,16 @@ int expr() {
     return n;
 }
 
-int block_stmt() {
+/* MC-09 守卫 wrapper：括号/赋值右结合每重嵌套 +1，>EXPR_DEPTH_MAX 受控报错（与 unary 共享 edepth） */
+int expr() {
+    if (edepth >= EXPR_DEPTH_MAX) fail("expression nesting too deep");
+    edepth = edepth + 1;
+    int r = expr_inner();
+    edepth = edepth - 1;
+    return r;
+}
+
+int block_stmt_inner() {
     int mark = nsym;
     int head = 0; int tail = 0;
     while (is_sym_s("}") == 0) {
@@ -737,6 +765,15 @@ int block_stmt() {
     int n = node_new(ND_BLOCK);
     na[n] = head;
     return n;
+}
+
+/* MC-09 守卫 wrapper：语句块嵌套（{...} 内含 {...}）每层 +1，>STMT_DEPTH_MAX 受控报错 */
+int block_stmt() {
+    if (sdepth >= STMT_DEPTH_MAX) fail("statement nesting too deep");
+    sdepth = sdepth + 1;
+    int r = block_stmt_inner();
+    sdepth = sdepth - 1;
+    return r;
 }
 
 int stmt() {
@@ -809,6 +846,37 @@ int stmt() {
 
 int funcs; int funcs_tail; int gvars; int gvars_tail;
 
+/* MC-08#2 落尾可达性（与 host minicc.c 同步近似）：BLOCK 看最后一条、IF 双分支皆 return 才成立；
+ * while(字面量非零)/for(;;) 近似无限循环不落到末尾（mul/add 等 `while(1){...else return}` 不报假告警）；
+ * 其余视为可落到末尾 → 命中 1 不回告警，未命中 0 则函数可能 control reaches end（残留 eax）。 */
+int ends_in_ret(int s) {
+    if (s == 0) return 0;
+    if (nkind[s] == ND_RET) return 1;
+    if (nkind[s] == ND_BLOCK) {
+        int last = na[s];
+        if (last == 0) return 0;
+        while (nnext[last] != 0) last = nnext[last];
+        return ends_in_ret(last);
+    }
+    if (nkind[s] == ND_IF) {
+        if (nb[s] == 0) return 0;
+        if (ends_in_ret(nr[s]) != 0 && ends_in_ret(nb[s]) != 0) return 1;
+        return 0;
+    }
+    if (nkind[s] == ND_WHILE) {
+        int c = nl[s];              /* while(l) body=r */
+        if (c != 0 && nkind[c] == ND_NUM && nval[c] != 0) return 1;
+        return 0;
+    }
+    if (nkind[s] == ND_FOR) {
+        int c = nr[s];              /* for(init;r;step) body=b，条件空 = for(;;) */
+        if (c == 0) return 1;
+        if (nkind[c] == ND_NUM && nval[c] != 0) return 1;
+        return 0;
+    }
+    return 0;
+}
+
 int parse_program() {
     while (1) {
         if (tok[0] == 0) return 0;
@@ -823,8 +891,13 @@ int parse_program() {
             int si = sym_find(noff);
             if (si >= 0) {
                 if (skind[si] != K_FUNC || sval[si] >= 0) fail("redefined");
+                /* MC-08#1：先前隐式声明带 TY_INT，真定义补写真实返回类型 */
+                sty[si] = ty;
+                if (ty == TY_PTR) sbty[si] = bty_top; else sbty[si] = 0;
             } else {
-                si = sym_add(noff, K_FUNC, TY_INT, 0, 0, -1);
+                /* MC-08#1：返回类型不再抹平为 TY_INT（decl_type 返回值被丢弃，
+                 * 使 `char cf()` 在调用点当 int → "int→ptr 放宽"错接住 `int* p=cf()`） */
+                si = sym_add(noff, K_FUNC, ty, bty_top, 0, -1);
             }
             int fn = node_new(ND_FUNC);
             nival[fn] = noff;
@@ -854,8 +927,16 @@ int parse_program() {
             expect_s(")");
             nnargs[fn] = cur_nargs;
             na[fn] = params;
+            /* MC-08#3：入口 stub 是 `call main` 不带参，main 带形参时 argc 读垃圾/0（与 gcc 参考差 1 位），宁拒不坑 */
+            if (seq(noff, "main") != 0 && cur_nargs > 0) fail("main takes no arguments");
             if (accept_s("{") == 0) fail("expected function body");
             nb[fn] = block_stmt();
+            /* MC-08#2：落尾可达 return 检查（非致命告警，不中断编译；与 -Wreturn-type 精神一致） */
+            if (ends_in_ret(nb[fn]) == 0) {
+                sys_print("minicc: warning: function '");
+                sys_print(&strtab[nival[fn]]);
+                sys_print("' control reaches end of function without return (returns residual eax)\n");
+            }
             nnlocals[fn] = cur_frame;
             nsym = func_scope;
             if (funcs == 0) funcs = fn; else nnext[funcs_tail] = fn;
@@ -934,7 +1015,7 @@ int gen_addr(int n) {
     return 0;
 }
 
-int gen(int n) {
+int gen_inner(int n) {
     if (nkind[n] == ND_NUM) { emit_mov_imm(nval[n]); return 0; }
     if (nkind[n] == ND_STR) {
         emit_mov_imm(CODE_BASE + strpool_base + nival[n]);
@@ -1031,7 +1112,16 @@ int gen(int n) {
     return 0;
 }
 
-int gen_stmt(int n) {
+/* MC-09 守卫 wrapper：codegen 随 AST 深度递归（深括号或长加法链），>GEN_DEPTH_MAX 受控报错 */
+int gen(int n) {
+    if (gdepth >= GEN_DEPTH_MAX) fail("expression nesting too deep");
+    gdepth = gdepth + 1;
+    gen_inner(n);
+    gdepth = gdepth - 1;
+    return 0;
+}
+
+int gen_stmt_inner(int n) {
     if (nkind[n] == ND_EXPR_STMT) { gen(nl[n]); return 0; }
     if (nkind[n] == ND_BLOCK) {
         int s = na[n];
@@ -1086,6 +1176,15 @@ int gen_stmt(int n) {
     }
     sys_print("badstmt kind="); print_num(nkind[n]); sys_print(" n="); print_num(n); sys_print("\n");
     fail("internal: bad stmt node");
+    return 0;
+}
+
+/* MC-09 守卫 wrapper：gen_stmt 随语句嵌套递归，与 gen 共享 gdepth */
+int gen_stmt(int n) {
+    if (gdepth >= GEN_DEPTH_MAX) fail("expression nesting too deep");
+    gdepth = gdepth + 1;
+    gen_stmt_inner(n);
+    gdepth = gdepth - 1;
     return 0;
 }
 
