@@ -25,15 +25,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# QEMU 满载（Layers 工作流 15+ layer 并行竞抢）下，guest 内"编译 + 执行用户产物"
-# 是最耗时的敏感步骤，8s 默认超时在层载下偏紧 → 单测 flaky 实为时序假失败
-# （#120 核查：本地单 QEMU 全绿，CI 满载仅此步 8s 超时）。
-# 与 test_serial.sh 同源：它的 wait_for 默认已升 20s（同因 CI 负载 8s 偶发 flake），
-# 此处一并统一默认 20s，并对编译/执行/重启段以 TMO_BUILD=45 放宽。
+# QEMU 满载（Layers 工作流 22 job 并行 qemu TCG 争用）下，guest 串口输出迟到，
+# mid-test 等待若用窄基准会落在超时窗外 → 时序 flaky（非编译器回归；#120 核查本地单 QEMU 全绿）。
+# 项目对 TCG 敏感等待的标准是 20s（test_miccboot.sh / boot 级等待已显式 20s），此处统一默认 20s；
+# 并对 guest 内"编译+执行产物、重启加载"等最耗时步骤以 TMO_BUILD=45 额外放宽。
 TMO_BUILD=45
 
 wait_for() {   # wait_for <日志> <说明> <正则> [超时秒]
-    local log="$1" desc="$2" re="$3" tmo="${4:-20}" i
+    local log="$1" desc="$2" re="$3" tmo="${4:-20}" i  # 默认 20s：并行 job 串口争用，窄基准会 flake
     for ((i = 0; i < tmo * 4; i++)); do
         grep -aq "$re" "$log" 2>/dev/null && { echo "[ok]   $desc"; return 0; }
         sleep 0.25
