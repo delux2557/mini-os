@@ -26,7 +26,7 @@ cleanup() {
 trap cleanup EXIT
 
 wait_for() {   # wait_for <日志> <说明> <正则> [超时秒]
-    local log="$1" desc="$2" re="$3" tmo="${4:-8}" i
+    local log="$1" desc="$2" re="$3" tmo="${4:-20}" i   # TCG 下并行 job 争用串口，时序基准统一 20s
     for ((i = 0; i < tmo * 4; i++)); do
         grep -aq "$re" "$log" 2>/dev/null && { echo "[ok]   $desc"; return 0; }
         sleep 0.25
