@@ -43,6 +43,7 @@ int toklen; int tok_is_word; int tok_is_num; int tok_is_str; int tok_is_char;
 
 int SYM_MAX = 256; int PATCH_MAX = 2048; int LAB_MAX = 2048;
 int skind[256]; int sty[256]; int sbty[256]; int slen[256]; int sval[256]; int sname[256];
+int snargs[256]; /* FUNC 形参个数（未知=-1）——MC-04 arity 收敛（minicc.c FIX-G 同步） */
 int nsym;
 int pk[2048]; int ppos[2048]; int pname[2048];
 int npatch;
@@ -127,6 +128,10 @@ int seq(int off, char* s) {     /* strtab[off] 与字面量相等 */
 }
 
 int stradd(char* s) {           /* 拷贝入名字池，返回偏移 */
+    /* 有意架构差异（勿当 FIX-D 遗漏）：与 host 完整版 minicc.c 的 `char name[32]`（每符号定长大数组，
+     * MC-02 要求词法拒绝 >31 字符标识符）不同，本自举版把名字统一拷入共享 strtab[20480] 名字池，无
+     * 每符号固定大小数组，故 MC-02（写穿 name[32]）在结构上不适用、无需 identifier too long 检查。
+     * host/guest 因此对 >31 字符标识符的接受性不同，属预期的行为分叉而非回归。 */
     int off = nstr;
     int i = 0;
     while (*(s+i)) { strtab[nstr] = *(s+i); nstr = nstr + 1; i = i + 1; }
@@ -252,6 +257,7 @@ int next_tok() {
             if (peek() == '_' || (peek() >= '0' && peek() <= '9') ||
                 (peek() >= 'a' && peek() <= 'z') || (peek() >= 'A' && peek() <= 'Z'))
                 fail("bad number");
+            if (n == 2) fail("empty hex literal");   /* FIX-E（同步）：0x 后无十六进制位 */
             toklen = n; tok_is_num = 1;
             return;
         }
@@ -262,6 +268,8 @@ int next_tok() {
             else more = 0;
         }
         tok[n] = 0;
+        /* FIX-E（同步）：minicc 不支持八进制，`010` 按十进制会被静默解成 10（C 应为 8）。拒绝前导 0 多位数字形态。 */
+        if (tok[0] == '0' && tok[1] != 0) fail("octal literals not supported");
         if (peek() == '_' || (peek() >= 'a' && peek() <= 'z') ||
             (peek() >= 'A' && peek() <= 'Z'))
             fail("bad number");
@@ -346,6 +354,7 @@ int sym_add(int noff, int kind, int ty, int bty, int len, int val) {
     if (nsym >= SYM_MAX) fail("symbol table full");
     sname[nsym] = noff; skind[nsym] = kind; sty[nsym] = ty;
     sbty[nsym] = bty; slen[nsym] = len; sval[nsym] = val;
+    if (kind == K_FUNC) snargs[nsym] = -1; else snargs[nsym] = 0;   /* FUNC 形参个数未知；其余无意义 */
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -553,6 +562,15 @@ int primary() {
             }
             next_tok();
             na[n] = head;
+            /* FIX-G（同步）：实参/形参个数一致性。已定义→直接比对；未定义→记录/比对，留待定义处核对。 */
+            int fidx = nval[n];
+            if (sval[fidx] >= 0) {
+                if (nnargs[n] != snargs[fidx]) fail("arg count mismatch");
+            } else if (snargs[fidx] >= 0) {
+                if (nnargs[n] != snargs[fidx]) fail("arg count mismatch");
+            } else {
+                snargs[fidx] = nnargs[n];
+            }
             return n;
         }
         int si = sym_find(noff);
@@ -853,6 +871,10 @@ int parse_program() {
             }
             expect_s(")");
             nnargs[fn] = cur_nargs;
+            /* FIX-G（同步）：定义处交叉核对先前同名调用记录的实参个数 */
+            if (snargs[si] >= 0 && snargs[si] != cur_nargs)
+                fail("arg count mismatch");
+            snargs[si] = cur_nargs;      /* 固化形参个数 */
             na[fn] = params;
             if (accept_s("{") == 0) fail("expected function body");
             nb[fn] = block_stmt();
@@ -1192,6 +1214,8 @@ int main() {
         return 1;
     }
     src_pos = 0; src_len = in_len;
+    { int i = 0; while (i < src_len) {      /* FIX-F（同步）：拒绝源码中的原始 NUL 字节 */
+        if ((*(in + i) & 255) == 0) fail("NUL byte in source"); i = i + 1; } }
     next_tok();
     parse_program();
     if (tok[0] != 0) fail("unexpected token");
