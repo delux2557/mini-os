@@ -609,6 +609,32 @@ int unary_expr()
   return postfix_expr();
 }
 
+/* ---- 教学里程碑 M3：乘法/除法/取模 * / %（2026-09-06）----
+ * 标准 C 优先级：unary > multiplicative > additive。乘除模共用 idiv 路径：
+ * 商在 eax、余数在 edx（% 用 mov %edx,%eax 取余）。C99 语义：商向零截断、
+ * 余数符号随被除数（x86 idiv 天然一致，与 minicc/gcc 同口径）。
+ * 教学点：除零与 INT_MIN/-1 属 UB（不产陷阱，与宿主 C 一致，由使用者负责）。 */
+int multiplicative_expr()
+{
+  int type = unary_expr();
+  while (1) {
+    if (accept("*")) {
+      binary1(type); /* pop %ebx ; imul %ebx,%eax */
+      type = binary2(unary_expr(), 4, "\x5b\x0f\xaf\xc3");
+    }
+    else if (accept("/")) {
+      binary1(type); /* pop %ebx ; xchg %eax,%ebx ; cdq ; idiv %ebx */
+      type = binary2(unary_expr(), 6, "\x5b\x87\xd8\x99\xf7\xfb");
+    }
+    else if (accept("%")) {
+      binary1(type); /* idiv 后取余数：mov %edx,%eax */
+      type = binary2(unary_expr(), 8, "\x5b\x87\xd8\x99\xf7\xfb\x89\xd0");
+    }
+    else
+      return type;
+  }
+}
+
 /*
  * additive-expr:
  *         postfix-expr
@@ -617,15 +643,15 @@ int unary_expr()
  */
 int additive_expr()
 {
-  int type = unary_expr();
+  int type = multiplicative_expr();
   while (1) {
     if (accept("+")) {
       binary1(type); /* pop %ebx ; add %ebx,%eax */
-      type = binary2(unary_expr(), 3, "\x5b\x01\xd8");
+      type = binary2(multiplicative_expr(), 3, "\x5b\x01\xd8");
     }
     else if (accept("-")) {
       binary1(type); /* pop %ebx ; sub %eax,%ebx ; mov %ebx,%eax */
-      type = binary2(unary_expr(), 5, "\x5b\x29\xc3\x89\xd8");
+      type = binary2(multiplicative_expr(), 5, "\x5b\x29\xc3\x89\xd8");
     }
     else
       return type;
@@ -1091,14 +1117,14 @@ int open_input()
     p = in_path;
   if (syscall3(14, 1, p, 0) != 0)            /* SYS_FS_OPEN slot1 只读 */
     return 0 - 1;
-  in_data = malloc(32768);
+  in_data = malloc(65536);
   if (in_data == (0 - 1))
     return 0 - 1;
   in_len = 0;
   done = 0;
   full = 0;
   while (done == 0) {
-    if (32768 <= in_len) { done = 1; full = 1; }  /* 缓冲满 */
+    if (65536 <= in_len) { done = 1; full = 1; }  /* 缓冲满 */
     else {
       n = syscall3(16, 1, in_data + in_len, 4096);   /* SYS_FS_READ slot1 */
       if (n <= 0) done = 1;
@@ -1109,7 +1135,7 @@ int open_input()
     n = syscall3(16, 1, in_data, 1);         /* 探 1 字节：>0 说明被截断 */
     if (n != 0) {                            /* 显式报错，而非静默编半个文件 */
       syscall3(17, 1, 0, 0);
-      sys_print("cc500: input too big (>32KB)\x0a");
+      sys_print("cc500: input too big (>64KB)\x0a");
       return 0 - 1;
     }
   }

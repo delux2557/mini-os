@@ -77,6 +77,10 @@ hrun t_neg_ok 'int main(){int x;x=5;x=-x;return x;}' 0 'compiled OK' ''
 hrun t_not_ok 'int main(){int x;x=0;x=!x;return x;}' 0 'compiled OK' ''
 hrun t_bnot_ok 'int main(){int x;x=5;x=~x;return x;}' 0 'compiled OK' ''
 hrun t_xor_ok 'int main(){int x;x=5;x=x^3;return x;}' 0 'compiled OK' ''
+# M3：乘/除/模与优先级（语义在 [3/4] guest 段运行断言；此处先证编译路径与优先级解析可用）
+hrun t_mul_ok 'int main(){int x;x=7*6;return x;}' 0 'compiled OK' ''
+hrun t_divmod_ok 'int main(){int x;x=17/5;x=17%5;return x;}' 0 'compiled OK' ''
+hrun t_prec_ok 'int main(){int x;x=2+3*4;x=(2+3)*4;return x;}' 0 'compiled OK' ''
 # OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
 # 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
 # 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
@@ -164,6 +168,16 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tbit.c /tbit.elf"
     gwait "guest M2 ^/~ 编译" "cc500: compiled OK" 60
     gwait "guest M2 ^/~ exit0" "'/tbit.elf' exited code=0 PASS" 90
+    # M3：乘/除/模语义——7*6==42 且 17/5==3 且 17%5==2（C99 截断向零/余数随被除数）
+    gsend 'writefile /tmul.c int main(){int x;int y;x=7*6;y=17/5;if(x==42)if(y==3)if(17%5==2)return 0;return 1;}'
+    gsend "ccrun /tmul.c /tmul.elf"
+    gwait "guest M3 乘除模 编译" "cc500: compiled OK" 60
+    gwait "guest M3 42/3/2 exit0" "'/tmul.elf' exited code=0 PASS" 90
+    # M3：优先级语义——2+3*4==14（multiplicative 高于 additive）与 (2+3)*4==20
+    gsend 'writefile /tpre.c int main(){int x;int y;x=2+3*4;y=(2+3)*4;if(x==14)if(y==20)return 0;return 1;}'
+    gsend "ccrun /tpre.c /tpre.elf"
+    gwait "guest M3 优先级 编译" "cc500: compiled OK" 60
+    gwait "guest M3 14/20 exit0" "'/tpre.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
