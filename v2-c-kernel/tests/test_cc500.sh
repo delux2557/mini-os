@@ -81,6 +81,18 @@ hrun t_xor_ok 'int main(){int x;x=5;x=x^3;return x;}' 0 'compiled OK' ''
 hrun t_mul_ok 'int main(){int x;x=7*6;return x;}' 0 'compiled OK' ''
 hrun t_divmod_ok 'int main(){int x;x=17/5;x=17%5;return x;}' 0 'compiled OK' ''
 hrun t_prec_ok 'int main(){int x;x=2+3*4;x=(2+3)*4;return x;}' 0 'compiled OK' ''
+# M4：复合赋值 += -= *= %= 编译路径（语义在 [3/4] guest 段运行断言；链式 5+3-1,*2,%5==4）
+hrun t_ca_ok 'int main(){int x;x=5;x+=3;x-=1;x*=2;x%=5;return x;}' 0 'compiled OK' ''
+hrun t_ca_rhs 'int main(){int x;x=5;x+=2*3;return x;}' 0 'compiled OK' ''
+# M4：下标 lvalue 复合赋值编译路径（lvalue 单次求值的运行断言在 guest 段 t_calf）
+hrun t_ca_lval 'int g;int f(){g=g+1;return 0;}int main(){char *s;s="A";g=0;s[f()]+=1;return g;}' 0 'compiled OK' ''
+# M4 症状对立素材：x+=3 若被吞成 x=3（旧缺陷：+= 不在 token 合成表，被拆成 = +），
+# 产物必无 load 旧值指令——下方 CA_PAT 断言即红
+hrun t_ca_load 'int main(){int x;x=5;x+=3;return x;}' 0 'compiled OK' ''
+# M4 纪律#2：非 lvalue 目标（3 += 1）必须 error 不静默（不得产出坏产物）
+hrun t_ca_nolv 'int main(){int x;x=3+=1;return x;}' 1 'cc500: error' 'compiled OK'
+# M4 边界：'/=' 不在 M4 范围，x/=2 须干净报错（'/' 走注释分支，按 '/' '=' 解析后语法错）
+hrun t_ca_sdeq 'int main(){int x;x=5;x/=2;return x;}' 1 'cc500: error' 'compiled OK'
 # OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
 # 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
 # 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
@@ -106,6 +118,14 @@ if objdump -D -b binary -m i386 "$VD/t_lt.elf" 2>/dev/null | grep -q "$LT_PAT"; 
     HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 < 编码确认 $LT_PAT (setl)"
 else
     echo "[FAIL] 宿主 < 编码未检出 $LT_PAT"; HOST_FAIL=$((HOST_FAIL+1))
+fi
+# M4：+= 必须先 load 旧值再运算（mov (%ebx),%eax = 8b 03）——错编成 x=3（旧缺陷
+# 静默吞并）的产物无此 load，症状对立断言锁定 M4 修复
+CA_PAT='8b 03'
+if objdump -D -b binary -m i386 "$VD/t_ca_load.elf" 2>/dev/null | grep -q "$CA_PAT"; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 += load 旧值确认 ($CA_PAT)"
+else
+    echo "[FAIL] 宿主 += 未检出 load ($CA_PAT)——疑似被吞成 ="; HOST_FAIL=$((HOST_FAIL+1))
 fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
@@ -178,6 +198,17 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tpre.c /tpre.elf"
     gwait "guest M3 优先级 编译" "cc500: compiled OK" 60
     gwait "guest M3 14/20 exit0" "'/tpre.elf' exited code=0 PASS" 90
+    # M4：复合赋值链式语义——x=5;x+=3;x-=1;x*=2;x%=5 -> 8-1=7,*2=14,%5=4
+    gsend 'writefile /tca.c int main(){int x;x=5;x+=3;x-=1;x*=2;x%=5;if(x==4)return 0;return 1;}'
+    gsend "ccrun /tca.c /tca.elf"
+    gwait "guest M4 复合赋值 编译" "cc500: compiled OK" 60
+    gwait "guest M4 链式==4 exit0" "'/tca.elf' exited code=0 PASS" 90
+    # M4：lvalue 单次求值——s[f()]+=1 中 f() 副作用恰一次（g==1）且 'A'+1=='B'；
+    # 地址若被求值两次则 g==2 -> FAIL（compound_assign 地址驻留栈顶的直接实证）
+    gsend 'writefile /tcalf.c int g;int f(){g=g+1;return 0;}int main(){char *s;s="A";g=0;s[f()]+=1;if(g==1)if(s[0]==66)return 0;return 1;}'
+    gsend "ccrun /tcalf.c /tcalf.elf"
+    gwait "guest M4 lvalue单次 编译" "cc500: compiled OK" 60
+    gwait "guest M4 f只调一次 exit0" "'/tcalf.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
