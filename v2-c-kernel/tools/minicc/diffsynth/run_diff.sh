@@ -38,6 +38,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 mkdir -p "$out"
+mkdir -p "$(dirname "$GEN")"   # P0：GEN 可能落在独立目录（默认 /tmp/diffsynth/gen，out 默认 /tmp/diffsynth_run），须先建其父再 gcc -o
 
 command -v gcc >/dev/null 2>&1 || { echo "[ERR] 缺 gcc"; exit 2; }
 command -v qemu-i386 >/dev/null 2>&1 || { echo "[ERR] 缺 qemu-i386"; exit 2; }
@@ -52,7 +53,7 @@ rm -f "$out"/prog_*.c
 rm -f "$out/diffsynth.log"                                   # 失败留档：本 run 违例行追加写此文件（artifact 据此归档现场）
 "$GEN" --seed "$seed" --count "$count" --target "$target" --vars "$nv" --stmts "$nstmts" --out "$out" || { echo "[ERR] gen 失败"; exit 2; }
 
-total=0; gcc_reject=0; minic_reject=0; det_fail=0; sig_fail=0
+total=0; gcc_reject=0; minic_reject=0; det_fail=0; sig_fail=0; crashtag=0
 LOG_D="$out/diffsynth.log"     # 违例留档：tee -a 每次触达；净 stdout（test_diffsynth 看退出码不受扰）
 for f in "$out"/prog_*.c; do
   [ -e "$f" ] || continue
@@ -67,16 +68,22 @@ for f in "$out"/prog_*.c; do
   r2=$({ timeout 5 qemu-i386 "$exe"; echo $?; } 2>/dev/null | tail -1)
   [ "$r1" != "$r2" ] && { det_fail=$((det_fail+1)); echo "[确定] '$f' 两次不一致 $r1/$r2" | tee -a "$LOG_D"; }
   # 差分：minicc 接受否（hostminicc 是 32 位二进制，宿主无 ia32 exec，用 qemu-i386 跑）
+  # 设计层区分：fail() 恒 sys_exit(1)=正常拒绝；rc>128=条目下编译器收到信号崩溃（真 bug）；
+  #   124=timeout 编译器挂起。三者均视为 acceptance 差分，但分计以利诊断（评审：crash 与拒绝不可分）。
   elf="${f%.c}.elf"
   mout=$({ timeout 20 qemu-i386 "$HOSTMINICC" "$f" "$elf"; } 2>&1); mrc=$?
   if [ $mrc -ne 0 ]; then
-    minic_reject=$((minic_reject+1)); echo "[差分] minicc 拒 '$f'（gcc 接受）：$(echo "$mout" | tail -1)" | tee -a "$LOG_D"
+    minic_reject=$((minic_reject+1))
+    tag="拒绝"
+    if   [ $mrc -eq 124 ]; then crashtag=$((crashtag+1)); tag="编译器挂起(timeout=124)";
+    elif [ $mrc -gt 128 ]; then crashtag=$((crashtag+1)); tag="编译器崩溃(signum=$((mrc-128)))"; fi
+    echo "[差分] minicc $tag '$f'（gcc 接受）：$(echo "$mout" | tail -1)" | tee -a "$LOG_D"
   fi
 done
 
 echo "== [diffsynth] seed=$seed target=$target total=$total " | tee -a "$LOG_D"
 echo "   ref(gcc) 有效=$((total-gcc_reject)) 无效=$gcc_reject  纪律违例(挂/信号)=$sig_fail 确定性错=$det_fail" | tee -a "$LOG_D"
-echo "   minicc acceptance 差分：拒绝=$minic_reject" | tee -a "$LOG_D"
+echo "   minicc acceptance 差分：拒绝=$minic_reject（其中编译器崩溃/挂起=$crashtag）" | tee -a "$LOG_D"
 if [ "$minic_reject" -eq 0 ] && [ "$sig_fail" -eq 0 ] && [ "$det_fail" -eq 0 ] && [ "$gcc_reject" -eq 0 ]; then
   echo "[diffsynth] PASS" | tee -a "$LOG_D"
   exit 0

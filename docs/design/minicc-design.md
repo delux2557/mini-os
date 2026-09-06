@@ -152,7 +152,9 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 
 ### 6.3 明确拒绝清单（编译期静态报错，不产出坏码）
 
-`long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、`goto`、预处理指令、位运算（`& | ^ << >>`，V2 视需要再议）、隐式指针转换、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、指针/整型混赋。
+`long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、`goto`、预处理指令、隐式指针转换、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、指针/整型混赋。
+
+> 位运算已支持：`& | ^ << >> ~`（V3a，见 [minicc.c](../../v2-c-kernel/tools/minicc/minicc.c) 的 `ND_BITAND/BITOR/BITXOR/SHL/SHR/BNOT`），不再列入拒绝清单。
 
 ***
 
@@ -269,7 +271,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 | V1 ✅ | `int main(){return 0;}` 起逐特性打通 int-only | 700 行编译器 + `micc` 命令 + `make test-minicc` 全绿                                                 |
 | V2 ✅ | 指针/字符串/数组/下标 → 产物可调 `syscall3`（I/O 可观察） | AST（V2a）+ 指针（V2b）+ 字符串/char/syscall3 stub（V2c）+ 数组（V2d）完成，guest 已断言产物运行期输出与数组运行语义；L4 语义对照待上线 |
 | V3 ✅ | 编译器自举                                   | `minicc_self.c` 全子集编写（并行数组 + int 句柄）+ P1==P2 不动点验证（`miccboot`）+ L3 启用（`test_miccboot.sh` 全绿） |
-| V4+  | struct、`for/switch`、位运算等按需扩展            | 特性↔测试清单滚动更新；cc500 退役评估                                                                       |
+| V4+  | struct、`for/switch` 扩展（位运算已并入 V3a）     | 特性↔测试清单滚动更新；cc500 退役评估                                                                       |
 
 风险提示：V2 的 AST 引入是对 V1 单遍生成的**结构性重构**，应在一个切片内完成并保持 L1/L2 全绿后合入，避免长分支。
 
