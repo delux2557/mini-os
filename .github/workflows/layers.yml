@@ -38,7 +38,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: log-fast
-          path: v2-c-kernel/build/*.log
+          path: |
+            v2-c-kernel/build/*.log
+            v2-c-kernel/build/**/*.log
+            v2-c-kernel/build/**/*.c
 
   # 分步定位：每层独立 job 并行（重层），主门禁（CI/test）失败时快速定位是哪一层
   layer:
@@ -67,4 +70,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: log-${{ matrix.layer }}
-          path: v2-c-kernel/build/*.log
+          path: |
+            v2-c-kernel/build/*.log
+            v2-c-kernel/build/**/*.log
+            v2-c-kernel/build/**/*.c
