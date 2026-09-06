@@ -127,6 +127,17 @@ void get_token()
 	    takechar();
 	}
       }
+      /* ---- 教学里程碑 M4：+= -= *= %= 复合赋值 token 合成 ----
+       * 从 '+','-','*','%' 侧起步判定（若从 '=' 侧判定会把 "x=-x" 吞成
+       * "=-"，打爆 M2 一元减）。c0 为四则符且紧跟 '=' 时合成双字符 token；
+       * 旧语法（四则符后不跟 '='）token 流零变化。'/=' 不在 M4 范围：
+       * '/' 走下方注释分支前置判定，x/=2 仍按 '/' '=' 解析并在语法层
+       * error（纪律#2，不静默）。 */
+      else if ((c0 == '+') | (c0 == '-') | (c0 == '*') | (c0 == '%')) {
+	takechar();
+	if (nextc == '=')
+	  takechar();
+      }
     }
     if (i == 0) {
       if (nextc == 39) {
@@ -208,6 +219,12 @@ char *code;
 int code_size;
 int codepos;
 int code_offset;
+/* v0.34 M4：入口 stub call 须指向「第一个函数」。be_start 按「stub 后即首函数」
+ * 假设计算 rel32；但顶层全局变量（如 `int g;`）会在 stub 后先 emit 4 字节存储，
+ * 使首函数被推迟，be_start 的 rel32 便落在全局存储上→入口跳到数据→运行即挂。
+ * 故在 program() 首个函数体开始处把入口 call 重定位到该函数（函数在前的旧源
+ * 重算值与 be_start 相同，零改动；全局在前者修复入口跳转）。 */
+int entry_call_done;
 
 void save_int(char *p, int n)
 {
@@ -538,6 +555,32 @@ int binary2(int type, int n, char *s)
   return 3;
 }
 
+/* ---- 教学里程碑 M4：复合赋值 += -= *= %=（2026-09-06）----
+ * lv op= rhs 复用两套现成机制：算术复用 binary2（emit 字节与对应二元运算
+ * 完全一致）；存回复用 expression() '=' 的 lvalue 地址保持路径（push 地址 ->
+ * 求值 -> pop;mov (%ebx)）。单遍下 lvalue 只求值一次：地址由 bitwise_or_expr()
+ * 求得后全程驻留栈顶，rhs 内再触发下标重算（如 a[f()] += x 的 f 副作用）
+ * 不会导致地址二次求值。纪律#2：非 lvalue 目标（type 3，如 3 += x）走
+ * error() 绝不静默。栈纪律：进函数时 stack_pos=S，push 地址 S+1 -> 载值/
+ * 回推地址净零 -> binary1 值入栈 S+2 -> binary2 弹栈 S+1 -> store 弹栈 S。 */
+int compound_assign(int type, int n, char *s)
+{
+  if ((type != 1) & (type != 2))
+    error();
+  be_push();                   /* push %eax —— 保存 lv 地址（store 时复用） */
+  stack_pos = stack_pos + 1;
+  emit(3, "\x5b\x8b\x03");     /* pop %ebx ; mov (%ebx),%eax —— lv 当前值 -> %eax */
+  emit(1, "\x53");             /* push %ebx —— 地址放回栈顶 */
+  binary1(3);                  /* push %eax —— lv 值入栈（type 3 为值，promote 空操作） */
+  binary2(expression(), n, s); /* %eax = lv值 op rhs（rhs 独立求值一次） */
+  if (type == 2)
+    emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) —— 与 '=' 同款 store */
+  else
+    emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
+  stack_pos = stack_pos - 1;
+  return 3;
+}
+
 /*
  * postfix-expr:
  *         primary-expr
@@ -814,6 +857,18 @@ int expression()
     stack_pos = stack_pos - 1;
     type = 3;
   }
+  /* ---- 教学里程碑 M4：+= -= *= %= 复合赋值 ----
+   * 纪律#1：原 '=' 分支零改动；复合赋值走 else-if 新增分支，旧语法（无
+   * op= token）不进新分支，emit 字节保持不变。各 op emit 与
+   * additive/multiplicative 层完全同款（add/sub/imul/idiv+取余）。 */
+  else if (accept("+="))
+    type = compound_assign(type, 3, "\x5b\x01\xd8");                     /* pop %ebx ; add %ebx,%eax */
+  else if (accept("-="))
+    type = compound_assign(type, 5, "\x5b\x29\xc3\x89\xd8");             /* pop %ebx ; sub %eax,%ebx ; mov %ebx,%eax */
+  else if (accept("*="))
+    type = compound_assign(type, 4, "\x5b\x0f\xaf\xc3");                 /* pop %ebx ; imul %ebx,%eax */
+  else if (accept("%="))
+    type = compound_assign(type, 8, "\x5b\x87\xd8\x99\xf7\xfb\x89\xd0"); /* pop %ebx ; xchg %eax,%ebx ; cdq ; idiv %ebx ; mov %edx,%eax */
   cc_depth = cc_depth - 1;
   return type;
 }
@@ -1034,6 +1089,13 @@ void program()
 	accept(","); /* ignore trailing comma */
       }
       if (accept(";") == 0) {
+	if (entry_call_done == 0) {
+	  entry_call_done = 1;
+	  /* 首个函数：把入口 stub 的 call rel32 重定位到该函数起点。codepos-99
+	   * 同 be_start 公式（文件偏移 codepos → 目标 vaddr=0x800A0000+codepos，
+	   * call 下一条 0x63，rel32=codepos-0x63=codepos-99）。 */
+	  save_int(code + 95, codepos - 99);
+	}
 	sym_define_global(current_symbol);
 	statement();
 	emit(1, "\xc3"); /* ret */
@@ -1187,10 +1249,21 @@ int main1(char *argv, int argc)
     sys_print("cc500: output setup fail\x0a");
     return 1;
   }
+  /* v0.35 F-4：先分配 token 缓冲。token 为全局指针（初值 NULL），正常路径靠 takechar()
+   * -> my_realloc 惰性分配；但对空/纯空白源一次 takechar 都不触发，get_token 末尾
+   * `token[i]=0` 会写 NULL -> SIGSEGV(139)（而非干净报错）。预分配后空源走干净 error。 */
+  token = malloc(32);
+  token_size = 32;
   be_start();
   nextc = getchar();
   get_token();
   program();
+  if (entry_call_done == 0) {
+    /* 无任何函数定义 -> 无入口（cc500 契约「首个定义即入口」），产出无入口 ELF 运行必挂；
+     * 与 be_finish 的 undefined-symbol 纪律一致：干净报错而非编出废产物（空/纯空白/仅注释源）。 */
+    sys_print("cc500: undefined symbol\x0a");
+    return 1;
+  }
   be_finish();
   if (flush_output() != 0) {
     sys_print("cc500: output write fail\x0a");

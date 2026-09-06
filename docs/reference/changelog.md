@@ -3,6 +3,41 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.4·cc500-M4] - 2026-09-06 · cc500 复合赋值（+= -= *= %=）+ 入口重定位修复
+
+> cc500（GPL，教学对照自举工具链）新增四则复合赋值 `+= -= *= %=`（复用 `binary2` 算术发射 +
+> `'='` 的 lvalue 地址保持路径：`be_push` 驻留地址 → 载旧值 → 求值 → 8/32 位 store）。`/=` 刻意
+> 排除（`/` 走注释分支，按 `/` `=` 解析干净报错，纪律#2 不静默）。非 lvalue 目标 → `error()`。
+> 顶层全局在首函数前不再打爆入口。
+
+**Changed**（`tools/cc500/cc500.c`）
+
+* **M4**：`get_token` 合成 `+= -= *= %=`；`expression()` 新增对应 else-if 分支调 `compound_assign`；
+  `compound_assign()` 单次求值 lvalue 地址（下标内函数副作用恰一次）。
+* **Fix（入口重定位）**：原 `be_start` 按「stub 后即首函数」算入口 `call` rel32；顶层全局
+  （如 `int g;`）会在 stub 后先 emit 存储，使首函数被推迟 → 入口跳到全局存储、运行即挂
+  （PR#115 CI 红根因）。修复：`program()` 内首个函数体处把入口 `call` 重定位到该函数
+  （`entry_call_done` 守卫），先全局后函数者入口不再错乱；先函数者零改动。
+
+**Changed**（Tests，`tests/test_cc500.sh`）
+
+* guest `tcalf` 用例改为主函数在前（cc500 契约「入口=源码第一个函数」）、`char *s; s[0]+=1`
+  走 compound_assign 8-bit store 路径 + 读回全局 `g==0`，验证入口不被全局存储偏移 + char 下标
+  复合赋值运行语义；源码 <128B 走 `writefile` 单行，避开 heredoc。
+
+**验证**：`make test-cc500` 宿主 PASS=28 + guest 全绿 + `ccboot` 自举不动点 PASS（入口重定位
+对 cc500 自编译逐字节零影响）。
+
+### F-4：空输入/无入口源干净报错（修复 SIGSEGV）
+
+- 原缺陷：全局 `token`（`char *token`）惰性分配——首次 `takechar()` 才经 `my_realloc` 分配。
+  对空/纯空白源一次 takechar 都不触发，`get_token()` 末尾 `token[i]=0` 写 NULL → SIGSEGV
+  （host rc=139 而非报错）。
+- 修复（`cc500.c`）：`main1` 先 `token = malloc(32)` 预分配，杜绝 NULL 写；`program()` 后若
+  `entry_call_done == 0`（无任何函数定义 = 无入口，含空/纯空白/仅注释源）→ 干净报错
+  `cc500: undefined symbol`（rc=1），不再编出无入口的废 ELF。
+- 测试锚点：宿主新增 `t_empty` / `t_comment_nofn`（期望 FAIL + undefined symbol + 非 compiled OK）。
+
 ## [v1.4/minicc] - 2026-09-06 · minicc 循环控制补齐（do-while / break / continue）
 
 > minicc（自研 MIT 编译器）循环控制按 C 习惯补齐：新增 `do`-while 后测循环 + 循环内
