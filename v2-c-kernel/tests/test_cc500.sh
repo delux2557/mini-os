@@ -69,6 +69,18 @@ hrun t_lt 'int main(){int i;i=0;while(i<3){i=i+1;}return 0;}' 0 'compiled OK' ''
 hrun t_gt 'int main(){int i;i=9;while(i>3){i=i-1;}return 0;}' 0 'compiled OK' ''
 hrun t_ge 'int main(){int i;i=3;while(i>=3){i=i-1;}return 0;}' 0 'compiled OK' ''
 hrun t_le 'int main(){int i;i=0;while(i<=3){i=i+1;}return 0;}' 0 'compiled OK' ''
+# M1：for / do-while 语法与 codegen（语义在 [3/4] guest 段运行断言；此处先证编译路径可用）
+hrun t_for_ok 'int main(){int i;int s;s=0;for(i=0;i<3;i=i+1){s=s+2;}return s;}' 0 'compiled OK' ''
+hrun t_do_ok 'int main(){int i;i=0;do{i=i+1;}while(i<3);return i;}' 0 'compiled OK' ''
+# M2：一元 - ! ~ 与位异或 ^（语义在 [3/4] guest 段运行断言；此处先证编译路径可用）
+hrun t_neg_ok 'int main(){int x;x=5;x=-x;return x;}' 0 'compiled OK' ''
+hrun t_not_ok 'int main(){int x;x=0;x=!x;return x;}' 0 'compiled OK' ''
+hrun t_bnot_ok 'int main(){int x;x=5;x=~x;return x;}' 0 'compiled OK' ''
+hrun t_xor_ok 'int main(){int x;x=5;x=x^3;return x;}' 0 'compiled OK' ''
+# M3：乘/除/模与优先级（语义在 [3/4] guest 段运行断言；此处先证编译路径与优先级解析可用）
+hrun t_mul_ok 'int main(){int x;x=7*6;return x;}' 0 'compiled OK' ''
+hrun t_divmod_ok 'int main(){int x;x=17/5;x=17%5;return x;}' 0 'compiled OK' ''
+hrun t_prec_ok 'int main(){int x;x=2+3*4;x=(2+3)*4;return x;}' 0 'compiled OK' ''
 # OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
 # 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
 # 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
@@ -131,6 +143,41 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /sv.c /sv.elf"
     gwait "guest 变量四则编译" "cc500: compiled OK" 60
     gwait "guest a=1+2==3 return 0" "'/sv.elf' exited code=0 PASS" 90
+    # M1：for 语义——for(i=0;i<3;i=i+1){s=s+2;} 恰 3 轮 -> s==6（step 后置/双跳摆渡布局错即 FAIL）
+    gsend 'writefile /tfor.c int main(){int i;int s;s=0;for(i=0;i<3;i=i+1){s=s+2;}if(s==6)return 0;return 1;}'
+    gsend "ccrun /tfor.c /tfor.elf"
+    gwait "guest M1 for 编译" "cc500: compiled OK" 60
+    gwait "guest M1 for s==6 exit0" "'/tfor.elf' exited code=0 PASS" 90
+    # M1：do-while 语义——先执行一次再判，i 从 0 自增到 3 -> i==3
+    gsend 'writefile /tdo.c int main(){int i;i=0;do{i=i+1;}while(i<3);if(i==3)return 0;return 1;}'
+    gsend "ccrun /tdo.c /tdo.elf"
+    gwait "guest M1 do 编译" "cc500: compiled OK" 60
+    gwait "guest M1 do i==3 exit0" "'/tdo.elf' exited code=0 PASS" 90
+    # M2：一元 - 语义——x=-x 应为 -5（一元/二元 '-' token 消歧错即 FAIL）
+    gsend 'writefile /tneg.c int main(){int x;x=5;x=-x;if(x==0-5)return 0;return 1;}'
+    gsend "ccrun /tneg.c /tneg.elf"
+    gwait "guest M2 一元- 编译" "cc500: compiled OK" 60
+    gwait "guest M2 x==-5 exit0" "'/tneg.elf' exited code=0 PASS" 90
+    # M2：逻辑非语义——!0 == 1
+    gsend 'writefile /tnot.c int main(){int x;x=0;if(!x)return 0;return 1;}'
+    gsend "ccrun /tnot.c /tnot.elf"
+    gwait "guest M2 !x 编译" "cc500: compiled OK" 60
+    gwait "guest M2 !0==1 exit0" "'/tnot.elf' exited code=0 PASS" 90
+    # M2：^ 与 ~ 语义——5^3==6 且 ~6 补码一致
+    gsend 'writefile /tbit.c int main(){int x;x=5;x=x^3;if(x==6)if(~x==~6)return 0;return 1;}'
+    gsend "ccrun /tbit.c /tbit.elf"
+    gwait "guest M2 ^/~ 编译" "cc500: compiled OK" 60
+    gwait "guest M2 ^/~ exit0" "'/tbit.elf' exited code=0 PASS" 90
+    # M3：乘/除/模语义——7*6==42 且 17/5==3 且 17%5==2（C99 截断向零/余数随被除数）
+    gsend 'writefile /tmul.c int main(){int x;int y;x=7*6;y=17/5;if(x==42)if(y==3)if(17%5==2)return 0;return 1;}'
+    gsend "ccrun /tmul.c /tmul.elf"
+    gwait "guest M3 乘除模 编译" "cc500: compiled OK" 60
+    gwait "guest M3 42/3/2 exit0" "'/tmul.elf' exited code=0 PASS" 90
+    # M3：优先级语义——2+3*4==14（multiplicative 高于 additive）与 (2+3)*4==20
+    gsend 'writefile /tpre.c int main(){int x;int y;x=2+3*4;y=(2+3)*4;if(x==14)if(y==20)return 0;return 1;}'
+    gsend "ccrun /tpre.c /tpre.elf"
+    gwait "guest M3 优先级 编译" "cc500: compiled OK" 60
+    gwait "guest M3 14/20 exit0" "'/tpre.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
