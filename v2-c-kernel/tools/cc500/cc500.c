@@ -723,6 +723,11 @@ int expression()
 }
 
 /*
+/* ---- 教学里程碑 M1 前向声明（for / do-while 实现放 statement() 之后）---- */
+int stmt_for();
+int stmt_do();
+
+/*
  * type-name:
  *     char *
  *     int
@@ -797,6 +802,12 @@ void statement()
     save_int(code + codepos - 4, p1 - codepos);
     save_int(code + p2 - 4, codepos - p2);
   }
+  else if (accept("do")) {        /* M1：do-while */
+    stmt_do();
+  }
+  else if (accept("for")) {       /* M1：for(init;cond;step) */
+    stmt_for();
+  }
   else if (accept("return")) {
     if (peek(";") == 0)
       promote(expression());
@@ -809,6 +820,77 @@ void statement()
     expect(";");
   }
   cc_depth = cc_depth - 1;
+}
+
+/* ---- 教学里程碑 M1：for / do-while 实现（2026-09-06）----
+ * 纪律：仅新增分支，不改任何既有发射路径；cc500.c 自身源码不使用新语法 →
+ * P1==P2 自举不动点不受影响。
+ *
+ * for(init;cond;step)body —— 无 AST 单遍下"step 后置"的标准解法：双跳摆渡布局。
+ * 发射顺序 = 解析顺序（init,cond,step,body），执行顺序靠跳转编排为每轮
+ * cond→body→step：
+ *   init; L_top:<cond;test;je L_exit>; jmp L_body; L_step:<step>; jmp L_top;
+ *   L_body:<body>; jmp L_step; L_exit:
+ * step 区物理位于 body 前但被首条 jmp 跳过，每轮由 body 尾部 jmp 跳回执行。
+ * 相比"延迟缓冲+搬移"方案：step 原地发射，内部函数调用/全局引用的 rel 天然正确，
+ * 无需重定位；代价是每轮多两条 jmp（教学编译器不追求性能）。
+ * 空 cond / 空 step 均按 C 语义成立：无 cond 时 L_exit 无引用（for(;;) 为无限循环）。
+ */
+int stmt_for()
+{
+  int p_top;
+  int p_step;
+  int p_body;
+  int pj;      /* jmp body 的 rel 起点 */
+  int pexit;   /* cond je 的 rel 起点；-1=无 cond */
+  expect("(");
+  if (peek(";") == 0)
+    expression();                    /* init（可选） */
+  expect(";");
+  p_top = codepos;                   /* L_top */
+  pexit = 0 - 1;
+  if (peek(";") == 0) {              /* cond（可选） */
+    promote(expression());
+    emit(8, "\x85\xc0\x0f\x84...."); /* test; je L_exit（占位） */
+    pexit = codepos;
+  }
+  expect(";");
+  emit(5, "\xe9....");               /* jmp L_body（先于 step 区发射） */
+  pj = codepos;
+  p_step = codepos;                  /* L_step（空 step 时即 jmp L_top 起点） */
+  if (peek(")") == 0)
+    expression();                    /* step（可选，物理在 body 前） */
+  expect(")");
+  emit(5, "\xe9....");               /* jmp L_top */
+  save_int(code + codepos - 4, p_top - codepos);
+  p_body = codepos;                  /* L_body */
+  statement();                       /* body */
+  emit(5, "\xe9....");               /* jmp L_step（回 step 区） */
+  save_int(code + codepos - 4, p_step - codepos);
+  save_int(code + pj - 4, p_body - pj);      /* 回填 jmp L_body */
+  if (pexit != 0 - 1)
+    save_int(code + pexit - 4, codepos - pexit); /* 回填 cond je → L_exit */
+  return 0;
+}
+
+/* do body while ( cond ) ; —— 与 while 同构，仅方向相反：先执行一次再判条件。 */
+int stmt_do()
+{
+  int p1;
+  int p2;
+  p1 = codepos;                      /* body 顶 */
+  statement();
+  if (peek("while") == 0)
+    error();                         /* 缺 while 关键字（do 的 body 无独立 else，正常返回时 token 应为 while） */
+  accept("while");
+  expect("(");
+  promote(expression());
+  emit(8, "\x85\xc0\x0f\x85....");   /* test; jne body 顶（条件非零跳回） */
+  p2 = codepos;
+  expect(")");
+  expect(";");
+  save_int(code + p2 - 4, p1 - codepos);
+  return 0;
 }
 
 /*

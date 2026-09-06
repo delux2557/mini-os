@@ -69,6 +69,9 @@ hrun t_lt 'int main(){int i;i=0;while(i<3){i=i+1;}return 0;}' 0 'compiled OK' ''
 hrun t_gt 'int main(){int i;i=9;while(i>3){i=i-1;}return 0;}' 0 'compiled OK' ''
 hrun t_ge 'int main(){int i;i=3;while(i>=3){i=i-1;}return 0;}' 0 'compiled OK' ''
 hrun t_le 'int main(){int i;i=0;while(i<=3){i=i+1;}return 0;}' 0 'compiled OK' ''
+# M1：for / do-while 语法与 codegen（语义在 [3/4] guest 段运行断言；此处先证编译路径可用）
+hrun t_for_ok 'int main(){int i;int s;s=0;for(i=0;i<3;i=i+1){s=s+2;}return s;}' 0 'compiled OK' ''
+hrun t_do_ok 'int main(){int i;i=0;do{i=i+1;}while(i<3);return i;}' 0 'compiled OK' ''
 # OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
 # 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
 # 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
@@ -131,6 +134,16 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /sv.c /sv.elf"
     gwait "guest 变量四则编译" "cc500: compiled OK" 60
     gwait "guest a=1+2==3 return 0" "'/sv.elf' exited code=0 PASS" 90
+    # M1：for 语义——for(i=0;i<3;i=i+1){s=s+2;} 恰 3 轮 -> s==6（step 后置/双跳摆渡布局错即 FAIL）
+    gsend 'writefile /tfor.c int main(){int i;int s;s=0;for(i=0;i<3;i=i+1){s=s+2;}if(s==6)return 0;return 1;}'
+    gsend "ccrun /tfor.c /tfor.elf"
+    gwait "guest M1 for 编译" "cc500: compiled OK" 60
+    gwait "guest M1 for s==6 exit0" "'/tfor.elf' exited code=0 PASS" 90
+    # M1：do-while 语义——先执行一次再判，i 从 0 自增到 3 -> i==3
+    gsend 'writefile /tdo.c int main(){int i;i=0;do{i=i+1;}while(i<3);if(i==3)return 0;return 1;}'
+    gsend "ccrun /tdo.c /tdo.elf"
+    gwait "guest M1 do 编译" "cc500: compiled OK" 60
+    gwait "guest M1 do i==3 exit0" "'/tdo.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
