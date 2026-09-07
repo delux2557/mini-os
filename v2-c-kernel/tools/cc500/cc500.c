@@ -1466,7 +1466,7 @@ void program()
 }
 
 /* ---- v0.27: mini-os 文件系统 I/O（代替 stdin/stdout） ----
- * 输入：整读 /cc500.c 进 in_data（32KB 上限，源文件 ~19KB 足够）；
+ * 输入：整读 /cc500.c 进 in_data（OBS-CC-5 动态扩容，无硬上限）；
  * 输出：putchar 为空操作，be_finish 后由 flush_output 把 code 一次性写 /out.elf。
  * mini-os 系统调用号：SYS_PRINT=1 SYS_FS_CREATE=13 SYS_FS_OPEN=14
  *   SYS_FS_WRITE=15 SYS_FS_READ=16 SYS_FS_DELETE=19 SYS_BRK=35 SYS_EXIT=0。
@@ -1476,6 +1476,7 @@ int in_slot;
 int in_len;
 int in_pos;
 char *in_data;
+int in_buf_size;  /* OBS-CC-5：输入缓冲当前分配容量（读满翻倍扩容，不再有硬上限） */
 int in_path;    /* 输入路径（0=默认 /cc500.c），v0.27b 由 argv[1] 指定 */
 int out_path;   /* 输出路径（0=默认 /out.elf），v0.27b 由 argv[2] 指定 */
 
@@ -1530,34 +1531,32 @@ int open_input()
 {
   int n;
   int done;
-  int full;
   char *p;
   p = "/cc500.c";
   if (in_path != 0)
     p = in_path;
   if (syscall3(14, 1, p, 0) != 0)            /* SYS_FS_OPEN slot1 只读 */
     return 0 - 1;
-  in_data = malloc(65536);
+  /* OBS-CC-5：输入缓冲动态扩容——不再有 64KB 硬上限。初配 64KB，读满则经
+   * my_realloc 翻倍续读；源 < 容量时逐字节读取结果与旧定长版完全一致（不触
+   * 解析/codegen，P1==P2 自举不动点不变），仅去掉“超 64KB 显式拒绝”这一硬截断。 */
+  in_buf_size = 65536;
+  in_data = malloc(in_buf_size);
   if (in_data == (0 - 1))
     return 0 - 1;
   in_len = 0;
   done = 0;
-  full = 0;
   while (done == 0) {
-    if (65536 <= in_len) { done = 1; full = 1; }  /* 缓冲满 */
-    else {
-      n = syscall3(16, 1, in_data + in_len, 4096);   /* SYS_FS_READ slot1 */
-      if (n <= 0) done = 1;
-      else in_len = in_len + n;
+    if (in_buf_size <= in_len) {
+      int g = in_buf_size << 1;              /* 读满：容量翻倍 */
+      in_data = my_realloc(in_data, in_len, g);
+      if (in_data == (0 - 1))
+        return 0 - 1;
+      in_buf_size = g;
     }
-  }
-  if (full != 0) {
-    n = syscall3(16, 1, in_data, 1);         /* 探 1 字节：>0 说明被截断 */
-    if (n != 0) {                            /* 显式报错，而非静默编半个文件 */
-      syscall3(17, 1, 0, 0);
-      sys_print("cc500: input too big (>64KB)\x0a");
-      return 0 - 1;
-    }
+    n = syscall3(16, 1, in_data + in_len, 4096);   /* SYS_FS_READ slot1 */
+    if (n <= 0) done = 1;
+    else in_len = in_len + n;
   }
   syscall3(17, 1, 0, 0);                     /* SYS_FS_CLOSE slot1（fs 槽全局共享，必须还） */
   in_pos = 0;
