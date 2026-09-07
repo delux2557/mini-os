@@ -137,6 +137,12 @@ void get_token()
 	takechar();
 	if (nextc == '=')
 	  takechar();
+	/* ---- 教学里程碑 M8：++ -- 自增自减 token 合成 ----
+	 * '+'/'-' 紧跟同字符时合成 '++'/'--'（其余不变，如 x=-y 仍是 '-' 'y'）。 */
+	else if ((c0 == '+') | (c0 == '-')) {
+	  if (nextc == c0)
+	    takechar();
+	}
       }
     }
     if (i == 0) {
@@ -581,11 +587,63 @@ int compound_assign(int type, int n, char *s)
   return 3;
 }
 
+/* ---- 教学里程碑 M8：前缀/后缀自增自减 ++ --（2026-09-06）----
+ * 复用 M4 compound_assign 的 lvalue 地址保持路径（push 地址->载值->运算->store）。
+ *  - 前缀 ++lv/--lv：lv=lv±1，值=**新值**（发射与 `lv += 1` 一致，eax 即新值）。
+ *  - 后缀 lv++/lv--：值=**旧值**，故 store 前先把旧值暂存到 %ecx（单表达式内无调用，
+ *    ecx 安全；不新增 push/pop），运算存回后再 mov %ecx,%eax 恢复旧值。
+ * 纪律：非 lvalue（type 3，如 3++）走 error 不静默（对齐 compound_assign）。 */
+int pre_incdec(int type, int op)
+{
+  if ((type != 1) & (type != 2))
+    error();
+  be_push();                   /* push %eax —— 保存 lv 地址 */
+  stack_pos = stack_pos + 1;
+  emit(3, "\x5b\x8b\x03");     /* pop %ebx ; mov (%ebx),%eax —— lv 旧值 */
+  emit(1, "\x53");             /* push %ebx —— 地址放回栈顶 */
+  binary1(3);                  /* push %eax —— 旧值入栈 */
+  emit(5, "\xb8\x01\x00\x00\x00"); /* mov $1,%eax */
+  if (op == '+')
+    emit(3, "\x5b\x01\xd8");           /* pop %ebx ; add %ebx,%eax -> 新值 */
+  else
+    emit(5, "\x5b\x29\xc3\x89\xd8");   /* pop %ebx ; sub %eax,%ebx ; mov %ebx,%eax -> 新值 */
+  if (type == 2)
+    emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) */
+  else
+    emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
+  stack_pos = stack_pos - 1;
+  return 3;                    /* 值 = 新值，留在 eax */
+}
+
+int post_incdec(int type, int op)
+{
+  if ((type != 1) & (type != 2))
+    error();
+  be_push();                   /* push %eax —— 保存 lv 地址 */
+  stack_pos = stack_pos + 1;
+  emit(3, "\x5b\x8b\x03");     /* pop %ebx ; mov (%ebx),%eax —— lv 旧值 */
+  emit(2, "\x89\xc1");         /* mov %eax,%ecx —— 暂存旧值（后缀返回值） */
+  emit(1, "\x53");             /* push %ebx —— 地址放回栈顶 */
+  if (op == '+')
+    emit(3, "\x83\xc0\x01");   /* add $1,%eax -> 新值 */
+  else
+    emit(3, "\x83\xe8\x01");   /* sub $1,%eax -> 新值 */
+  if (type == 2)
+    emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) —— 存回新值 */
+  else
+    emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
+  emit(2, "\x89\xc8");         /* mov %ecx,%eax —— 恢复旧值（后缀值=旧） */
+  stack_pos = stack_pos - 1;
+  return 3;
+}
+
 /*
  * postfix-expr:
  *         primary-expr
  *         postfix-expr [ expression ]
  *         postfix-expr ( expression-list-opt )
+ *         postfix-expr ++
+ *         postfix-expr --
  */
 int postfix_expr()
 {
@@ -618,6 +676,12 @@ int postfix_expr()
     stack_pos = s;
     type = 3;
   }
+  else if (accept("++")) {           /* 后缀 lv++：值=旧值 */
+    return post_incdec(type, '+');
+  }
+  else if (accept("--")) {           /* 后缀 lv--：值=旧值 */
+    return post_incdec(type, '-');
+  }
   return type;
 }
 
@@ -630,6 +694,14 @@ int postfix_expr()
 int unary_expr()
 {
   int type;
+  if (accept("++")) {               /* 前缀 ++lv：lv=lv+1，值=新值 */
+    type = unary_expr();
+    return pre_incdec(type, '+');
+  }
+  if (accept("--")) {               /* 前缀 --lv：lv=lv-1，值=新值 */
+    type = unary_expr();
+    return pre_incdec(type, '-');
+  }
   if (accept("-")) {
     type = unary_expr();
     promote(type);

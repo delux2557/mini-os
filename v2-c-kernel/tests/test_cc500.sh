@@ -118,6 +118,13 @@ hrun t_andll  'int main(){int a;int b;a=1;b=1;if(a&&b&&a)return 0;return 1;}' 0 
 hrun t_q_ok    'int main(){int a;int b;a=3;b=(a>1?5:6);return b;}' 0 'compiled OK' ''
 hrun t_q_nested 'int main(){int a;a=(1?(2?3:4):5);return a;}' 0 'compiled OK' ''
 hrun t_q_rhs   'int main(){int a;int b;a=2;b=(a?1:2);b=(b>1?a:0);return b;}' 0 'compiled OK' ''
+# ---- M8：++/-- 自增自减（2026-09-06）----
+hrun t_inc_ok  'int main(){int i;i=5;i++;i++;return i;}' 0 'compiled OK' ''
+hrun t_dec_ok  'int main(){int i;i=5;i--;i--;return i;}' 0 'compiled OK' ''
+hrun t_incpre  'int main(){int i;int j;i=5;j=++i;return j;}' 0 'compiled OK' ''
+hrun t_incpost 'int main(){int i;int r;i=5;r=i++;return r;}' 0 'compiled OK' ''
+# M8 症状对立：非 lvalue 自增（3++）必须 error 不静默（不得骗 compiled OK）
+hrun t_inc_nolv 'int main(){int i;i=3++;return i;}' 1 'cc500: error' 'compiled OK'
 # OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
 # 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
 # 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
@@ -170,6 +177,13 @@ if objdump -D -b binary -m i386 "$VD/t_q_ok.elf" 2>/dev/null | grep -q '0f 84'; 
     HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 ?: 条件跳 je(0f 84) 编码确认"
 else
     echo "[FAIL] 宿主 ?: 未检出 0f 84（疑似未发条件跳）"; HOST_FAIL=$((HOST_FAIL+1))
+fi
+# M8：后缀值=旧值编码锁定——r=i++ 产物须含 mov %ecx,%eax(89 c8) 恢复旧值；若后缀被当成
+# 折扣(返回新值)则无此恢复，断言红（症状对立）。前缀版本 j=++i 无 89 c8。
+if objdump -D -b binary -m i386 "$VD/t_incpost.elf" 2>/dev/null | grep -q '89 c8'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 ++ 后缀旧值 编码确认 (89 c8 恢复旧值)"
+else
+    echo "[FAIL] 宿主 ++ 未检出 89 c8（后缀疑似被当折扣/返新值）"; HOST_FAIL=$((HOST_FAIL+1))
 fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
@@ -351,6 +365,31 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tqn.c /tqn.elf"
     gwait "guest M7 ?: 嵌套==3 exit0" "'/tqn.elf' exited code=0 PASS" 90
     gsend "rm /tqn.c"; gsend "rm /tqn.elf"
+    # M8：++/-- 运行语义——后缀值=旧值、前缀值=新值、for 步进可用 i++。
+    # 后缀旧值：r=i++ → r==5 && i==6（若后缀误返回新值则 r==6 FAIL）
+    gsend 'writefile /tinc.c int main(){int i;int r;i=5;r=i++;if(i==6&&r==5)return 0;return 1;}'
+    gsend "ccrun /tinc.c /tinc.elf"
+    gwait "guest M8 i++ 编译" "cc500: compiled OK" 60
+    gwait "guest M8 i++ 后缀旧值 r==5 exit0" "'/tinc.elf' exited code=0 PASS" 90
+    gsend "rm /tinc.c"; gsend "rm /tinc.elf"
+    # 前缀新值：j=++i → i==6 && j==6
+    gsend 'writefile /tpre.c int main(){int i;int j;i=5;j=++i;if(i==6&&j==6)return 0;return 1;}'
+    gsend "ccrun /tpre.c /tpre.elf"
+    gwait "guest M8 ++i 编译" "cc500: compiled OK" 60
+    gwait "guest M8 ++i 前缀新值 j==6 exit0" "'/tpre.elf' exited code=0 PASS" 90
+    gsend "rm /tpre.c"; gsend "rm /tpre.elf"
+    # 后缀自减旧值：r=i-- → i==4 && r==5
+    gsend 'writefile /tded.c int main(){int i;int r;i=5;r=i--;if(i==4&&r==5)return 0;return 1;}'
+    gsend "ccrun /tded.c /tded.elf"
+    gwait "guest M8 i-- 编译" "cc500: compiled OK" 60
+    gwait "guest M8 i-- 后缀旧值 r==5 exit0" "'/tded.elf' exited code=0 PASS" 90
+    gsend "rm /tded.c"; gsend "rm /tded.elf"
+    # for 步进用 i++：for(i=0;i<5;i++){s=s+i;} -> s==10
+    gsend 'writefile /tforinc.c int main(){int i;int s;s=0;for(i=0;i<5;i++){s=s+i;}if(s==10)return 0;return 1;}'
+    gsend "ccrun /tforinc.c /tforinc.elf"
+    gwait "guest M8 for+i++ 编译" "cc500: compiled OK" 60
+    gwait "guest M8 for i++ s==10 exit0" "'/tforinc.elf' exited code=0 PASS" 90
+    gsend "rm /tforinc.c"; gsend "rm /tforinc.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
