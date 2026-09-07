@@ -1238,6 +1238,111 @@ void loop_pop()
   loop_depth = loop_depth - 1;
 }
 
+/* ---- 教学里程碑 M11：goto / labels（2026-09-07）----
+ * 函数级标签表，每记录 = 名字 NUL + 1 标志(u/d) + 4B 目标，锚点 = t+6：
+ *   'd'=已定义：目标 = rel codepos（构建后向 goto 直接可回填）
+ *   'u'=未定义：目标 = 前向挂起链表头（code 内某条 goto 的 rel32 字段偏移，0=无挂起）
+ * 复用 sym_define_global 的挂起-回填思想：前向 goto 把自身 jmp 的 rel32 字段串成
+ * 链表并让标签持头；标签定义时沿链回填，彻底解决前向引用。零触 codegen 旧路径；
+ * cc500.c 自身不使用 goto → P1==P2 自举不动点不变。 */
+char *lbl_tab;
+int lbl_size;
+int lbl_pos;      /* 表顶游标（清表即归 0 → 函数级作用域） */
+
+int lbl_find(char *s)
+{
+  int t = 0;
+  int r = 0 - 1;      /* -1=未登记；0 也是合法锚点（首个标签落于 0），故不能用 0 当哨兵 */
+  while (t <= lbl_pos - 1) {
+    i = 0;
+    while ((s[i] == lbl_tab[t]) & (s[i] != 0)) { i = i + 1; t = t + 1; }
+    if (s[i] == lbl_tab[t]) r = t;
+    while (lbl_tab[t] != 0) t = t + 1;
+    t = t + 6;
+  }
+  return r;
+}
+
+int lbl_declare(char *s)
+{
+  int t = lbl_find(s);
+  if (t < 0) {
+    t = lbl_pos;
+    i = 0;
+    while (s[i] != 0) {
+      if (lbl_size <= t + 10) {
+        int x = (t + 10) << 1;
+        lbl_tab = my_realloc(lbl_tab, lbl_size, x);
+        lbl_size = x;
+      }
+      lbl_tab[t] = s[i];
+      i = i + 1; t = t + 1;
+    }
+    lbl_tab[t] = 0;
+    lbl_tab[t + 1] = 'u';            /* 未定义（等待为之发起 goto 或定义） */
+    save_int(lbl_tab + t + 2, 0);
+    lbl_pos = t + 6;
+  }
+  return t;
+}
+
+/* 定义标签：此刻 codepos 即标签指向的下一条指令首址。沿挂起链表回填所有前向 goto。 */
+void lbl_define()
+{
+  int t;
+  int target;
+  int head;
+  int next;
+  target = codepos;
+  t = lbl_declare(token);
+  if (lbl_tab[t + 1] == 'd')
+    error();                         /* 同一标签重复定义 */
+  head = load_int(lbl_tab + t + 2);  /* 前向挂起链表头（0=无） */
+  while (head != 0) {
+    next = load_int(code + head);              /* 取链（覆盖前先读） */
+    save_int(code + head, target - (head + 4)); /* rel32 = target - pos（pos=head+4） */
+    head = next;
+  }
+  lbl_tab[t + 1] = 'd';
+  save_int(lbl_tab + t + 2, target);
+}
+
+/* goto 标签 ; —— 主调 accept("goto") 已把 token 停在标签名上（accept 内部 get_token 一次），
+ * 因此这里直接使用当前 token，不得再 get_token()（否则会跳到 ';'）。 */
+void stmt_goto()
+{
+  int t;
+  int v;
+  if (token[0] == 0)
+    error();
+  t = lbl_declare(token);
+  emit(5, "\xe9....");               /* jmp rel32 */
+  v = load_int(lbl_tab + t + 2);
+  if (lbl_tab[t + 1] == 'd')
+    save_int(code + codepos - 4, v - codepos);   /* 已定义：直接回填（含后向） */
+  else {
+    save_int(code + codepos - 4, v);             /* 前向挂起：旧头作本字段的链 */
+    save_int(lbl_tab + t + 2, codepos - 4);      /* 本 rel32 字段位置成新头 */
+  }
+  get_token();                       /* 越过标签名，落到 ';' */
+  expect(";");
+}
+
+/* 函数体收尾：未定义且被 goto 前向引用过的标签须报错；随后清表（函数级作用域） */
+void lbl_end()
+{
+  int t = 0;
+  while (t <= lbl_pos - 1) {
+    if (lbl_tab[t + 1] == 'u') {
+      if (load_int(lbl_tab + t + 2) != 0)
+        error();                     /* 有 goto 指向它却从未定义 */
+    }
+    while (lbl_tab[t] != 0) t = t + 1;
+    t = t + 6;
+  }
+  lbl_pos = 0;
+}
+
 void statement()
 {
   int p1;
@@ -1306,6 +1411,9 @@ void statement()
   else if (accept("continue")) {  /* M5：continue（循环内） */
     stmt_continue();
   }
+  else if (accept("goto")) {      /* M11：goto 标签 */
+    stmt_goto();
+  }
   else if (accept("return")) {
     if (peek(";") == 0)
       promote(expression());
@@ -1314,8 +1422,27 @@ void statement()
     emit(1, "\xc3"); /* ret */
   }
   else {
-    expression();
-    expect(";");
+    /* M11：标签定义 = 标识符紧跟 ':'（不隔空白）。可作前向 goto 目标，定义处
+     * 沿挂起链表回填全部前向引用；非标签的标识符或非标识符起头走表达式语句。 */
+    if ((token[0] == '_') |
+        (('a' <= token[0]) & (token[0] <= 'z'))) {
+      if (nextc == ':') {
+	lbl_define();
+	get_token();               /* 吃掉标签名 */
+	get_token();               /* 吃掉 ':' */
+	if (token[0] == 0)
+	  error();                 /* 标签后无语句即收尾（畸形） */
+	statement();               /* 递归解析标签体 */
+      }
+      else {
+	expression();
+	expect(";");
+      }
+    }
+    else {
+      expression();
+      expect(";");
+    }
   }
   cc_depth = cc_depth - 1;
 }
@@ -1456,6 +1583,7 @@ void program()
 	}
 	sym_define_global(current_symbol);
 	statement();
+	lbl_end();   /* M11：函数级标签作用域收尾——未定义前向标签报错，随后清表 */
 	emit(1, "\xc3"); /* ret */
       }
       table_pos = n;
@@ -1616,6 +1744,9 @@ int main1(char *argv, int argc)
   loop_frames = malloc(144);
   loop_breaks = malloc(1024);
   loop_conts = malloc(1024);
+  lbl_tab = malloc(256);   /* M11：标签表（函数级，lbl_end 清表） */
+  lbl_size = 256;
+  lbl_pos = 0;
   be_start();
   nextc = getchar();
   get_token();

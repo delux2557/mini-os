@@ -240,6 +240,24 @@ if [ "$brc" = 0 ] && echo "$bout" | grep -q 'compiled OK' && ! echo "$bout" | gr
 else
     echo "[FAIL] 宿主 OBS-CC-5 rc=$brc（>64KB 源未扩容编译）"; echo "$bout" | sed 's/^/        /'; HOST_FAIL=$((HOST_FAIL+1))
 fi
+# ---- M11：goto / labels（2026-09-07）----
+# 编译路径：前向 goto 跳过代码、后向 goto 构成循环、链式多标签依次跳过——均须 rc=0 compiled OK。
+# 负对照（症状对立）：goto 指向从未定义的标签 / 同标签重复定义，均须 rc=1 + 干净 cc500: error，
+# 且不得骗 compiled OK（若前向回填基建坏，未定义标签会静默落下或错跳）。
+hrun t_gfwd  'int main(){int a;a=7;goto skip;a=99;skip:if(a==7)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_gbwd  'int main(){int i;i=0;top:i=i+1;if(i<5)goto top;if(i==5)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_gmulti 'int main(){int a;int s;s=0;goto m0;s=1;m0:goto m1;s=2;m1:goto m2;s=3;m2:if(s==0)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_gundef 'int main(){goto nod;return 0;done:;}' 1 'cc500: error' 'compiled OK'
+hrun t_gdup   'int main(){int a;a=1;dup:a=2;dup:return a;}' 1 'cc500: error' 'compiled OK'
+# M11 编码锁定：前向 goto-only 程序（无 if/while/for/?:）的唯一无条件 jmp 即 goto。
+# 若前向回填坏（挂起未解/落错位）→ rel32=0 退化成顺落（e9 00 00 00 00）；正确则跳过 a=9
+# 得正位移 e9 15 00 00 00（症状对立）。
+hrun t_gw 'int main(){int a;a=0;goto ld;a=9;ld:return a;}' 0 'compiled OK' ''
+if objdump -D -b binary -m i386 "$VD/t_gw.elf" 2>/dev/null | grep -q 'e9 15 00 00 00'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 goto 前向回填 jmp e9 15 编码确认（跳过 a=9）"
+else
+    echo "[FAIL] 宿主 goto 前向未检出正位移 jmp（疑似回填未解/退化顺落）"; HOST_FAIL=$((HOST_FAIL+1))
+fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
@@ -465,6 +483,34 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M9b 复合赋值 编译" "cc500: compiled OK" 60
     gwait "guest M9b 复合赋值 语义 exit0" "'/tcab.elf' exited code=0 PASS" 90
     gsend "rm /tcab.c"; gsend "rm /tcab.elf"
+# M11：goto/labels 运行语义（症状对立：任一前向回填/后向判据错即 return 1 FAIL）。
+    # 前向 goto 跳过 a=99：若回填未解/a=99 被错误执行则 a!=7 FAIL。
+    gsend "writefile <<M /tg1.c"
+    gsend "int main(){int a;a=7;goto skip;a=99;skip:if(a==7)return 0;return 1;}"
+    gsend "M"
+    gwait "M11 前向goto 源写入" "\[writefile\] '/tg1.c' wrote" 40
+    gsend "ccrun /tg1.c /tg1.elf"
+    gwait "guest M11 前向goto 编译" "cc500: compiled OK" 60
+    gwait "guest M11 前向goto 跳过a=99 exit0" "'/tg1.elf' exited code=0 PASS" 90
+    gsend "rm /tg1.c"; gsend "rm /tg1.elf"
+    # 后向 goto 构成循环到 i==5：若后向跳错则死循环/计数错 FAIL。
+    gsend "writefile <<M /tg2.c"
+    gsend "int main(){int i;i=0;top:i=i+1;if(i<5)goto top;if(i==5)return 0;return 1;}"
+    gsend "M"
+    gwait "M11 后向goto 源写入" "\[writefile\] '/tg2.c' wrote" 40
+    gsend "ccrun /tg2.c /tg2.elf"
+    gwait "guest M11 后向goto 编译" "cc500: compiled OK" 60
+    gwait "guest M11 后向goto 循环 i==5 exit0" "'/tg2.elf' exited code=0 PASS" 90
+    gsend "rm /tg2.c"; gsend "rm /tg2.elf"
+    # 链式多标签依次跳过：s 保持 0 即证明三个前向 goto 全部正确跳断 s=1/2/3。
+    gsend "writefile <<M /tg3.c"
+    gsend "int main(){int a;int s;s=0;goto m0;s=1;m0:goto m1;s=2;m1:goto m2;s=3;m2:if(s==0)return 0;return 1;}"
+    gsend "M"
+    gwait "M11 链式goto 源写入" "\[writefile\] '/tg3.c' wrote" 40
+    gsend "ccrun /tg3.c /tg3.elf"
+    gwait "guest M11 链式goto 编译" "cc500: compiled OK" 60
+    gwait "guest M11 链式goto s==0 exit0" "'/tg3.elf' exited code=0 PASS" 90
+    gsend "rm /tg3.c"; gsend "rm /tg3.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
