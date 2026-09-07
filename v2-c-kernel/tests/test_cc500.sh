@@ -258,6 +258,23 @@ if objdump -D -b binary -m i386 "$VD/t_gw.elf" 2>/dev/null | grep -q 'e9 15 00 0
 else
     echo "[FAIL] 宿主 goto 前向未检出正位移 jmp（疑似回填未解/退化顺落）"; HOST_FAIL=$((HOST_FAIL+1))
 fi
+# ---- M12：switch/case/default（2026-09-07）----
+# 编译路径：命中/默认/贯通(nested fall-through)/负常量/嵌套 switch/switch 内循环 break 均须 OK。
+# 负对照（症状对立）：switch 外 case 必须 error rc=1 不得骗 compiled OK。
+hrun t_sw1   'int main(){int x;int r;x=2;r=0;switch(x){case 1:r=10;break;case 2:r=20;break;default:r=99;}if(r==20)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_sw2   'int main(){int x;int r;x=7;r=0;switch(x){case 1:r=10;break;case 2:r=20;break;default:r=99;}if(r==99)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_sw3   'int main(){int x;int r;x=1;r=0;switch(x){case 1:r=10;case 2:r=r+1;default:r=r+100;}if(r==111)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_swneg 'int main(){int x;int r;x=-1;r=0;switch(x){case -1:r=55;break;default:r=0;}if(r==55)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_swnest 'int main(){int x;int y;int r;x=1;y=2;r=0;switch(x){case 1:switch(y){case 2:r=42;break;default:r=7;}break;default:r=9;}if(r==42)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_swloop 'int main(){int i;int r;i=0;r=0;switch(3){case 3:while(i<5){i=i+1;if(i==2)break;}r=i;break;default:r=0;}if(r==2)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_sw_oob 'int main(){int x;x=1;case 3:return x;}' 1 'cc500: error' 'compiled OK'
+# M12 编码锁定：switch 派发链用 cmp $imm,%eax（3d）逐 case。直观程序仅含赋值+switch——
+# 若派发缺失/退化成串 if 则不必带 3d（条件比较用 39 c3），故 3d 出现 = 唯一派发标记（症状对立）。
+if objdump -D -b binary -m i386 "$VD/t_sw1.elf" 2>/dev/null | grep -q '3d '; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 switch 派发 cmp \$imm,%eax (3d) 编码确认"
+else
+    echo "[FAIL] 宿主 switch 未检出 3d 派发（疑似派发缺失/退化成 if 链）"; HOST_FAIL=$((HOST_FAIL+1))
+fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
@@ -511,6 +528,52 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M11 链式goto 编译" "cc500: compiled OK" 60
     gwait "guest M11 链式goto s==0 exit0" "'/tg3.elf' exited code=0 PASS" 90
     gsend "rm /tg3.c"; gsend "rm /tg3.elf"
+# M12：switch 运行语义（症状对立：派发错/贯通用错/break 命中错层即 return 1 FAIL）。
+    # 命中 case2：r==20。
+    gsend "writefile <<M /tsw1.c"
+    gsend "int main(){int x;int r;x=2;r=0;switch(x){case 1:r=10;break;case 2:r=20;break;default:r=99;}if(r==20)return 0;return 1;}"
+    gsend "M"
+    gwait "M12 switch命中 源写入" "\[writefile\] '/tsw1.c' wrote" 40
+    gsend "ccrun /tsw1.c /tsw1.elf"
+    gwait "guest M12 switch命中 编译" "cc500: compiled OK" 60
+    gwait "guest M12 switch命中 r==20 exit0" "'/tsw1.elf' exited code=0 PASS" 90
+    gsend "rm /tsw1.c"; gsend "rm /tsw1.elf"
+    # 默认分支：未中且无匹配 case → default r==99。
+    gsend "writefile <<M /tsw2.c"
+    gsend "int main(){int x;int r;x=7;r=0;switch(x){case 1:r=10;break;case 2:r=20;break;default:r=99;}if(r==99)return 0;return 1;}"
+    gsend "M"
+    gwait "M12 switch默认 源写入" "\[writefile\] '/tsw2.c' wrote" 40
+    gsend "ccrun /tsw2.c /tsw2.elf"
+    gwait "guest M12 switch默认 编译" "cc500: compiled OK" 60
+    gwait "guest M12 switch默认 r==99 exit0" "'/tsw2.elf' exited code=0 PASS" 90
+    gsend "rm /tsw2.c"; gsend "rm /tsw2.elf"
+    # 贯通 fall-through：case1→case2→default 依次执行 r=10+1+100==111。
+    gsend "writefile <<M /tsw3.c"
+    gsend "int main(){int x;int r;x=1;r=0;switch(x){case 1:r=10;case 2:r=r+1;default:r=r+100;}if(r==111)return 0;return 1;}"
+    gsend "M"
+    gwait "M12 switch贯通 源写入" "\[writefile\] '/tsw3.c' wrote" 40
+    gsend "ccrun /tsw3.c /tsw3.elf"
+    gwait "guest M12 switch贯通 编译" "cc500: compiled OK" 60
+    gwait "guest M12 switch贯通 r==111 exit0" "'/tsw3.elf' exited code=0 PASS" 90
+    gsend "rm /tsw3.c"; gsend "rm /tsw3.elf"
+    # 嵌套 switch：内层 break 只退内层、r==42。若 break 命中错误层级则 FAIL。
+    gsend "writefile <<M /tswn.c"
+    gsend "int main(){int x;int y;int r;x=1;y=2;r=0;switch(x){case 1:switch(y){case 2:r=42;break;default:r=7;}break;default:r=9;}if(r==42)return 0;return 1;}"
+    gsend "M"
+    gwait "M12 switch嵌套 源写入" "\[writefile\] '/tswn.c' wrote" 40
+    gsend "ccrun /tswn.c /tswn.elf"
+    gwait "guest M12 switch嵌套 编译" "cc500: compiled OK" 60
+    gwait "guest M12 switch嵌套 r==42 exit0" "'/tswn.elf' exited code=0 PASS" 90
+    gsend "rm /tswn.c"; gsend "rm /tswn.elf"
+    # switch 内循环 break：内层 while break 退循环不退 switch、r==i==2。
+    gsend "writefile <<M /tswl.c"
+    gsend "int main(){int i;int r;i=0;r=0;switch(3){case 3:while(i<5){i=i+1;if(i==2)break;}r=i;break;default:r=0;}if(r==2)return 0;return 1;}"
+    gsend "M"
+    gwait "M12 switch内循环break 源写入" "\[writefile\] '/tswl.c' wrote" 40
+    gsend "ccrun /tswl.c /tswl.elf"
+    gwait "guest M12 switch内循环break 编译" "cc500: compiled OK" 60
+    gwait "guest M12 switch内循环break r==2 exit0" "'/tswl.elf' exited code=0 PASS" 90
+    gsend "rm /tswl.c"; gsend "rm /tswl.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
