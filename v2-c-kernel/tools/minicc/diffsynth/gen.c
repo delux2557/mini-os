@@ -31,11 +31,14 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
  * V3b F_SUGAR（复合赋值/自增自减）：纯语法糖 lv op= rhs→lv=lv op rhs、++/--。差分网只
  * 用无 UB 安全子集：+=(2..9) -= (2..9) /= (%)= 除非零小常量 ++ -- ——刻意排除 `*=`（重复
  * 累乘会让值域逃逸有符号溢出）。值被丢弃的语句态 ++/-- 也够覆盖 emit 路径。
- * F_DO/F_BRK/F_CNT（循环控制）：do-while + break/continue 模板，_d 限幅保终止；仅 minicc。 */
+ * F_DO/F_BRK/F_CNT（循环控制）：do-while + break/continue 模板，_d/d0 限幅保终止；minicc 与
+ * cc500（M1/M5 已支持）双入网。循环计数器一律非下划线名（cc500 词法不认下划线开头标识符）。 */
 #define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC|F_MOD|F_NEG|F_CHAR|F_SUGAR|F_DO|F_BRK|F_CNT)
-/* cc500 保守基座（2026-09-05 实测校准：hostcc 探测 rc——global/array/ptr/for/~/^ 全部拒，
- * 支持 & | << 与 char；故不给 cc500 开 F_GLOBAL/F_ARRAY/F_PTR/F_FOR/F_BIT，与实测一致） */
-#define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE)
+/* cc500 能力集（2026-09-06 M1-M6 实测校准：hostcc 探测 rc——for / do-while / break / continue、
+ * 位运算 & | ^ >> ~、一元 - ! ~、% 现均支持；仍缺数组声明 / 一元 * 与 & / 词法不认大写标识符
+ * （global 名被生成器用大写 G，cc500 拒）/ ++ -- 与 /= 复合 / char 数组与 deref 形态。
+ * 故 cc500 不开 F_GLOBAL/F_ARRAY/F_PTR/F_CHAR/F_SUGAR；见 docs/design/minicc-v3-后续任务.md 任务4. */
+#define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT)
 
 static int g_caps;
 static int has(int f){ return g_caps & f; }
@@ -181,7 +184,9 @@ static void stmt_gen(int depth){
         else          { used_flags|=F_SUGAR; printf("  --(%s);\n", lv); }
         return;
     }
-    /* 能力集门控的语句 pick 列表：do/break/continue 仅 minicc 入网（cc500 保守基座不加） */
+    /* 能力集门控的语句 pick 列表（for/do/break/continue 现 cc500 亦入网，见 CAPS_CC500）。
+     * 循环计数器用 i0/d0/g0（非下划线）——cc500 词法/符号表不认下划线开头标识符（实测），
+     * 命名避开用户变量 v%d、全局 G%d、数组 a%d、指针 p%d、函数 h0/h1、char c%d/ca%d。 */
     int kinds[6], nk=0;
     kinds[nk++]=0;                                       /* 赋值 */
     if(has(F_IF))    kinds[nk++]=1;
@@ -193,13 +198,13 @@ static void stmt_gen(int depth){
     else if(kind==1){ used_flags|=F_IF; expr_gen(b,depth+1,&lo,&hi,1);
         printf("  if((%s)){ %s=1; } else { %s=0; }\n",b,lv,pick_lval()); }
     else if(kind==2){ used_flags|=F_WHILE; expr_gen(b,depth+1,&lo,&hi,1);
-        printf("  {int _g; _g=0; while((%s)&&_g<20){ _g=_g+1; %s=%s+1; }}\n",b,lv,lv); }
-    else if(kind==3){ used_flags|=F_FOR; printf("  {int _i; for(_i=0;_i<8;_i=_i+1){ %s=%s+1; }}\n",lv,lv); }
-    else /*kind==4*/{ /* do-while + break/continue：_d 限幅保终止；break/continue 各以随机条件触发 */
+        printf("  {int g0; g0=0; while((%s)&&g0<20){ g0=g0+1; %s=%s+1; }}\n",b,lv,lv); }
+    else if(kind==3){ used_flags|=F_FOR; printf("  {int i0; for(i0=0;i0<8;i0=i0+1){ %s=%s+1; }}\n",lv,lv); }
+    else /*kind==4*/{ /* do-while + break/continue：d0 限幅保终止；break/continue 各以随机条件触发 */
         char b1[128],b2[128]; long l,h;
         expr_gen(b1,depth+1,&l,&h,1); expr_gen(b2,depth+1,&l,&h,1);
         used_flags|=F_DO|F_BRK|F_CNT;
-        printf("  {int _d; _d=0; do{ %s=%s+1; _d=_d+1; if(%s)break; if(%s)continue; } while(_d<20); }\n",
+        printf("  {int d0; d0=0; do{ %s=%s+1; d0=d0+1; if(%s)break; if(%s)continue; } while(d0<20); }\n",
                lv,lv,b1,b2);
     }
 }
