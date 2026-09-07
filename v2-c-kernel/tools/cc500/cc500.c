@@ -104,19 +104,33 @@ void get_token()
      * 其余按单字符返回。对旧语法合法输入的 token 流不变（字节零变化由用例锁定）。 */
     if (i == 0) {
       c0 = nextc;
-      if ((c0 == '<') | (c0 == '>') | (c0 == '=') | (c0 == '|') | (c0 == '&') | (c0 == '!')) {
+      if ((c0 == '<') | (c0 == '>') | (c0 == '=') | (c0 == '|') | (c0 == '&') | (c0 == '!') | (c0 == '^')) {
 	takechar();
 	if (nextc == '=') {
-	  if ((c0 == '<') | (c0 == '>') | (c0 == '=') | (c0 == '!'))
+	  /* ---- 教学里程碑 M9b：&= |= ^= 复合赋值 token 合成 ----
+	   * 原 '=' 融合只认 < > = !（即 == != <= >=），于 '&'/'|'/'^' 失效（&= 被拆成
+	   * '&' '=' 语法错）。把三者并入融合集：&= |= ^= 现成独立双字符 operator；
+	   * '&&'/'||' 仍由下方 nextc=='&'/'|' 分支合成（nextc 是 '&' 非 '=' 时走那里），
+	   * 行为不变。旧语法（无 '^'（原也非法）/'&' '=' 相邻）token 流零变化。 */
+	  if ((c0 == '<') | (c0 == '>') | (c0 == '=') | (c0 == '!') | (c0 == '&') | (c0 == '|') | (c0 == '^'))
 	    takechar();
 	}
 	else if (nextc == '<') {
-	  if (c0 == '<')
+	  if (c0 == '<') {
 	    takechar();
+	    /* ---- 教学里程碑 M9b：<<= 复合赋值 token 合成 ----
+	     * 先取 '<<' 再取 '=' 得三位 operator，否则保留 '<<'（旧行为不变）。 */
+	    if (nextc == '=')
+	      takechar();
+	  }
 	}
 	else if (nextc == '>') {
-	  if (c0 == '>')
+	  if (c0 == '>') {
 	    takechar();
+	    /* ---- 教学里程碑 M9b：>>= 复合赋值 token 合成 ---- */
+	    if (nextc == '=')
+	      takechar();
+	  }
 	}
 	else if (nextc == '&') {
 	  if (c0 == '&')
@@ -189,6 +203,12 @@ void get_token()
 	    nextc = getchar();
 	  w = 1;
 	}
+	/* ---- 教学里程碑 M9b：/= 复合赋值 token 合成 ----
+	 * 原 '/' 仅当后随 '*' 进注释分支，否则按单字符 '/' 返回；x/=2 于是被拆成
+	 * '/' '=' 语法错。此处 '/' 后随 '=' 时再取 '=' 得 '/=' 独立 operator；
+	 * 注释 '/' 后仍走注释、其余 '/' 仍单字符（旧行为不变）。 */
+	else if (nextc == '=')
+	  takechar();
       }
       else if (nextc != 0-1)
 	takechar();
@@ -1052,6 +1072,23 @@ int expression()
     type = compound_assign(type, 4, "\x5b\x0f\xaf\xc3");                 /* pop %ebx ; imul %ebx,%eax */
   else if (accept("%="))
     type = compound_assign(type, 8, "\x5b\x87\xd8\x99\xf7\xfb\x89\xd0"); /* pop %ebx ; xchg %eax,%ebx ; cdq ; idiv %ebx ; mov %edx,%eax */
+  /* ---- 教学里程碑 M9b：/= <<= >>= &= |= ^= 复合赋值补齐（2026-09-07）----
+   * M4 只做了 + - * % 四个。此处补齐其余六个，emit 串与对应二元层完全同款
+   * （shift 层 x<<y 用 ecx 存移位量、rhs 先入 ecx 再 pop 左值——compound_assign
+   * 里左值旧值恰在栈顶，被那串 pop 到 eax，语义正是 左<<=右）。token 已在词法
+   * 层合成独立双/三字符 operator；旧语法无这些 token → 不进新分支，emit 零变化。 */
+  else if (accept("/="))
+    type = compound_assign(type, 6, "\x5b\x87\xd8\x99\xf7\xfb");                                     /* 左/右（eax=商） */
+  else if (accept("<<="))
+    type = compound_assign(type, 5, "\x89\xc1\x58\xd3\xe0");                                        /* mov %eax,%ecx ; pop %eax ; shl %cl,%eax */
+  else if (accept(">>="))
+    type = compound_assign(type, 5, "\x89\xc1\x58\xd3\xf8");                                        /* mov %eax,%ecx ; pop %eax ; sar %cl,%eax */
+  else if (accept("&="))
+    type = compound_assign(type, 3, "\x5b\x21\xd8");                                                /* pop %ebx ; and %ebx,%eax */
+  else if (accept("|="))
+    type = compound_assign(type, 3, "\x5b\x09\xd8");                                                /* pop %ebx ; or  %ebx,%eax */
+  else if (accept("^="))
+    type = compound_assign(type, 3, "\x5b\x31\xd8");                                                /* pop %ebx ; xor %ebx,%eax */
   cc_depth = cc_depth - 1;
   return type;
 }
