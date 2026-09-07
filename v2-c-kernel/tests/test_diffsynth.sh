@@ -30,7 +30,7 @@ for seed in $SEEDS; do
   fi
 done
 
-echo "== [2/2] 动态子集：cc500 目标（能力集裁剪，无 for） =="
+echo "== [2/2] 动态子集：cc500 目标（能力集裁剪，含 cc500 M1-M6 特性） =="
 if ! bash "$RUN_DIFF" --seed 7 --count 10 --target cc500 --vars 3 --stmts 5 \
      --gen "$GEN" --hostminicc "$BUILD/diffsynth/hostminicc" --out "$BUILD/diffsynth"; then
   echo "[FAIL] cc500 目标（能力集裁剪）"
