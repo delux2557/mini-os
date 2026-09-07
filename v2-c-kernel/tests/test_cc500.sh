@@ -106,6 +106,12 @@ hrun t_dobc 'int main(){int i;int s;s=0;i=0;do{i=i+1;if(i==3)continue;if(i==5)br
 # M5 纪律#1：循环外 break / continue 必须 error 不静默（不得产出坏码）
 hrun t_brk_oob 'int main(){int i;i=0;break;i=i+1;return 0;}' 1 'cc500: error' 'compiled OK'
 hrun t_cnt_oob 'int main(){int i;i=0;continue;i=i+1;return 0;}' 1 'cc500: error' 'compiled OK'
+# ---- M6：短路逻辑 && / ||（2026-09-06）----
+# 编译路径四例（短路语义 / 右操作数跳过在 [3/4] guest 段运行断言；症状对立编码见 AND_PAT/OR_PAT）
+hrun t_and_ok 'int main(){int a;a=3;if((a>0)&&(a<5))return 0;return 1;}' 0 'compiled OK' ''
+hrun t_or_ok  'int main(){int a;a=0;if((a>0)||(a==0))return 0;return 1;}' 0 'compiled OK' ''
+hrun t_andor  'int main(){int a;a=3;if(a>0&&a<5||a==9)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_andll  'int main(){int a;int b;a=1;b=1;if(a&&b&&a)return 0;return 1;}' 0 'compiled OK' ''
 # OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
 # 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
 # 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
@@ -139,6 +145,18 @@ if objdump -D -b binary -m i386 "$VD/t_ca_load.elf" 2>/dev/null | grep -q "$CA_P
     HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 += load 旧值确认 ($CA_PAT)"
 else
     echo "[FAIL] 宿主 += 未检出 load ($CA_PAT)——疑似被吞成 ="; HOST_FAIL=$((HOST_FAIL+1))
+fi
+# M6：短路跳转编码锁定——&& 产物须含 test;je(0f 84)、|| 须含 test;jne(0f 85)。
+# 若实现退化成按位 &(0f 21) / |(0f 09) 贪心求值或退化成无跳转，则断言红；症状对立锁定短路语义。
+if objdump -D -b binary -m i386 "$VD/t_and_ok.elf" 2>/dev/null | grep -q '0f 84'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 && 短路 je(0f 84) 编码确认"
+else
+    echo "[FAIL] 宿主 && 未检出 0f 84（疑似退化为按位&/非短路）"; HOST_FAIL=$((HOST_FAIL+1))
+fi
+if objdump -D -b binary -m i386 "$VD/t_or_ok.elf" 2>/dev/null | grep -q '0f 85'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 || 短路 jne(0f 85) 编码确认"
+else
+    echo "[FAIL] 宿主 || 未检出 0f 85（疑似退化为按位|/非短路）"; HOST_FAIL=$((HOST_FAIL+1))
 fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
@@ -259,6 +277,33 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tnest.c /tnest.elf"
     gwait "guest M5 嵌套 s==4 exit0" "'/tnest.elf' exited code=0 PASS" 90
     gsend "rm /tnest.c"; gsend "rm /tnest.elf"
+    # M6：短路运行语义（症状对立——右操作数必须被跳过，否则 return 1 FAIL）。
+    # 0&&f()：&& 短路 → f() 不执行 → g 保持 0 → return 0。若贪心按位 &(0&1) 则 f() 被调 g==1 → FAIL。
+    # 注意：cc500 需对后定义函数先写原型 `int f();`；且 main 须为第一个函数体（cc500 契约「入口=首个函数」）。
+    gsend "writefile <<M /tand.c"
+    gsend "int f();int g;int main(){int x;x=0&&f();if(g==0)return 0;return 1;}int f(){g=g+1;return 1;}"
+    gsend "M"
+    gwait "M6 && 短路 源写入" "\[writefile\] '/tand.c' wrote" 40
+    gsend "ccrun /tand.c /tand.elf"
+    gwait "guest M6 0&&f() 短路 exit0" "'/tand.elf' exited code=0 PASS" 90
+    gsend "rm /tand.c"; gsend "rm /tand.elf"
+    # 1||f()：|| 短路 → f() 不执行 → g 保持 0。若贪心则 g==1 FAIL。
+    gsend "writefile <<M /tor.c"
+    gsend "int f();int g;int main(){int x;x=1||f();if(g==0)return 0;return 1;}int f(){g=g+1;return 0;}"
+    gsend "M"
+    gwait "M6 || 短路 源写入" "\[writefile\] '/tor.c' wrote" 40
+    gsend "ccrun /tor.c /tor.elf"
+    gwait "guest M6 1||f() 短路 exit0" "'/tor.elf' exited code=0 PASS" 90
+    gsend "rm /tor.c"; gsend "rm /tor.elf"
+    # M6：&& 求值语义——(a>0)&&(a<5) 为真 return 0；混合优先级 a>0&&a<5||a==9 亦真。
+    gsend 'writefile /tvand.c int main(){int a;a=3;if(a>0&&a<5)return 0;return 1;}'
+    gsend "ccrun /tvand.c /tvand.elf"
+    gwait "guest M6 && 值语义 编译" "cc500: compiled OK" 60
+    gwait "guest M6 && 值语义 exit0" "'/tvand.elf' exited code=0 PASS" 90
+    gsend 'writefile /tvandor.c int main(){int a;a=3;if(a>0&&a<5||a==9)return 0;return 1;}'
+    gsend "ccrun /tvandor.c /tvandor.elf"
+    gwait "guest M6 &&|| 优先级 编译" "cc500: compiled OK" 60
+    gwait "guest M6 &&|| 优先级 exit0" "'/tvandor.elf' exited code=0 PASS" 90
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
