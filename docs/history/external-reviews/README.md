@@ -19,43 +19,43 @@
 | F-5 | v0.33 | **BUG-043** | pid 表耗尽静默返回 | `16e8f82`（PR #8 已合 main） | |
 | F-6 | — | **OBS-004** | writefile 128B 行截断 | 限速不修 | F-3 修复后已非崩溃引信，仅教学限制 |
 | 评审残留 | — | **OBS-003** | netsock send/recv 无进程归属 | 威胁模型声明 | close 已隔离（BUG-038），send/recv 保持共享语义 |
-| F1–F6 | v1.4.8(#28) | （工具链/测试基建，待立项为修补 PR） | RR 地基：回放/录制无输入背压(P1)、HTTP_PORT 不贯穿、golden 无窗口、网络流无格式 | 见 `mini-os-rr-handoff-for-dev_bd2f598a.md` | 仅登记核实与处置，代码修复另拆 PR 后再补 commit |
-| OBS-MM-1 | v1.5 | （观察/加固，非 bug） | 内核集中式堆只增不还帧池；kmalloc 依赖连续帧竞争帧池 | 见 `mini-os-mm-subsystem-deep-audit_d3b0c68.md` | P3，教学定位可推迟 |
+| F1–F6 | v1.4.8(#28) | （工具链/测试基建，待立项为修补 PR） | RR 地基：回放/录制无输入背压(P1)、HTTP_PORT 不贯穿、golden 无窗口、网络流无格式 | 见 `reviews/mini-os-rr-handoff-for-dev_bd2f598a.md` | 仅登记核实与处置，代码修复另拆 PR 后再补 commit |
+| OBS-MM-1 | v1.5 | （观察/加固，非 bug） | 内核集中式堆只增不还帧池；kmalloc 依赖连续帧竞争帧池 | 见 `deep-audits/mini-os-mm-subsystem-deep-audit_d3b0c68.md` | P3，教学定位可推迟 |
 | OBS-MM-2 | v1.5 | （观察/加固，非 bug） | frame_alloc O(nframes) 首次适配未声明复杂度假设 | 同上 | P3 |
 | OBS-MM-3 | v1.5 | （hygiene，非 bug） | mem_init 位图清零到 nframes/8 字节边界 | 同上 | P3 |
 | OBS-MM-4 | v1.5 | （观察，非 bug） | ZOMBIE 延迟持有的页目录/页表帧直到 reap | 同上 | P2 |
 | OBS-MM-5 | v1.5 | （重构建议，非 bug） | 每进程资源配额散落定义，应收敛为 resource_t | 同上 | P2，呼应架构总览 |
 | OBS-MM-6 | v1.x（2026-09-03） | （返回状态审计，静态推演） | `frame_alloc`/`map_page_in` 返回个别调用点静默丢弃：`usermode.c app_mapfn` ELF 加载时页表帧 OOM 静默丢映射（后续缺页崩）；懒分配 `map_page` 丢弃 `-1`；sched/idle 初始化、e1000 MMIO 未校验返回 | bugs.md `未解决问题` **OBS-009** | P2/P3；app_mapfn 加 `map_page_in(...)!=0→load_failed` 收口（~3 行） |
-| OBS-NET-1 | v1.5 | （潜在契约缺口，非已证缺陷） | TCP 上行滑动窗口槽复用未断言 busy==0（部分 ACK 下可能覆盖在途槽） | `mini-os-netstack-deep-audit.md` | P2，验证性加固 |
+| OBS-NET-1 | v1.5 | （潜在契约缺口，非已证缺陷） | TCP 上行滑动窗口槽复用未断言 busy==0（部分 ACK 下可能覆盖在途槽） | `deep-audits/mini-os-netstack-deep-audit.md` | P2，验证性加固 |
 | OBS-NET-2 | v1.5 | （观察，非 bug） | 可靠下行 rx_next/seq 16 位回绕未文档化 | 同上 | P3 |
 | OBS-NET-3 | v1.5 | （假设声明，非 bug） | 突发下行依赖 NIC 环 + 快速 recv | 同上 | P3 |
 | OBS-NET-4 | v1.5 | （加固，非 bug） | auto_port 冲突审计 + 回绕处理 | 同上 | P3 |
-| OBS-CC-1 | v1.5 | （崩溃引信，静态推演） | cc500 递归下降无深度护栏，深嵌套可耗尽栈 | `mini-os-cc500-deep-audit.md` | P2，加护栏 |
+| OBS-CC-1 | v1.5 | （崩溃引信，静态推演） | cc500 递归下降无深度护栏，深嵌套可耗尽栈 | `deep-audits/mini-os-cc500-deep-audit.md` | P2，加护栏 |
 | OBS-CC-2 | v1.5 | （hygiene，非 bug） | realloc newlen≥oldlen 隐式契约无断言 | 同上 | P3 |
 | OBS-CC-3 | v1.5 | （文档，非 bug） | 单栈全局方案、非短路位运算边界 | 同上 | P3 |
 | OBS-CC-4 | v1.5 | （资源，非 bug） | 部分失败路径 fs slot 未归还 | 同上 | P3 |
 | OBS-CC-5 | v1.5 | （文档，非 bug） | 32KB 输入上限声明 | 同上 | P3 |
-| OBS-RR-1 | v1.5 | （加固，非 bug） | RR ack 信号依赖 debug 关键词，建议独立通道 | `mini-os-rr-engine-deep-audit.md` | P3 |
+| OBS-RR-1 | v1.5 | （加固，非 bug） | RR ack 信号依赖 debug 关键词，建议独立通道 | `deep-audits/mini-os-rr-engine-deep-audit.md` | P3 |
 | OBS-RR-2 | v1.5 | （能力，非 bug） | 回放 ack 未齐仅告警，建议 RP_ACK_STRICT | 同上 | P3 |
 | OBS-RR-3 | v1.5 | （文档，非 bug） | in/out.tr header 加格式版本 | 同上 | P3 |
-| OBS-DRV-1 | v1.5 | （验证性加固，静态推演） | e1000_tx 忙等 30 万次可能阻塞 timer ISR 上下文 | `mini-os-drv-deep-audit.md` | P2，TX 移出 ISR 或轻量化 |
+| OBS-DRV-1 | v1.5 | （验证性加固，静态推演） | e1000_tx 忙等 30 万次可能阻塞 timer ISR 上下文 | `deep-audits/mini-os-drv-deep-audit.md` | P2，TX 移出 ISR 或轻量化 |
 | OBS-DRV-2 | v1.5 | （防御，非 bug） | ata 层 lba+count 无越界校验 | 同上 | P3 |
 | OBS-DRV-3 | v1.5 | （hygiene，非 bug） | serial_printf 内嵌 serial_puts 二次取关中断 | 同上 | P3 |
 | OBS-DRV-4 | v1.5 | （契约文档，非 bug） | e1000 TX 同步轮询契约未注明 | 同上 | P3 |
-| OBS-FS-1 | v1.5 | （能力，静态推演） | 目录无间接块扩容，条目上限约 1536 | `mini-os-fs-deep-audit.md` | P2 |
+| OBS-FS-1 | v1.5 | （能力，静态推演） | 目录无间接块扩容，条目上限约 1536 | `deep-audits/mini-os-fs-deep-audit.md` | P2 |
 | OBS-FS-2 | v1.5 | （性能，非 bug） | 持久化全量同步无脏块位图 | 同上 | P2 |
 | OBS-FS-3 | v1.5 | （防御，非 bug） | bitmap set/test 无越界护栏 | 同上 | P3 |
 | OBS-FS-4 | v1.5 | （一致性，非 bug） | fs_read/fs_write 双界不对称 | 同上 | P3 |
 | OBS-FS-5 | v1.5 | （文档，非 bug） | storage_sync 非原子语义未声明 | 同上 | P3 |
-| OBS-ARCH-1 | v1.5 | （文档，非 bug） | PIC 从片全掩码，IRQ8-15 永不触发需显式注明 | `mini-os-arch-deep-audit.md` | P3 |
+| OBS-ARCH-1 | v1.5 | （文档，非 bug） | PIC 从片全掩码，IRQ8-15 永不触发需显式注明 | `deep-audits/mini-os-arch-deep-audit.md` | P3 |
 | OBS-ARCH-2 | v1.5 | （契约，非 bug） | sched_switch_esp 裸 uint32_t 入参无类型安全 | 同上 | P3 |
 | OBS-ARCH-3 | v1.5 | （加固，非 bug） | boot.s hang 前后无诊断输出 | 同上 | P3 |
 | OBS-ARCH-4 | v1.5 | （防御，非 bug） | timer_init freq=0 除零保护 | 同上 | P3 |
-| OBS-KP-1 | v1.5 | （文档，静态推演） | 等待队列数组前移 O(n) 出队 + 上限语义 | `mini-os-kernelprim-deep-audit.md` | P2，注明复杂度与上限 |
+| OBS-KP-1 | v1.5 | （文档，静态推演） | 等待队列数组前移 O(n) 出队 + 上限语义 | `deep-audits/mini-os-kernelprim-deep-audit.md` | P2，注明复杂度与上限 |
 | OBS-KP-2 | v1.5 | （防御，非 bug） | msg 交棒不变量未断言 | 同上 | P3 |
 | OBS-KP-3 | v1.5 | （可读性，非 bug） | sem 三态返回改枚举显式化 | 同上 | P3 |
 | OBS-KP-4 | v1.5 | （自审计，非 bug） | sched_audit 未对账就绪队列与 PCB 状态 | 同上 | P3 |
-| OBS-SH-1 | v1.5 | （观察，非 bug） | shell 命令 15 项线性匹配 | `mini-os-shell-deep-audit.md` | P3 |
+| OBS-SH-1 | v1.5 | （观察，非 bug） | shell 命令 15 项线性匹配 | `deep-audits/mini-os-shell-deep-audit.md` | P3 |
 | OBS-SH-2 | v1.5 | （防御，非 bug） | writefile 单行内容长度未显式校验 | 同上 | P3 |
 | OBS-SH-3 | v1.5 | （可读性，非 bug） | DELIM/PATH 上限魔法数字分散 | 同上 | P3 |
 | OBS-SH-4 | v1.5 | （一致性，非 bug） | tokenize/split_* 双解析风格并存 | 同上 | P3 |
@@ -71,11 +71,20 @@
 外部报告原始 findings（`socket-findings.md` / `cc500-findings.md` / 本批任务包）由评审方提供时，
 原样归档于本目录（各自独立 `.md`，保留来源标注与时间戳）。此 README 为对照索引，不替代原文。
 
+> **目录结构（2026-09-07 分类整理）**：`deep-audits/`（9 篇子系统专项深审系列：
+> arch / cc500 / drv / fs / kernelprim / mm-subsystem / netstack / rr-engine / shell）、
+> `reviews/`（3 篇项目级文档：综合评审 `arch-and-quality-review_6ac70e4`、评估记录 `eval-log_9711cbc`、
+> 研发交接 `rr-handoff-for-dev_bd2f598a`）、`diffsynth/`（2026-09-07 新增，外部审计方交付的**自洽审计包**：
+> 主报告 `diffsynth-审计报告.md` + `README-审计包.md` + `evidence/` 4 份实测日志 + `harness/`（gen.c 生成器 /
+> gen_audit.sh 复现脚本 / 源码 crt32.c·runmin.c·start32.s / dd_pred.sh，及两 ELF 静态二进制 hostminicc32·runmin32）。
+> 二进制**不进 git**（按 sha256 归档、本机 Windows 不可运行、未独立复现），详见 `diffsynth/入库存档说明.md`。
+> 上方 OBS-* 行的反引号引用均已同步至对应子文件夹路径。
+
 > **命名规则（治理 P2 明文化，2026-09-03）**：审计对象为**单点 commit** 的报告，文件名带对象
-> sha 后缀（如 `mini-os-arch-and-quality-review_6ac70e4.md`，对象 `6ac70e4`）；审计对象为**代码
+> sha 后缀（如 `reviews/mini-os-arch-and-quality-review_6ac70e4.md`，对象 `6ac70e4`）；审计对象为**代码
 > 目录 / 多文件**（无单点 sha 可指）的深审报告省略后缀，其对象在报告头"审计对象"行标注路径与行数。
 > 本目录 2026-09-03 由 `docs/external-reviews/` 迁入 `docs/history/external-reviews/`（时点产物
 > 归只读归档区，不占活文档区），报告正文原样未动。
 
-> 顶层**架构与代码质量综合评审**（评分 8.3/10）：`mini-os-arch-and-quality-review_6ac70e4.md`
+> 顶层**架构与代码质量综合评审**（评分 8.3/10）：`reviews/mini-os-arch-and-quality-review_6ac70e4.md`
 > （对象 `6ac70e4`，含总体定位/架构分层/验证体系/约束声明）。各子系统专项深审见上方 OBS-* 行，本报告为总览。

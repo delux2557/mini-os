@@ -1,0 +1,2 @@
+== [gen_audit] total=400 gcc_rej=0 nondet=0 UB程序=0 minicc_rej=0 语义差分=0 hang/crash=0 一致=400 ==
+== 覆盖探针告警 ==

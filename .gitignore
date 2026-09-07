@@ -17,3 +17,11 @@ v2-c-kernel/tests/build/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# 外部审计预编译二进制（docs/history/external-reviews/diffsynth/harness/）
+# 不进 git 历史：按 sha256 归档、本机 Windows 不可运行、未独立复现（见 diffsynth/入库存档说明.md）
+docs/history/external-reviews/diffsynth/harness/hostminicc32
+docs/history/external-reviews/diffsynth/harness/runmin32
+
+# 但外部审计 evidence 日志属审计证据，需归档（白名单，覆盖上面的 *.log）
+!docs/history/external-reviews/diffsynth/evidence/*.log
