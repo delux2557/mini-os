@@ -834,10 +834,78 @@ int bitwise_or_expr()
   return type;
 }
 
+/* ---- 教学里程碑 M6：短路逻辑 && / ||（2026-09-06）----
+ * 优先级：|| < && < | < ^ < &（C 标准）。所以在 expression() 与 bitwise_or_expr()
+ * 之间插入两层 logical_or_expr -> logical_and_expr -> bitwise_or_expr；语料无 &&/||
+ * 时全程纯透传 → 既有源码产物字节零变化（P1==P2 不受影响；cc500.c 自身也不用 &&/||，
+ * 仍按位运算 & | 写布尔守卫，见 OBS-CC-3）。token 由 get_token 已合成独立 &&/||。
+ * 短路必须用跳转而非位运算（& | 会贪心求右操作数、也不归一到 0/1）：
+ *   a && b：a==0 → 略 b、结果 0；否则算 b，全非零 → 1（test;je 双跳 + mov 0/1）
+ *   a || b：a!=0 → 略 b、结果 1；否则算 b，b!=0 → 1、b==0 → 0（test;jne 双跳 +
+ *   mov 0/1）。未决前向跳用 codepos + save_int 回填（与 if/while 同机制，不新增 emit
+ *   原语）；左结合靠循环：每轮左端结果已在 eax（值型 3），promote 为 no-op 直接再判。 */
+int logical_and_expr()
+{
+  int type;
+  int je1;
+  int je2;
+  int jmp;
+  int zero;
+  type = bitwise_or_expr();
+  while (accept("&&")) {
+    promote(type);                       /* 左操作数载值进 eax（type 3 = 值，no-op） */
+    emit(8, "\x85\xc0\x0f\x84....");     /* test %eax ; je L_zero —— 左=0 提前得 0 */
+    je1 = codepos;
+    type = bitwise_or_expr();            /* 右操作数 */
+    promote(type);                       /* 载值 */
+    emit(8, "\x85\xc0\x0f\x84....");     /* test %eax ; je L_zero —— 右=0 也得 0 */
+    je2 = codepos;
+    emit(5, "\xb8\x01\x00\x00\x00");     /* mov $1,%eax —— 左右皆非零 */
+    emit(5, "\xe9....");                 /* jmp L_end（越过零值） */
+    jmp = codepos;
+    zero = codepos;                      /* L_zero：mov $0 起点 */
+    save_int(code + je1 - 4, zero - je1);
+    save_int(code + je2 - 4, zero - je2);
+    emit(5, "\xb8\x00\x00\x00\x00");     /* mov $0,%eax */
+    save_int(code + jmp - 4, codepos - jmp);
+    type = 3;                            /* 结果恒为 0/1 布尔值 */
+  }
+  return type;
+}
+
+int logical_or_expr()
+{
+  int type;
+  int jn1;
+  int jn2;
+  int jmp;
+  int one;
+  type = logical_and_expr();
+  while (accept("||")) {
+    promote(type);                       /* 左载值 */
+    emit(8, "\x85\xc0\x0f\x85....");     /* test %eax ; jne L_one —— 左非零提前得 1 */
+    jn1 = codepos;
+    type = logical_and_expr();           /* 右 */
+    promote(type);
+    emit(8, "\x85\xc0\x0f\x85....");     /* test %eax ; jne L_one —— 右非零得 1 */
+    jn2 = codepos;
+    emit(5, "\xb8\x00\x00\x00\x00");     /* mov $0,%eax —— 全假 */
+    emit(5, "\xe9....");                 /* jmp L_end（越过真值） */
+    jmp = codepos;
+    one = codepos;                       /* L_one：mov $1 起点 */
+    save_int(code + jn1 - 4, one - jn1);
+    save_int(code + jn2 - 4, one - jn2);
+    emit(5, "\xb8\x01\x00\x00\x00");     /* mov $1,%eax */
+    save_int(code + jmp - 4, codepos - jmp);
+    type = 3;
+  }
+  return type;
+}
+
 /*
  * expression:
- *         bitwise-or-expr
- *         bitwise-or-expr = expression
+ *         logical-or-expr
+ *         logical-or-expr = expression
  */
 int expression()
 {
@@ -845,7 +913,7 @@ int expression()
   cc_depth = cc_depth + 1;
   if (cc_depth > 512)
     error();               /* OBS-CC-1：深嵌套注入（((((... 或 a=b=c=...) 在耗尽栈前被拒绝 */
-  type = bitwise_or_expr();
+  type = logical_or_expr();
   if (accept("=")) {
     be_push();
     stack_pos = stack_pos + 1;
