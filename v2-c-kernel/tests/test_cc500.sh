@@ -105,8 +105,16 @@ hrun t_ca_lval 'int g;int f(){g=g+1;return 0;}int main(){char *s;s="A";g=0;s[f()
 hrun t_ca_load 'int main(){int x;x=5;x+=3;return x;}' 0 'compiled OK' ''
 # M4 纪律#2：非 lvalue 目标（3 += 1）必须 error 不静默（不得产出坏产物）
 hrun t_ca_nolv 'int main(){int x;x=3+=1;return x;}' 1 'cc500: error' 'compiled OK'
-# M4 边界：'/=' 不在 M4 范围，x/=2 须干净报错（'/' 走注释分支，按 '/' '=' 解析后语法错）
-hrun t_ca_sdeq 'int main(){int x;x=5;x/=2;return x;}' 1 'cc500: error' 'compiled OK'
+# M9b：/= <<= >>= &= |= ^= 复合赋值补齐（2026-09-07）
+# 编译路径（语义在 [3/4] guest 段断言）；'/' 后随 '=' 现成 '/=' 独立 operator，不再按 '/' '='
+# 拆开报错。负对照：非 lvalue 目标（3/=2、3<<=1）仍须 error 不静默。
+hrun t_ca_div  'int main(){int x;x=17;x/=5;return x;}' 0 'compiled OK' ''
+hrun t_ca_x2   'int main(){int x;x=5;x*=4;x/=2;return x;}' 0 'compiled OK' ''
+hrun t_ca_shl  'int main(){int x;x=1;x<<=4;x>>=2;return x;}' 0 'compiled OK' ''
+hrun t_ca_bit  'int main(){int x;x=0;x|=3;x&=5;x^=6;return x;}' 0 'compiled OK' ''
+hrun t_ca_rval 'int main(){int x;x=5;x/=2*3;x<<=1+1;return x;}' 0 'compiled OK' ''
+hrun t_ca_nodiv 'int main(){int x;x=5;3/=2;return x;}' 1 'cc500: error' 'compiled OK'
+hrun t_ca_noshift 'int main(){int x;x=5;3<<=1;return x;}' 1 'cc500: error' 'compiled OK'
 # ---- M5：break / continue 循环控制（2026-09-06）----
 # 编译路径：for+break（0..9 遇 5 断，求和 10）与 for+continue（跳过奇数，偶数求和 20）——
 # 语义断言在 [3/4] guest 段；此处仅验编译路径（rc=0=compiled OK）。
@@ -168,6 +176,18 @@ if objdump -D -b binary -m i386 "$VD/t_ca_load.elf" 2>/dev/null | grep -q "$CA_P
     HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 += load 旧值确认 ($CA_PAT)"
 else
     echo "[FAIL] 宿主 += 未检出 load ($CA_PAT)——疑似被吞成 ="; HOST_FAIL=$((HOST_FAIL+1))
+fi
+# M9b：/= 复合赋值编码锁定——x/=2 须含 idiv(eax/=ebx, f7 fb) 除法路径；若 '/' 后 '=' 仍被
+# 拆分（/ 后按注释失败、'=' 游离）则无 f7 fb 且语法 err（症状对立）。shift 补 <<= 的 shl d3 e0。
+if objdump -D -b binary -m i386 "$VD/t_ca_div.elf" 2>/dev/null | grep -q 'f7 fb'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 /= idiv(eax/=ebx, f7 fb) 编码确认"
+else
+    echo "[FAIL] 宿主 /= 未检出 idiv f7 fb（疑似 '/' '=' 被拆开）"; HOST_FAIL=$((HOST_FAIL+1))
+fi
+if objdump -D -b binary -m i386 "$VD/t_ca_shl.elf" 2>/dev/null | grep -q 'd3 e0'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 <<= shl %cl d3 e0 编码确认"
+else
+    echo "[FAIL] 宿主 <<= 未检出 shl d3 e0（疑似移位量/操作数据序错）"; HOST_FAIL=$((HOST_FAIL+1))
 fi
 # M6：短路跳转编码锁定——&& 产物须含 test;je(0f 84)、|| 须含 test;jne(0f 85)。
 # 若实现退化成按位 &(0f 21) / |(0f 09) 贪心求值或退化成无跳转，则断言红；症状对立锁定短路语义。
@@ -408,7 +428,7 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M8 for+i++ 编译" "cc500: compiled OK" 60
     gwait "guest M8 for i++ s==10 exit0" "'/tforinc.elf' exited code=0 PASS" 90
     gsend "rm /tforinc.c"; gsend "rm /tforinc.elf"
-    # M9：hex 运行语义——0xff==255、0xa==10、0x10+0x20==0x30(48)、大值 0xffffffff==-1（int 32 位）。
+# M9：hex 运行语义——0xff==255、0xa==10、0x10+0x20==0x30(48)、大值 0xffffffff==-1（int 32 位）。
     # 任一 hex 解析错（如高 4 位丢弃/按十进制）即 return 1 -> code=1 FAIL（症状对立）。
     gsend "writefile <<M /thex.c"
     gsend "int main(){int a;int b;a=0xff;b=0xa;if(a==255)if(b==10)if(0x10+0x20==48)if(0xffffffff==-1)return 0;return 1;}"
@@ -418,6 +438,16 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M9 hex 编译" "cc500: compiled OK" 60
     gwait "guest M9 hex 语义 exit0" "'/thex.elf' exited code=0 PASS" 90
     gsend "rm /thex.c"; gsend "rm /thex.elf"
+    # M9b：复合赋值补齐运行语义——/= 同 idiv 商、<<=/>>= 移位数据序(左旧值右移量、右操作数
+    # 先入ecx)、位逻辑复合 |= &= ^=。任一错（如 '/' '=' 被拆开、移位对调）即 return 1 FAIL。
+    gsend "writefile <<M /tcab.c"
+    gsend "int main(){int x;int y;x=17;x/=5;y=1;y<<=4;y>>=2;if(x==3)if(y==4){x=0;x|=3;x&=5;x^=6;if(x==7)return 0;}return 1;}"
+    gsend "M"
+    gwait "M9b 复合赋值 源写入" "\[writefile\] '/tcab.c' wrote" 40
+    gsend "ccrun /tcab.c /tcab.elf"
+    gwait "guest M9b 复合赋值 编译" "cc500: compiled OK" 60
+    gwait "guest M9b 复合赋值 语义 exit0" "'/tcab.elf' exited code=0 PASS" 90
+    gsend "rm /tcab.c"; gsend "rm /tcab.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
