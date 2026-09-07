@@ -223,6 +223,23 @@ if objdump -D -b binary -m i386 "$VD/t_heximm.elf" 2>/dev/null | grep -q 'ef be 
 else
     echo "[FAIL] 宿主 hex 未检出立即数 0xdeadbeef（疑似解析错位）"; HOST_FAIL=$((HOST_FAIL+1))
 fi
+# OBS-CC-5（输入上限抬升）：构造 >64KB 源（巨型注释 + main），必须编译成功 rc=0 + compiled OK，
+# 且不得再出现 "input too big" 截断报错（旧缺陷：open_input 定长 malloc(65536)，读满探 1 字节
+# 判截断后显式拒绝）。若实现退回定长/仍未扩容，>64KB 源即被拒 rc=1（症状对立）。
+python3 - "$VD/big.c" <<'PY'
+import sys
+with open(sys.argv[1], 'w') as f:
+    f.write('/* OBS-CC-5 扩容回归：')
+    f.write('A' * 70000)          # > 65536，必触发旧定长拒绝，撞新扩容路径
+    f.write('*/\n')
+    f.write('int main(){return 0;}\n')
+PY
+bout=$(timeout 20 "${RUN[@]}" "$VD/big.c" "$VD/big.elf" 2>&1); brc=$?
+if [ "$brc" = 0 ] && echo "$bout" | grep -q 'compiled OK' && ! echo "$bout" | grep -q 'input too big'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 OBS-CC-5 输入 >64KB 编译通过 (rc=$brc)"
+else
+    echo "[FAIL] 宿主 OBS-CC-5 rc=$brc（>64KB 源未扩容编译）"; echo "$bout" | sed 's/^/        /'; HOST_FAIL=$((HOST_FAIL+1))
+fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
