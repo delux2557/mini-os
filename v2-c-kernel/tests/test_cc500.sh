@@ -63,9 +63,19 @@ hrun t_bcomm 'int main(){/* unterminated comment' \
 # 不得 SIGSEGV(139)（旧缺陷：token 惰性分配，空源永不 takechar->写 NULL）也不得骗 compiled OK
 hrun t_empty '' 1 'undefined symbol' 'compiled OK'
 hrun t_comment_nofn '/* only a comment, no function */' 1 'undefined symbol' 'compiled OK'
-# BUG-049：数字字面量混入字母 -> 必须 FAIL 且报出错 token，不得静默算错骗 compiled OK
-hrun t_mixhex 'int main(){return 0x10;}' \
-     1 '0x10' 'compiled OK'
+# M9：十六进制字面量 0x…（2026-09-07）——0x10 由 BUG-049 的拒绝态转正为 0x10==16
+# （编译路径；数值/大值语义在 [3/4] guest 段断言；编码锁定见 HEX_PAT）。
+hrun t_hex_ok  'int main(){return 0x10;}' 0 'compiled OK' ''
+hrun t_hex_a2f 'int main(){int x;x=0xa;x=0xff;return x;}' 0 'compiled OK' ''
+hrun t_hex_mix 'int main(){int x;x=0x10+0x20;return x;}' 0 'compiled OK' ''
+hrun t_hex_zero 'int main(){int x;x=0x0;return x;}' 0 'compiled OK' ''
+# 供上方 HEX_PAT 编码断言取材：唯一 hex 大值 → 产物立即数即 0xdeadbeef
+hrun t_heximm 'int main(){return 0xdeadbeef;}' 0 'compiled OK' ''
+# BUG-049 遗留负对照：非 0x 前缀的十进制混入字母仍须 FAIL 且报出错 token
+# 纯非法 hex 字符（0x1z）也 clean error，不静默算错、不骗 compiled OK
+hrun t_hex_bad  'int main(){return 0x1z;}' 1 '0x1z' 'compiled OK'
+# 0x-1 实为 0x-1 即 0-1=-1（'-' 后总是新子表达式，无数字缺口路径）——正例而非负例
+hrun t_hex_sign 'int main(){int x;x=0x-1;return x;}' 0 'compiled OK' ''
 hrun t_mixalpha 'int main(){return 123abc;}' \
      1 '123abc' 'compiled OK'
 # F-1：关系 < / > / >= / <= 均须能编译通过（编码与语义下方另行实证）
@@ -184,6 +194,14 @@ if objdump -D -b binary -m i386 "$VD/t_incpost.elf" 2>/dev/null | grep -q '89 c8
     HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 ++ 后缀旧值 编码确认 (89 c8 恢复旧值)"
 else
     echo "[FAIL] 宿主 ++ 未检出 89 c8（后缀疑似被当折扣/返新值）"; HOST_FAIL=$((HOST_FAIL+1))
+fi
+# M9：hex 立即数编码锁定——return 0xdeadbeef 的产物须含 mov $0xdeadbeef,%eax
+#（b8 ef be ad de）。若 hex 解析错位（如按 0xde+adbe 拆开、或把 0xdeadbeef 当十进制）
+# 则立即数不同，objdump 无 'de ad be ef' 字节序 → 断言红（症状对立）。
+if objdump -D -b binary -m i386 "$VD/t_heximm.elf" 2>/dev/null | grep -q 'ef be ad de'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 hex 立即数 0xdeadbeef 编码确认 (b8 ef be ad de)"
+else
+    echo "[FAIL] 宿主 hex 未检出立即数 0xdeadbeef（疑似解析错位）"; HOST_FAIL=$((HOST_FAIL+1))
 fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
@@ -365,7 +383,7 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tqn.c /tqn.elf"
     gwait "guest M7 ?: 嵌套==3 exit0" "'/tqn.elf' exited code=0 PASS" 90
     gsend "rm /tqn.c"; gsend "rm /tqn.elf"
-    # M8：++/-- 运行语义——后缀值=旧值、前缀值=新值、for 步进可用 i++。
+# M8：++/-- 运行语义——后缀值=旧值、前缀值=新值、for 步进可用 i++。
     # 后缀旧值：r=i++ → r==5 && i==6（若后缀误返回新值则 r==6 FAIL）
     gsend 'writefile /tinc.c int main(){int i;int r;i=5;r=i++;if(i==6&&r==5)return 0;return 1;}'
     gsend "ccrun /tinc.c /tinc.elf"
@@ -390,6 +408,16 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M8 for+i++ 编译" "cc500: compiled OK" 60
     gwait "guest M8 for i++ s==10 exit0" "'/tforinc.elf' exited code=0 PASS" 90
     gsend "rm /tforinc.c"; gsend "rm /tforinc.elf"
+    # M9：hex 运行语义——0xff==255、0xa==10、0x10+0x20==0x30(48)、大值 0xffffffff==-1（int 32 位）。
+    # 任一 hex 解析错（如高 4 位丢弃/按十进制）即 return 1 -> code=1 FAIL（症状对立）。
+    gsend "writefile <<M /thex.c"
+    gsend "int main(){int a;int b;a=0xff;b=0xa;if(a==255)if(b==10)if(0x10+0x20==48)if(0xffffffff==-1)return 0;return 1;}"
+    gsend "M"
+    gwait "M9 hex 源写入" "\[writefile\] '/thex.c' wrote" 40
+    gsend "ccrun /thex.c /thex.elf"
+    gwait "guest M9 hex 编译" "cc500: compiled OK" 60
+    gwait "guest M9 hex 语义 exit0" "'/thex.elf' exited code=0 PASS" 90
+    gsend "rm /thex.c"; gsend "rm /thex.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else

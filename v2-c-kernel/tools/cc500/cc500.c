@@ -465,13 +465,30 @@ int primary_expr()
   if (('0' <= token[0]) & (token[0] <= '9')) {
     int n = 0;
     i = 0;
-    /* v0.32 BUG-049：数字字面量逐字符校验，拒绝混入字母（如 0x10/123abc）。
-     * 此前 tokenizer 混吃字母数字、此处又未校验，非十进制字符被静默算错。 */
-    while (token[i]) {
-      if ((token[i] < '0') | ('9' < token[i]))
-	error();
-      n = (n << 1) + (n << 3) + token[i] - '0';
-      i = i + 1;
+    /* ---- 教学里程碑 M9：十六进制字面量 0x…（2026-09-07）----
+     * tokenizer 把 0x10 合为单 token（'x' 属 a-z），此处分流解析：
+     * 0x 前缀按下述 hex 循环（0-9 a-f 逐位、左移 4），否则走原十进制路径
+     * （含 BUG-049 的逐字符校验）。原十进制路径字节/语义零变化；
+     * 非法 hex 串（0x1z、0x-1）由 error() 拒绝，不静默算错。 */
+    if ((token[0] == '0') & (token[1] == 'x')) {
+      i = 2;
+      while (token[i]) {
+	if (('0' <= token[i]) & (token[i] <= '9'))
+	  n = (n << 4) + token[i] - '0';
+	else if (('a' <= token[i]) & (token[i] <= 'f'))
+	  n = (n << 4) + token[i] - 'a' + 10;
+	else
+	  error();
+	i = i + 1;
+      }
+    }
+    else {
+      while (token[i]) {
+	if ((token[i] < '0') | ('9' < token[i]))
+	  error();
+	n = (n << 1) + (n << 3) + token[i] - '0';
+	i = i + 1;
+      }
     }
     emit(5, "\xb8...."); /* mov $x,%eax */
     save_int(code + codepos - 4, n);
