@@ -112,6 +112,12 @@ hrun t_and_ok 'int main(){int a;a=3;if((a>0)&&(a<5))return 0;return 1;}' 0 'comp
 hrun t_or_ok  'int main(){int a;a=0;if((a>0)||(a==0))return 0;return 1;}' 0 'compiled OK' ''
 hrun t_andor  'int main(){int a;a=3;if(a>0&&a<5||a==9)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_andll  'int main(){int a;int b;a=1;b=1;if(a&&b&&a)return 0;return 1;}' 0 'compiled OK' ''
+# ---- M7：?: 三目（2026-09-06）----
+# 编译路径（运行时语义/分支互斥在 [3/4] guest 段）；t_q_ok 无 if/while/&&/||/for/do，
+# 故其产物唯一条件跳 je(0f 84) 必来自三目（见下方 Q_PAT 症状对立断言）。
+hrun t_q_ok    'int main(){int a;int b;a=3;b=(a>1?5:6);return b;}' 0 'compiled OK' ''
+hrun t_q_nested 'int main(){int a;a=(1?(2?3:4):5);return a;}' 0 'compiled OK' ''
+hrun t_q_rhs   'int main(){int a;int b;a=2;b=(a?1:2);b=(b>1?a:0);return b;}' 0 'compiled OK' ''
 # OBS-CC-1（护栏）：递归下降深度上限——>512 层嵌套必须被 error() 拒绝（rc=1、
 # 出现 cc500: error 且不得 compiled OK），不得耗尽栈/死循环/击穿。护栏靠 cc_depth
 # 编译期计数判定、与栈大小无关，hostcc 秒级可复现，落在宿主层。
@@ -157,6 +163,13 @@ if objdump -D -b binary -m i386 "$VD/t_or_ok.elf" 2>/dev/null | grep -q '0f 85';
     HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 || 短路 jne(0f 85) 编码确认"
 else
     echo "[FAIL] 宿主 || 未检出 0f 85（疑似退化为按位|/非短路）"; HOST_FAIL=$((HOST_FAIL+1))
+fi
+# M7：三目条件跳编码锁定——t_q_ok 无 if/while/&&/||/for/do，其 je(0f 84) 必来自三目的
+# "条件假跳假分支"。若实现退化成贪心/无跳转则断言红（症状对立：缺 M7 则无此条件跳）。
+if objdump -D -b binary -m i386 "$VD/t_q_ok.elf" 2>/dev/null | grep -q '0f 84'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 ?: 条件跳 je(0f 84) 编码确认"
+else
+    echo "[FAIL] 宿主 ?: 未检出 0f 84（疑似未发条件跳）"; HOST_FAIL=$((HOST_FAIL+1))
 fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
@@ -304,6 +317,40 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tvandor.c /tvandor.elf"
     gwait "guest M6 &&|| 优先级 编译" "cc500: compiled OK" 60
     gwait "guest M6 &&|| 优先级 exit0" "'/tvandor.elf' exited code=0 PASS" 90
+    # M7：?: 运行语义——真/假分支各取正确值；且分支互斥（0?A:B 只求值 B）。
+    # 单行 writefile 对含 ? 内容偶现 FS create fail → 全走 heredoc + 源写入锚点（防累计 grep 误判）。
+    # 真分支：a=2 时 a>1 真 → (a>1?5:6)==5 → return 0
+    gsend "writefile <<M /tqt.c"
+    gsend "int main(){int a;int b;a=2;b=(a>1?5:6);if(b==5)return 0;return 1;}"
+    gsend "M"
+    gwait "M7 真 源写入" "\[writefile\] '/tqt.c' wrote" 40
+    gsend "ccrun /tqt.c /tqt.elf"
+    gwait "guest M7 ?: 真分支 b==5 exit0" "'/tqt.elf' exited code=0 PASS" 90
+    gsend "rm /tqt.c"; gsend "rm /tqt.elf"
+    # 假分支：a=0 时 a>1 假 → (a>1?5:6)==6 → return 0
+    gsend "writefile <<M /tqf.c"
+    gsend "int main(){int a;int b;a=0;b=(a>1?5:6);if(b==6)return 0;return 1;}"
+    gsend "M"
+    gwait "M7 假 源写入" "\[writefile\] '/tqf.c' wrote" 40
+    gsend "ccrun /tqf.c /tqf.elf"
+    gwait "guest M7 ?: 假分支 b==6 exit0" "'/tqf.elf' exited code=0 PASS" 90
+    gsend "rm /tqf.c"; gsend "rm /tqf.elf"
+    # 分支互斥：0?(g=g+1):(g=g+2) 只求值假分支 → g==2。若两分支都求值则 g==3 FAIL。
+    gsend "writefile <<M /tqb.c"
+    gsend "int g;int main(){int a;a=(0?(g=g+1):(g=g+2));if(g==2)return 0;return 1;}"
+    gsend "M"
+    gwait "M7 互斥 源写入" "\[writefile\] '/tqb.c' wrote" 40
+    gsend "ccrun /tqb.c /tqb.elf"
+    gwait "guest M7 ?: 假分支仅执行 g==2 exit0" "'/tqb.elf' exited code=0 PASS" 90
+    gsend "rm /tqb.c"; gsend "rm /tqb.elf"
+    # 嵌套三目：1?(2?3:4):5 == 3
+    gsend "writefile <<M /tqn.c"
+    gsend "int main(){int a;a=(1?(2?3:4):5);if(a==3)return 0;return 1;}"
+    gsend "M"
+    gwait "M7 嵌套 源写入" "\[writefile\] '/tqn.c' wrote" 40
+    gsend "ccrun /tqn.c /tqn.elf"
+    gwait "guest M7 ?: 嵌套==3 exit0" "'/tqn.elf' exited code=0 PASS" 90
+    gsend "rm /tqn.c"; gsend "rm /tqn.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else
