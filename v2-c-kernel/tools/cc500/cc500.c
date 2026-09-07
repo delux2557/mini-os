@@ -75,6 +75,9 @@ char *my_realloc(char *old, int oldlen, int newlen)
 int nextc;
 char *token;
 int token_size;
+/* 词法器缓冲当前已写入长度：takechar 递增、get_token 归零。原为万能全局 i 兼任，
+ * 拆出专用命名，与 token/token_size/nextc 并列为词法器状态（get_token↔takechar 共享）。 */
+int token_len;
 int cc_depth;   /* OBS-CC-1：递归下降深度计数（编译期，不 emit，不影响 codegen） */
 
 void error()
@@ -86,17 +89,15 @@ void error()
   exit(1);
 }
 
-int i;
-
 void takechar()
 {
-  if (token_size <= i + 1) {
-    int x = (i + 10) << 1;
+  if (token_size <= token_len + 1) {
+    int x = (token_len + 10) << 1;
     token = my_realloc(token, token_size, x);
     token_size = x;
   }
-  token[i] = nextc;
-  i = i + 1;
+  token[token_len] = nextc;
+  token_len = token_len + 1;
   nextc = getchar();
 }
 
@@ -109,14 +110,14 @@ void get_token()
     w = 0;
     while ((nextc == ' ') | (nextc == 9) | (nextc == 10))
       nextc = getchar();
-    i = 0;
+    token_len = 0;
     while ((('a' <= nextc) & (nextc <= 'z')) |
 	   (('0' <= nextc) & (nextc <= '9')) | (nextc == '_'))
       takechar();
     /* M2：operator 词法精确化——原 while 把 <>=|&! 集合连续吞并，导致 "=!" 被合成
      * 单 token（x=!x 无法解析）。现只合成合法双字符运算符（== != <= >= << >> && ||），
      * 其余按单字符返回。对旧语法合法输入的 token 流不变（字节零变化由用例锁定）。 */
-    if (i == 0) {
+    if (token_len == 0) {
       c0 = nextc;
       if ((c0 == '<') | (c0 == '>') | (c0 == '=') | (c0 == '|') | (c0 == '&') | (c0 == '!') | (c0 == '^')) {
 	takechar();
@@ -173,7 +174,7 @@ void get_token()
 	}
       }
     }
-    if (i == 0) {
+    if (token_len == 0) {
       if (nextc == 39) {
 	takechar();
 	/* v0.32 F-3：字符字面量读取加 EOF 守卫（C 子集无 break，用标志变量）。
@@ -227,7 +228,7 @@ void get_token()
       else if (nextc != 0-1)
 	takechar();
     }
-    token[i] = 0;
+    token[token_len] = 0;
   }
 }
 
@@ -263,9 +264,9 @@ int code_offset;
  * 假设计算 rel32；但顶层全局变量（如 `int g;`）会在 stub 后先 emit 4 字节存储，
  * 使首函数被推迟，be_start 的 rel32 便落在全局存储上→入口跳到数据→运行即挂。
  * 故在 program() 首个函数体开始处把入口 call 重定位到该函数（函数在前的旧源
- * 重算值与 be_start 相同，零改动；全局在前者修复入口跳转）。 */
-int entry_call_done;
-
+ * 重算值与 be_start 相同，零改动；全局在前者修复入口跳转）。
+ * （重定位的「只做一次」标志 entry_call_done 已下沉为 program() 局部量，
+ *   不再驻留全局区；program() 返回是否已定义函数供 main1 判定。） */
 /* ELF 头字节布局偏移（单一事实源，赋值见 be_start 顶部；be_finish / program 复用） */
 int off_ph_filesz;
 int off_ph_memsz;
@@ -288,6 +289,7 @@ int load_int(char *p)
 
 void emit(int n, char *s)
 {
+  int i;
   i = 0;
   if (code_size <= codepos + n) {
     int x = (codepos + n) << 1;
@@ -321,6 +323,7 @@ int sym_lookup(char *s)
 {
   int t = 0;
   int current_symbol = 0;
+  int i;
   while (t <= table_pos - 1) {
     i = 0;
     while ((s[i] == table[t]) & (s[i] != 0)) {
@@ -339,6 +342,7 @@ int sym_lookup(char *s)
 void sym_declare(char *s, int type, int value)
 {
   int t = table_pos;
+  int i;
   i = 0;
   while (s[i] != 0) {
     if (table_size <= t + 10) {
@@ -470,6 +474,7 @@ void be_finish()
    * "chain 非空"判据：value 曾被 sym_get_value 改写为引用点，故 != 初始 code_offset。 */
   int t = 0;
   int bad = 0;
+  int i;
   while (t <= table_pos - 1) {
     /* 符号表锚点 = 名字 NUL 位置（同 sym_define_global 语义：t+1=class、t+2=value）。
      * 自符号起点起跳过名字到 NUL，再检测，t=t+6 跳到下一符号起点。 */
@@ -512,6 +517,7 @@ int expression();
 int primary_expr()
 {
   int type;
+  int i;
   if (('0' <= token[0]) & (token[0] <= '9')) {
     int n = 0;
     i = 0;
@@ -1283,6 +1289,7 @@ int lbl_find(char *s)
 {
   int t = 0;
   int r = 0 - 1;      /* -1=未登记；0 也是合法锚点（首个标签落于 0），故不能用 0 当哨兵 */
+  int i;
   while (t <= lbl_pos - 1) {
     i = 0;
     while ((s[i] == lbl_tab[t]) & (s[i] != 0)) { i = i + 1; t = t + 1; }
@@ -1296,6 +1303,7 @@ int lbl_find(char *s)
 int lbl_declare(char *s)
 {
   int t = lbl_find(s);
+  int i;
   if (t < 0) {
     t = lbl_pos;
     i = 0;
@@ -1576,9 +1584,13 @@ int stmt_do()
  * parameter-declaration:
  *     type-name identifier-opt
  */
-void program()
+int program()
 {
   int current_symbol;
+  /* 首个函数定义时把入口 stub 的 call 重定位到该函数（见上方 M4 说明），
+   * 且 program() 结束不放回 0 以告知 main1「至少定义了一个函数」。纯局部即可。 */
+  int entry_call_done;
+  entry_call_done = 0;
   while (token[0]) {
     type_name();
     if (token[0] == 0)
@@ -1621,6 +1633,7 @@ void program()
     else
       error();
   }
+  return entry_call_done;
 }
 
 /* ---- v0.27: mini-os 文件系统 I/O（代替 stdin/stdout） ----
@@ -1780,8 +1793,7 @@ int main1(char *argv, int argc)
   be_start();
   nextc = getchar();
   get_token();
-  program();
-  if (entry_call_done == 0) {
+  if (program() == 0) {
     /* 无任何函数定义 -> 无入口（cc500 契约「首个定义即入口」），产出无入口 ELF 运行必挂；
      * 与 be_finish 的 undefined-symbol 纪律一致：干净报错而非编出废产物（空/纯空白/仅注释源）。 */
     sys_print("cc500: undefined symbol\x0a");
