@@ -904,8 +904,11 @@ int logical_or_expr()
 
 /*
  * expression:
+ *         conditional-expr
+ *         conditional-expr = expression
+ * conditional-expr:
  *         logical-or-expr
- *         logical-or-expr = expression
+ *         logical-or-expr ? expression : conditional-expr
  */
 int expression()
 {
@@ -914,6 +917,29 @@ int expression()
   if (cc_depth > 512)
     error();               /* OBS-CC-1：深嵌套注入（((((... 或 a=b=c=...) 在耗尽栈前被拒绝 */
   type = logical_or_expr();
+  /* ---- 教学里程碑 M7：?: 三目（2026-09-06）----
+   * C 优先级：三元 ?: 高于赋值 =、低于逻辑或 ||，故插在 logical_or 之后、'=' 之前。
+   * 单遍无 AST：条件 test;je 跳假分支、真分支后 jmp 跳过假分支，前向跳用 codepos+save_int
+   * 回填（与 if/while/短路同机制，不新增 emit 原语）。条件与两分支各求值一次；结果恒为
+   * 值（promote 载值），故可作为赋值 RHS、但不能当赋值目标。缺 ':' 即错误（不静默）。
+   * 语料无 '?' 时本分支不触发 → 旧源码 emit 字节零变化。 */
+  if (accept("?")) {
+    int p_else;
+    int p_jmp;
+    promote(type);                       /* 条件载值进 eax（type 3 为 no-op） */
+    emit(8, "\x85\xc0\x0f\x84....");     /* test %eax ; je L_else */
+    p_else = codepos;
+    type = expression();                 /* 真分支（可为任意表达式，含赋值/嵌套） */
+    promote(type);                       /* 载值 */
+    emit(5, "\xe9....");                 /* jmp L_end */
+    p_jmp = codepos;
+    save_int(code + p_else - 4, codepos - p_else);   /* je -> L_else（副本） */
+    expect(":");
+    type = expression();                 /* 假分支 */
+    promote(type);
+    save_int(code + p_jmp - 4, codepos - p_jmp);     /* jmp -> L_end */
+    type = 3;
+  }
   if (accept("=")) {
     be_push();
     stack_pos = stack_pos + 1;
