@@ -44,6 +44,7 @@ mkfifo "$TIN" "$TOUT"
 cat "$TOUT" > "$LOG" & CAT_PID=$!      # 串口输出 -> 日志（可轮询断言）
 qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -vga std \
     -no-reboot -no-shutdown -m 64 -serial stdio -monitor none \
+    -watchdog-action inject-nmi -device i6300esb \
     < "$TIN" > "$TOUT" 2>/dev/null &
 QPID=$!
 exec 9>"$TIN"                            # 保持写端打开，向串口发命令（固定 fd 9）
