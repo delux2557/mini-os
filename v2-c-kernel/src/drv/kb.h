@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #define KB_LINE_MAX 128   /* 行缓冲容量（不含结尾 '\0'） */
+#define KB_LINE_Q   4     /* v0.37: 挂起行队列容量——定行后未取走时最多保留的行数 */
 
 typedef void (*kb_line_hook_t)(void);
 
