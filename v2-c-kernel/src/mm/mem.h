@@ -40,7 +40,7 @@ void addr_space_destroy(uint32_t pd);   /* 释放该页目录独占的页表帧 
  * 内核判 STACK_GROWTH（补映射一页、守卫页随之下移）或 STACK_BOOM（深越界，栈溢出）。
  * 布局（v0.26 迁址 + v0.26#3 扩区）：栈区 [0x80010000, 0x80090000) -> shell 0x80090000 ->
  * app 区 [0x800A0000, 0x801A0000) 1MB（ELF 加载去上限）-> 共享内存 0x801A0000 ->
- * 堆区 [0x801A4000, 0x802A4000) 1MB（全部 < USER_SPACE_END 0x81000000）。
+ * 堆区 [0x801A4000, 0x805A4000) 4MB（全部 < USER_SPACE_END 0x81000000）。
  * 共享内存区 [SHMEM_VBASE, +SLOTS*4K)：与 usermode.c 的 sys_shmem 严格一致，
  * 所有进程映射到同一物理帧，fork 时保持共享（不深拷贝，v0.12）。 */
 #define USER_STACK_AREA_BASE  0x80010000u
@@ -65,11 +65,12 @@ void addr_space_destroy(uint32_t pd);   /* 释放该页目录独占的页表帧 
  * 堆区 [USER_HEAP_BASE, USER_HEAP_MAX)：在共享内存区之后向上生长。
  * 每进程独立（各自页目录映射各自物理帧，隔离），brk 记账进 PCB。
  * 扩展按页补映射（页对齐），收缩只更新 brk（保留映射复用）。
- * V3（minicc 自举）：80 页(320KB) 扩到 256 页(1MB)——自举版编译器（并行数组静态池 +
- * brk 动态 code/输入缓冲）编译自身需 ~800KB 堆；上限仍远低于 USER_SPACE_END。 */
-#define USER_HEAP_PAGES 256           /* PCB.heap_frames 记账上限（1MB=256 页） */
+ * V3（minicc 自举）：80 页(320KB) → 256 页(1MB) → 1024 页(4MB)——自举版编译器（并行数组
+ * 静态池 + brk 动态 code/输入缓冲）编译自身需 ~800KB 堆；扩到 4MB 只是抬高 OOM 触发门槛
+ * （物理内存耗尽时 frame_alloc 返回 0 的路径独立于地址上限，须 P0 层层兜底）。 */
+#define USER_HEAP_PAGES 1024          /* PCB.heap_frames 记账上限（4MB=1024 页） */
 #define USER_HEAP_BASE  0x801A4000u   /* 共享内存区之后 */
-#define USER_HEAP_MAX   (USER_HEAP_BASE + USER_HEAP_PAGES * 0x1000u)  /* = 0x802A4000 */
+#define USER_HEAP_MAX   (USER_HEAP_BASE + USER_HEAP_PAGES * 0x1000u)  /* = 0x805A4000 */
 
 /* 用户态页错误时的"栈事件"判定（guard.c 实现，纯逻辑可宿主单测）：
  *  - STACK_OK:     与"本进程栈"无关（fault 不在本进程槽内，或在已映射栈页内）
