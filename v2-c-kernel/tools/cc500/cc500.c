@@ -660,12 +660,15 @@ int compound_assign(int type, int n, char *s)
   return 3;
 }
 
-/* ---- 教学里程碑 M8：前缀/后缀自增自减 ++ --（2026-09-06）----
+/* ---- 教学里程碑 M8：前缀/后缀自增自减 ++ --（2026-09-06；前缀记账修复 2026-09-08）----
  * 复用 M4 compound_assign 的 lvalue 地址保持路径（push 地址->载值->运算->store）。
  *  - 前缀 ++lv/--lv：lv=lv±1，值=**新值**（发射与 `lv += 1` 一致，eax 即新值）。
  *  - 后缀 lv++/lv--：值=**旧值**，故 store 前先把旧值暂存到 %ecx（单表达式内无调用，
  *    ecx 安全；不新增 push/pop），运算存回后再 mov %ecx,%eax 恢复旧值。
- * 纪律：非 lvalue（type 3，如 3++）走 error 不静默（对齐 compound_assign）。 */
+ * 纪律：非 lvalue（type 3，如 3++）走 error 不静默（对齐 compound_assign）。
+ * 前缀记账（BUG：M8 前缀栈记账错位）：运算的"值弹栈"（pop %ebx; add/sub）必须走
+ * binary2——其义务含 stack_pos-1。旧实现手写 emit 同款字节却漏配对一次记账，函数内
+ * 每条前缀语句后 stack_pos 恒多 1 → 后续局部变量 lea 偏移整体偏一格 → 产物错值。 */
 int pre_incdec(int type, int op)
 {
   if ((type != 1) & (type != 2))
@@ -677,9 +680,9 @@ int pre_incdec(int type, int op)
   binary1(3);                  /* push %eax —— 旧值入栈 */
   emit(5, "\xb8\x01\x00\x00\x00"); /* mov $1,%eax */
   if (op == '+')
-    emit(3, "\x5b\x01\xd8");           /* pop %ebx ; add %ebx,%eax -> 新值 */
+    binary2(3, 3, "\x5b\x01\xd8");           /* pop %ebx ; add %ebx,%eax -> 新值（值弹栈记账含于 binary2） */
   else
-    emit(5, "\x5b\x29\xc3\x89\xd8");   /* pop %ebx ; sub %eax,%ebx ; mov %ebx,%eax -> 新值 */
+    binary2(3, 5, "\x5b\x29\xc3\x89\xd8");   /* pop %ebx ; sub %eax,%ebx ; mov %ebx,%eax -> 新值 */
   if (type == 2)
     emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) */
   else
