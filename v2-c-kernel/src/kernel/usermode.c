@@ -398,7 +398,7 @@ static __attribute__((noinline)) void sys_sendto_case(registers_t *r, uint32_t a
     if (iov.len && copyin(iov.buf, pbuf, iov.len) < 0) { r->eax = (uint32_t)-1; return; }
     int n = netsock_send((int)a, iov.dst_ip, iov.dst_port, pbuf, iov.len);
     serial_printf("[net] sendto sock=%d %uB -> %x:%u rc=%d\n",
-           (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
+                  (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
     r->eax = (uint32_t)n;
 }
 
@@ -598,7 +598,7 @@ void syscall_dispatch(registers_t *r) {
             uint32_t *p = (uint32_t *)shmem_phys[a];
             for (int i = 0; i < 1024; i++) p[i] = 0;   /* 清零 */
             serial_printf("[sem] shmem slot=%u alloc phys=%x (zeroed)\n",
-                   a, shmem_phys[a]);
+                          a, shmem_phys[a]);
         }
         map_page(SHMEM_VBASE + a * 0x1000, shmem_phys[a], 0x7);  /* 当前进程页目录 */
         r->eax = SHMEM_VBASE + a * 0x1000;
@@ -624,7 +624,7 @@ void syscall_dispatch(registers_t *r) {
             uint32_t wpid = msg_send_wake(&msg_objects[a].q, &outv);
             if (wpid != MSG_NO_PID) {
                 serial_printf("[msg] send id=%u -> handoff consumer pid=%u val=%u\n",
-                       a, wpid, outv);
+                              a, wpid, outv);
                 sched_wake_with(wpid, outv);   /* 消费者 recv 直接返回该消息 */
             }
             serial_printf("[msg] send pid=%u id=%u -> ok\n", pid, a);
