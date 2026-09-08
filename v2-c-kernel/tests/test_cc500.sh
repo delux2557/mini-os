@@ -268,6 +268,10 @@ hrun t_swneg 'int main(){int x;int r;x=-1;r=0;switch(x){case -1:r=55;break;defau
 hrun t_swnest 'int main(){int x;int y;int r;x=1;y=2;r=0;switch(x){case 1:switch(y){case 2:r=42;break;default:r=7;}break;default:r=9;}if(r==42)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_swloop 'int main(){int i;int r;i=0;r=0;switch(3){case 3:while(i<5){i=i+1;if(i==2)break;}r=i;break;default:r=0;}if(r==2)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_sw_oob 'int main(){int x;x=1;case 3:return x;}' 1 'cc500: error' 'compiled OK'
+# M12 负对照（外部审计）：重复 case 常量（C 约束违例，gcc 拒绝 duplicate case value）
+# 须 rc=1 + cc500: error，不得骗 compiled OK（若查重缺位，第二 case 体成不可达死代码被静默接受）。
+hrun t_swdup 'int main(){int x;int r;x=1;r=0;switch(x){case 1:r=10;break;case 1:r=20;break;}return r;}' 1 'cc500: error' 'compiled OK'
+hrun t_swdupneg 'int main(){int x;int r;x=2;r=0;switch(x){case 1:r=10;break;case 2:r=20;break;}if(r==20)return 0;return 1;}' 0 'compiled OK' ''   # 不重复 case 不得误伤
 # M12 编码锁定：switch 派发链用 cmp $imm,%eax（3d）逐 case。直观程序仅含赋值+switch——
 # 若派发缺失/退化成串 if 则不必带 3d（条件比较用 39 c3），故 3d 出现 = 唯一派发标记（症状对立）。
 if objdump -D -b binary -m i386 "$VD/t_sw1.elf" 2>/dev/null | grep -q '3d '; then
