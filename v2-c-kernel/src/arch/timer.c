@@ -12,6 +12,11 @@ static inline void outb(uint16_t port, uint8_t val) {
 
 static void timer_cb(registers_t *r) {
     ticks++;
+    /* NMI 看门狗喂狗：须在 sched_tick 之前（sched_tick 可能切换进程且不返回）。
+     * 正常 100Hz 下每 10ms 喂一次，~6s 超时余量充足；cli 死循环时 IRQ0 不再
+     * 到达 → 停止喂狗 → QEMU 注入 NMI 突破死循环（见 drv/wdt.c）。 */
+    extern void wdt_feed(void);
+    wdt_feed();
     /* v0.28 DHCP 租期续约：每 tick 非阻塞轮询（须在 sched_tick 之前——
      * sched_tick 里 schedule 可能上下文切换且不返回，排在它后面会被跳过） */
     extern void e1000_dhcp_tick(void);
