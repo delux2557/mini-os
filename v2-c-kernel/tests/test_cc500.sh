@@ -468,6 +468,13 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M8 ++i 编译" "cc500: compiled OK" 60
     gwait "guest M8 ++i 前缀新值 j==6 exit0" "'/tpre.elf' exited code=0 PASS" 90
     gsend "rm /tpre.c"; gsend "rm /tpre.elf"
+    # 前缀自减新值：j=--i → i==4 && j==4（前缀 -- 与 ++ 同路径；栈记账错位时
+    # 后续局部寻址偏格/退出码 -1，本断言即红——与上方 ++i 构成前缀双形态运行护栏）
+    gsend 'writefile /tprd.c int main(){int i;int j;i=5;j=--i;if(i==4&&j==4)return 0;return 1;}'
+    gsend "ccrun /tprd.c /tprd.elf"
+    gwait "guest M8 --i 编译" "cc500: compiled OK" 60
+    gwait "guest M8 --i 前缀新值 j==4 exit0" "'/tprd.elf' exited code=0 PASS" 90
+    gsend "rm /tprd.c"; gsend "rm /tprd.elf"
     # 后缀自减旧值：r=i-- → i==4 && r==5
     gsend 'writefile /tded.c int main(){int i;int r;i=5;r=i--;if(i==4&&r==5)return 0;return 1;}'
     gsend "ccrun /tded.c /tded.elf"
