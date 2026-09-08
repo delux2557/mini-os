@@ -61,7 +61,7 @@ OBJS = $(addprefix $(BUILD)/, \
        pci.o e1000.o netutil.o ip.o udp.o icmp.o dhcp.o netsock.o \
        e1000_netif.o netif.o slip.o uart_netif.o \
        ata.o storage.o userprog_bin.o \
-       ssp.o ksym.o) \
+       ssp.o ksym.o wdt.o) \
        $(APP_ELFOBJS) $(SHELL_ELFOBJ)
 # v0.27: cc500 编译器源码 blob（嵌入 initramfs 作 /cc500.c，供 guest 内自举）。
 # 必须在 $(KERNEL): $(OBJS) 规则之前 append，否则该规则解析时（prereq 即时展开）
@@ -319,13 +319,19 @@ $(BUILD)/apps/%_elf.o: $(BUILD)/apps/%.elf
 # kernel 依赖应用 ELF blob，应用改动后自动重链
 $(BUILD)/kernel.o: $(APP_ELFOBJS) $(SHELL_ELFOBJ)
 
+# NMI 看门狗 QEMU 侧参数：挂 i6300esb 设备 + 超时后向 vCPU 注入 NMI（突破 cli 死循环）。
+# 注意：QEMU>=8 已移除 -watchdog <model> 建设备语法，改用 -device i6300esb。
+# guest 驱动见 src/drv/wdt.c；带 -no-reboot 的场景（run-serial/CI）复位即退出，
+# 串口日志保留 NMI 现场证据。
+WDT_QEMU_FLAGS = -device i6300esb -watchdog-action inject-nmi
+
 # 带图形界面运行（本地桌面环境）
 run: $(KERNEL)
-	qemu-system-i386 -kernel $(KERNEL)
+	qemu-system-i386 -kernel $(KERNEL) $(WDT_QEMU_FLAGS)
 
 # 无图形界面运行，内核输出通过串口写到 build/serial.log
 run-serial: $(KERNEL)
-	qemu-system-i386 -kernel $(KERNEL) -display none -serial file:$(BUILD)/serial.log -no-reboot
+	qemu-system-i386 -kernel $(KERNEL) -display none -serial file:$(BUILD)/serial.log -no-reboot $(WDT_QEMU_FLAGS)
 
 # ---- 测试 ----
 # 宿主单元测试：纯逻辑编译成普通 Linux 程序运行（秒级、可加 ASan）
