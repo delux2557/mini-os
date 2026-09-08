@@ -218,6 +218,32 @@ static void emit_funcs(void){
     if(nf>=2) printf("int h1(int n){ int r; if(n<=1){ r=1; } else { r=h1(n-1)+h1(n-2); } return r; }\n");
 }
 
+/* ---- 校验和观测面（差分灵敏度）----
+ * 原 return EXPR 只观测被该表达式读取的少数状态；其余变量/数组/指针/char 终态若漂移，
+ * 根本不进退码 → 差分漏检。现把全部可观测状态逐项压到 [0,SUM_MOD) 后乘互异质数权重
+ * 累加、再 %SUM_MOD 作 return：任一状态的终态漂移都会改变最终校验和（观测面全覆盖）。
+ * 无 UB 守恒：逐项 ((x%M)+M)%M 归一到正余数（与 idx_expr 同款技巧，trunc/floor 语义皆收敛到同一
+ * 正余数，跨编译器确定一致）；中间和 < nterms(≤51) * max_coef(≈233) * SUM_MOD ≪ 2^31，不溢出。 */
+#define SUM_MOD 1009
+static const int SUM_PRIMES[] = {
+    1,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,
+    59,61,67,71,73,79,83,89,97,101,103,107,109,113,127,131,
+    137,139,149,151,157,163,167,173,179,181,191,193,197,199,211,223,
+    227,229,233,239,241,251,257,263,269,271,277,281,283,293,307,311
+};
+static void emit_sum_term(int idx, const char *reader){
+    printf("+((((%s)%%%d)+%d)%%%d)*%d", reader, SUM_MOD, SUM_MOD, SUM_MOD, SUM_PRIMES[idx]);
+}
+static void emit_checksum(void){
+    char rd[48]; int idx=0, i, k;
+    for(i=0;i<nvars;i++){ sprintf(rd,"v%d",i); emit_sum_term(idx++,rd); }
+    for(i=0;i<ng;i++){    sprintf(rd,"G%d",i); emit_sum_term(idx++,rd); }
+    for(i=0;i<na;i++) for(k=0;k<ASZ;k++){ sprintf(rd,"a%d[%d]",i,k); emit_sum_term(idx++,rd); }
+    for(i=0;i<npa;i++) for(k=0;k<ASZ;k++){ sprintf(rd,"*(p%d+%d)",i,k); emit_sum_term(idx++,rd); }
+    for(i=0;i<nc;i++){    sprintf(rd,"c%d",i); emit_sum_term(idx++,rd); }
+    for(i=0;i<nca;i++) for(k=0;k<ASZ;k++){ sprintf(rd,"ca%d[%d]",i,k); emit_sum_term(idx++,rd); }
+}
+
 static void emit_program(int nv,int nstmts){
     nvars = nv<1?1:(nv>MAXV?MAXV:nv);
     ng  = has(F_GLOBAL)?MAXG:0;
@@ -244,9 +270,11 @@ static void emit_program(int nv,int nstmts){
     for(int i=0;i<npa;i++){ int bm=i%na; printf("  int* p%d; p%d=&a%d[0];\n",i,i,bm); } /* 指针 bind 数组基址 */
     build_lvals();
     for(int i=0;i<nstmts;i++) stmt_gen(0);
-    char b[512]; long lo,hi;
-    expr_gen(b,0,&lo,&hi,0);
-    printf("  return %s;\n",b);
+    /* return 全状态加权校验和（而非单表达式）——观测面从"被 return 读到的少数状态"扩到全覆盖；
+     * 最终 &0xff 仍是 8bit 通道，但任一状态漂移都会改校验和（见 emit_checksum 上方注释）。 */
+    printf("  return ((0");
+    emit_checksum();
+    printf(") %% %d);\n", SUM_MOD);
     printf("}\n");
 }
 
