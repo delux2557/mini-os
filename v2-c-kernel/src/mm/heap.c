@@ -30,7 +30,13 @@ static uint32_t free_bytes;
 
 void heap_init(void) { head = 0; page_count = 0; used_bytes = 0; free_bytes = 0; }
 
-/* 从帧分配器要 npages 张连续物理页，作为一个大空闲块挂入链表 */
+/* 扫描兜底：链表成环时（#132 排查中）限步数并报告，防 kmalloc/插入自身死循环 */
+static uint32_t heap_scan_limit(void) { return page_count * PAGE_SIZE / 24u + 4u; }
+
+/* 从帧分配器要 npages 张连续物理页，作为一个大空闲块挂入链表。
+ * L3（BUG-074 结构根治）：链表按**地址严格递增**插入——使「物理相邻 ⇔ 链表相邻」
+ * 成为结构不变量：物理相邻的两块在链表中必然相邻且顺序正确，合并任何写法（含旧的
+ * 全链表扫描物理相邻）都不可能成环。插入 O(n)（内核堆 ~20 块，可忽略）。 */
 static void heap_add_pages(uint32_t npages) {
     if (npages == 0) npages = 1;
     uint32_t phys = frame_alloc_run(npages);
@@ -39,11 +45,20 @@ static void heap_add_pages(uint32_t npages) {
         return;
     }
     block_t *b = (block_t *)phys;
-    b->next  = head;
     b->size  = npages * PAGE_SIZE - HDR_SIZE;
     b->free  = 1;
     b->magic = MAGIC_FREE;
-    head = b;
+    /* 找第一个地址 > b 的节点，插它前面；找不到（b 最大）则挂尾部。
+     * 防环上限同 heap_audit/kfree：链表被破坏成环时不至于死循环。 */
+    uint32_t lim = heap_scan_limit(), walk = 0;
+    block_t *p = 0, *o = head;
+    while (o && (uint32_t)o < (uint32_t)b) {
+        if (++walk > lim) break;
+        p = o;
+        o = o->next;
+    }
+    if (p) { b->next = p->next; p->next = b; }
+    else   { b->next = head;    head    = b; }
     page_count += npages;
     free_bytes += npages * PAGE_SIZE - HDR_SIZE;   /* 新空闲块负载入账 */
 }
@@ -69,9 +84,6 @@ static void *block_claim(block_t *b, uint32_t size) {
     b->magic = MAGIC_USED;
     return (void *)(b + 1);
 }
-
-/* 扫描兜底：链表成环时（#132 排查中）限步数并报告，防 kmalloc 自身死循环 */
-static uint32_t heap_scan_limit(void) { return page_count * PAGE_SIZE / 24u + 4u; }
 
 static void heap_report_loop(const char *where, uint32_t walk) {
     serial_printf("[heap] LOOP at %s (walk>%u) head=%x\n", where, walk, (uint32_t)head);
@@ -132,7 +144,9 @@ void kfree(void *ptr) {
      *   merge low=5c2100(sz48880)->+high=5ce000(sz49136) => 98032 后紧接 chain loop。
      * 修复：只与**链表相邻**的空闲块合并（b 的后继/前驱），物理相邻但链表不相邻的块
      * 不合并（保留碎片）——正确性优先，内核堆仅 ~20 块，碎片代价可忽略。
-     * 防环上限（heap_audit 同口径）仍保留，任何异常不再升级为 cli 段整机冻结。 */
+     * 防环上限（heap_audit 同口径）仍保留，任何异常不再升级为 cli 段整机冻结。
+     * L3（BUG-074）：heap_add_pages 已按地址序插入后，链表"物理相邻 ⇔ 链表相邻"
+     * 恒成立——本逻辑恰好合并**全部**物理相邻空闲块，碎片也一并消除。 */
     int merged;
     uint32_t max_blocks = page_count * PAGE_SIZE / 24u + 4u;   /* 同 heap_audit 防环上界 */
     uint32_t walk = 0;
@@ -184,9 +198,18 @@ uint32_t heap_audit(void) {
     /* 每块至少 8 字节负载 + 16 字节头，块数不可能超过 总字节/24+4 */
     uint32_t max_blocks = page_count * PAGE_SIZE / 24u + 4u;
     block_t *b = head;
+    block_t *prev = 0;
     while (b) {
         if (++blocks > max_blocks) {
             serial_printf("[audit] heap FAIL: next chain loop/suspect (walk>%u)\n", max_blocks);
+            bad++;
+            break;
+        }
+        /* L3（BUG-074）：地址序结构不变量——链表必须按地址严格递增。
+         * 任何破坏排序的插入（回退旧 heap_add_pages 之类）在此当场暴露。 */
+        if (prev && (uint32_t)b <= (uint32_t)prev) {
+            serial_printf("[audit] heap FAIL: addr order violated @%x after %x\n",
+                          (uint32_t)b, (uint32_t)prev);
             bad++;
             break;
         }
@@ -208,6 +231,7 @@ uint32_t heap_audit(void) {
         }
         if (b->free) { free_sum += b->size; free_cnt++; }
         else         { used_sum += b->size; }
+        prev = b;
         b = b->next;
     }
     if (!bad && (free_sum != free_bytes || used_sum != used_bytes)) {
