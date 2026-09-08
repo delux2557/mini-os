@@ -1133,6 +1133,10 @@ int expression()
 /* ---- 教学里程碑 M1 前向声明（for / do-while 实现放 statement() 之后）---- */
 int stmt_for();
 int stmt_do();
+/* ---- 教学里程碑 M12 前向声明（switch case/default 实现放 statement() 之后）---- */
+int stmt_case();
+int stmt_default();
+int stmt_switch();
 
 /*
  * type-name:
@@ -1178,6 +1182,16 @@ char *loop_breaks;   /* 挂起 break 的 jmp 位置池（每项 4B） */
 char *loop_conts;    /* 挂起 continue 的 jmp 位置池（每项 4B） */
 int loop_break_cnt;  /* 挂起 break 总数（=池顶游标） */
 int loop_cont_cnt;   /* 挂起 continue 总数（=池顶游标） */
+/* ---- M12：switch/case 全局（细节实现置于 M11 标签基建之后）---- */
+int switch_depth;    /* 当前 switch 嵌套深度（>0 才允许 case/default） */
+char *brk_kind;      /* 可断作用域类型栈：'L'=循环,'S'=switch；break 命中栈顶 */
+int brk_depth;       /* 可断作用域总深度（循环 + switch） */
+char *sw_frames;     /* switch 帧栈：每帧 12B=3×int（exit锚, default起点, case表起点） */
+int sw_depth;        /* switch 帧深度 */
+char *sw_cases;      /* 本函数 case 表：每 8B=(常量, 体起点 codepos) */
+int sw_case_cnt;     /* case 表游标 */
+
+void emit_goto_anchor(int t);   /* 前向声明：stmt_break/switch 复用 goto 回填 */
 
 /* 4 字节手工打包（与 save_int/load_ptr 同源，保证 cc500 自举可编） */
 void bput4(char *b, int o, int v)
@@ -1204,14 +1218,21 @@ void loop_push()
   bput4(loop_frames, fb, loop_break_cnt);
   bput4(loop_frames, fb + 4, loop_cont_cnt);
   loop_depth = loop_depth + 1;
+  brk_kind[brk_depth] = 'L';       /* M12：循环=可断作用域（压 'L'） */
+  brk_depth = brk_depth + 1;
 }
 
-/* body 内某次 break：只循环内合法，emit jmp 并把位置记入挂起池 */
+/* body 内某次 break：命中最近一层可断作用域——循环走挂起池回填、switch 转 goto .exit */
 void stmt_break()
 {
   int n;
-  if (loop_depth <= 0)
-    error();                       /* 循环外 break */
+  if (brk_depth <= 0)
+    error();                       /* 任何可断作用域外 break */
+  if (brk_kind[brk_depth - 1] != 'L') {      /* 最近一层是 switch */
+    emit_goto_anchor(bget4(sw_frames, (sw_depth - 1) * 12));  /* goto 本 switch 的 .exit */
+    expect(";");
+    return;
+  }
   n = loop_break_cnt;
   if (n >= 256)
     error();                       /* 挂起池满拒绝，防堆越界 */
@@ -1272,6 +1293,7 @@ void loop_patch_continue(int ct)
 void loop_pop()
 {
   loop_depth = loop_depth - 1;
+  brk_depth = brk_depth - 1;   /* M12：同时退可断作用域栈 */
 }
 
 /* ---- 教学里程碑 M11：goto / labels（2026-09-07）----
@@ -1324,17 +1346,16 @@ int lbl_declare(char *s)
   return t;
 }
 
-/* 定义标签：此刻 codepos 即标签指向的下一条指令首址。沿挂起链表回填所有前向 goto。 */
-void lbl_define()
+/* 定义标签（按已登记锚点 t）：此刻 codepos 即标签指向处，沿挂起链表回填所有前向 goto。
+ * 供 lbl_define（源标签）与 switch 的合成 .dispatch/.exit 复用。 */
+void lbl_def_anchor(int t)
 {
-  int t;
   int target;
   int head;
   int next;
   target = codepos;
-  t = lbl_declare(token);
   if (lbl_tab[t + 1] == 'd')
-    error();                         /* 同一标签重复定义 */
+    error();                         /* 重复定义 */
   head = load_int(lbl_tab + t + 2);  /* 前向挂起链表头（0=无） */
   while (head != 0) {
     next = load_int(code + head);              /* 取链（覆盖前先读） */
@@ -1345,15 +1366,16 @@ void lbl_define()
   save_int(lbl_tab + t + 2, target);
 }
 
-/* goto 标签 ; —— 主调 accept("goto") 已把 token 停在标签名上（accept 内部 get_token 一次），
- * 因此这里直接使用当前 token，不得再 get_token()（否则会跳到 ';'）。 */
-void stmt_goto()
+/* 定义源标签（token 即名字） */
+void lbl_define()
 {
-  int t;
+  lbl_def_anchor(lbl_declare(token));
+}
+
+/* emit_goto_*：向标签发射 jmp（可前向挂起/后向直回填），供 stmt_goto 与 switch 的 .exit 复用 */
+void emit_goto_anchor(int t)
+{
   int v;
-  if (token[0] == 0)
-    error();
-  t = lbl_declare(token);
   emit(5, "\xe9....");               /* jmp rel32 */
   v = load_int(lbl_tab + t + 2);
   if (lbl_tab[t + 1] == 'd')
@@ -1362,6 +1384,18 @@ void stmt_goto()
     save_int(code + codepos - 4, v);             /* 前向挂起：旧头作本字段的链 */
     save_int(lbl_tab + t + 2, codepos - 4);      /* 本 rel32 字段位置成新头 */
   }
+}
+
+void emit_goto_name(char *s)
+{
+  emit_goto_anchor(lbl_declare(s));
+}
+
+void stmt_goto()
+{
+  if (token[0] == 0)
+    error();
+  emit_goto_name(token);
   get_token();                       /* 越过标签名，落到 ';' */
   expect(";");
 }
@@ -1380,6 +1414,86 @@ void lbl_end()
   }
   lbl_pos = 0;
 }
+
+/* ---- 教学里程碑 M12：switch/case/default（2026-09-07）----
+ * 无常量折叠：case 限整型字面量（可前带 '-'），由 sw_const 在编译期求值成 int。
+ * 布局（复用 M11 标签回填；case 自上而下贯通 fall-through，.dispatch 置最末防二次派发）：
+ *   <求值 switch 存临时栈槽> jmp .dispatch
+ *   case1体 case2体 … default体
+ *   jmp .exit                       <- 末 case/body-end 自然出口
+ *   .dispatch: 载值; 逐 case cmp $C,%eax; je 体; 未中 jmp default/.exit
+ *   .exit                           <- break 目标（break 经 brk_kind 'S' 转发至此）
+ * 合成标签名 ___d<seq>/. ___e<seq> 靠全局 lbl_seq 保证跨嵌套唯一。
+ * cc500.c 自身不用 switch → P1==P2 自举不动点不变。 */
+char *nm_buf;   /* 合成标签名临时缓冲（main1 分配） */
+int lbl_seq;    /* 合成标签序号 */
+
+/* 造名 "c___<4位seq>" 定长写入 nm_buf[0..8]（seq 右对齐），保证跨嵌套唯一 */
+void sw_mkname(char c)
+{
+  int q;
+  int k;
+  int d;
+  nm_buf[0] = c;
+  nm_buf[1] = '_';
+  nm_buf[2] = '_';
+  nm_buf[3] = '_';
+  nm_buf[4] = '0';
+  nm_buf[5] = '0';
+  nm_buf[6] = '0';
+  nm_buf[7] = '0';
+  nm_buf[8] = 0;
+  q = lbl_seq;
+  k = 7;
+  while (q != 0) {
+    d = q % 10;
+    q = q / 10;
+    nm_buf[k] = '0' + d;
+    k = k - 1;
+  }
+}
+
+/* 编译期 case 常量：选 '-'、数字字面量（0x/十进制）→ 返回 int */
+int sw_const()
+{
+  int neg;
+  int n;
+  int j;
+  neg = 0;
+  if (peek("-")) { neg = 1; get_token(); }
+  if (('0' <= token[0]) & (token[0] <= '9')) {
+    n = 0;
+    j = 0;
+    if ((token[0] == '0') & (token[1] == 'x')) {
+      j = 2;
+      while (token[j]) {
+        if (('0' <= token[j]) & (token[j] <= '9'))
+          n = (n << 4) + token[j] - '0';
+        else if (('a' <= token[j]) & (token[j] <= 'f'))
+          n = (n << 4) + token[j] - 'a' + 10;
+        else
+          error();
+        j = j + 1;
+      }
+    }
+    else {
+      while (token[j]) {
+        if ((token[j] < '0') | ('9' < token[j]))
+          error();
+        n = (n << 1) + (n << 3) + token[j] - '0';
+        j = j + 1;
+      }
+    }
+  }
+  else
+    error();                          /* case 非常量/非数字字面量 */
+  if (neg)
+    n = 0 - n;
+  get_token();                        /* 越过数字，落向 ':' */
+  return n;
+}
+
+/* ---- M12：switch/case/default 语句实现置于 statement()/stmt_do 之后（前向声明显见上）---- */
 
 void statement()
 {
@@ -1448,6 +1562,15 @@ void statement()
   }
   else if (accept("continue")) {  /* M5：continue（循环内） */
     stmt_continue();
+  }
+  else if (accept("case")) {      /* M12：case 常量 : 体（仅 switch 内） */
+    stmt_case();
+  }
+  else if (accept("default")) {   /* M12：default : 体（仅 switch 内） */
+    stmt_default();
+  }
+  else if (accept("switch")) {    /* M12：switch(expr){…} */
+    stmt_switch();
   }
   else if (accept("goto")) {      /* M11：goto 标签 */
     stmt_goto();
@@ -1564,6 +1687,104 @@ int stmt_do()
   loop_patch_continue(pc);           /* M5：continue → cond 求值起点 */
   loop_patch_break();                /* M5：break → 当前 codepos（退出点） */
   loop_pop();                        /* M5：退 do 帧 */
+  return 0;
+}
+
+/* ---- M12：switch/case/default（statement()/stmt_do() 之后实现；前向声明显于上）---- */
+/* case 常量 : 体 —— 记录 (常量, 体起点 codepos) 入本 switch case 表，再解析体 */
+int stmt_case()
+{
+  int c;
+  if (switch_depth <= 0)
+    error();
+  c = sw_const();
+  expect(":");
+  bput4(sw_cases, sw_case_cnt * 8, c);
+  bput4(sw_cases, sw_case_cnt * 8 + 4, codepos);
+  sw_case_cnt = sw_case_cnt + 1;
+  statement();                         /* 体（自然贯通下一 case） */
+  return 0;
+}
+
+/* default : 体 —— 记 default 体起点入当前 switch 帧（sw_frames 偏移 +4） */
+int stmt_default()
+{
+  int f;
+  if (switch_depth <= 0)
+    error();
+  /* stmt_switch 解析体前已 sw_depth+1；default 体归属当前 switch，故帧基址取 sw_depth-1 */
+  f = (sw_depth - 1) * 12;
+  expect(":");
+  bput4(sw_frames, f + 4, codepos);
+  statement();
+  return 0;
+}
+
+/* switch(expr){ ... } */
+int stmt_switch()
+{
+  int d;           /* .dispatch 标签锚 */
+  int e;           /* .exit 标签锚 */
+  int f;           /* 本帧基址 */
+  int n0;          /* case 表起点 */
+  int dv;          /* default 体起点 */
+  int k;
+  expect("(");
+  promote(expression());
+  expect(")");
+  be_push();                         /* 值入栈槽（%eax 即值）；派发区紧随其后读栈顶 */
+  stack_pos = stack_pos + 1;
+  sw_mkname('d');
+  d = lbl_declare(nm_buf);
+  lbl_seq = lbl_seq + 1;
+  sw_mkname('e');
+  e = lbl_declare(nm_buf);
+  lbl_seq = lbl_seq + 1;
+  emit_goto_anchor(d);               /* jmp .dispatch（越过 case 体） */
+  if (sw_depth >= 24)
+    error();
+  f = sw_depth * 12;
+  bput4(sw_frames, f, e);            /* exit 锚 */
+  bput4(sw_frames, f + 4, 0 - 1);    /* default 未定 */
+  bput4(sw_frames, f + 8, sw_case_cnt);  /* case 表起点 */
+  brk_kind[brk_depth] = 'S';
+  brk_depth = brk_depth + 1;
+  sw_depth = sw_depth + 1;
+  switch_depth = switch_depth + 1;
+  statement();                       /* 解析 { … case/default … } 块 */
+  switch_depth = switch_depth - 1;
+  sw_depth = sw_depth - 1;
+  brk_depth = brk_depth - 1;
+  f = sw_depth * 12;
+  emit_goto_anchor(e);               /* body-end → .exit（末 case 自然出口，前向待 e） */
+  lbl_def_anchor(d);                 /* .dispatch 定义于链首（仅由开头 jmp 抵达） */
+  /* 载值：switch 值 be_push 后位于栈顶，派发区紧随其后无介入 push/pop，
+   * 直接 mov (%esp),%eax 读栈顶即可——不依赖编译期 stack_pos 绝对槽号，
+   * 嵌套/循环多压栈时亦不出错（旧 lea (sv*4)(%esp) 错位致命中错 case）。 */
+  emit(3, "\x8b\x04\x24");           /* mov (%esp),%eax */
+  /* 逐 case 派发 */
+  n0 = bget4(sw_frames, f + 8);
+  dv = bget4(sw_frames, f + 4);
+  k = n0;
+  while (k <= sw_case_cnt - 1) {
+    int c = bget4(sw_cases, k * 8);
+    int cp = bget4(sw_cases, k * 8 + 4);
+    emit(5, "\x3d....");             /* cmp $c,%eax */
+    save_int(code + codepos - 4, c);
+    emit(6, "\x0f\x84....");         /* je 体 */
+    save_int(code + codepos - 4, cp - codepos);
+    k = k + 1;
+  }
+  if (dv != -1) {
+    emit(5, "\xe9....");             /* jmp default 体 */
+    save_int(code + codepos - 4, dv - codepos);
+  }
+  else
+    emit_goto_anchor(e);             /* 未中且无 default → .exit（前向） */
+  lbl_def_anchor(e);                 /* .exit 定义于链尾：break/body-end/未中 前向回填至此 */
+  sw_case_cnt = n0;                  /* 还原 case 表（嵌套用） */
+  be_pop(1);                         /* 弹出值临时槽 */
+  stack_pos = stack_pos - 1;
   return 0;
 }
 
@@ -1790,6 +2011,13 @@ int main1(char *argv, int argc)
   lbl_tab = xmalloc(256);   /* M11：标签表（函数级，lbl_end 清表） */
   lbl_size = 256;
   lbl_pos = 0;
+  brk_kind = malloc(48);  /* M12：可断作用域栈（循环+switch，48 层） */
+  brk_depth = 0;
+  sw_frames = malloc(300);  /* M12：switch 帧栈 3×4B×25 */
+  sw_cases = malloc(1024);  /* M12：case 表 8B × 128 */
+  sw_case_cnt = 0;
+  nm_buf = malloc(32);      /* M12：合成标签名临时缓冲 */
+  lbl_seq = 0;
   be_start();
   nextc = getchar();
   get_token();
