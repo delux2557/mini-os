@@ -32,6 +32,7 @@ echo "== [2/4] QEMU 无图形界面运行 ${DURATION}s（HMP monitor 供 sendkey
 rm -f "$LOG" "$MON"
 qemu-system-i386 -kernel "$BUILD/kernel.elf" -display none -serial file:"$LOG" \
     -no-reboot -no-shutdown -m 64 \
+    -watchdog-action inject-nmi -device i6300esb \
     -monitor unix:"$MON",server,nowait >/dev/null 2>&1 &
 QPID=$!
 QSTART=$SECONDS
@@ -205,6 +206,7 @@ check() {   # check "<说明>" "<正则>"
 }
 
 # ---- v0.1 ~ v0.5 基础 ----
+check "NMI 看门狗武装"     "\[wdt\] i6300esb enabled"
 check "进程创建"          "creating processes"
 check "spawn procA"       "spawn pid=1 name=procA"
 check "spawn procB"       "spawn pid=2 name=procB"
