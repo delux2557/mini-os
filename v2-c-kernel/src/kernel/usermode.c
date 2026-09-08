@@ -398,7 +398,7 @@ static __attribute__((noinline)) void sys_sendto_case(registers_t *r, uint32_t a
     if (iov.len && copyin(iov.buf, pbuf, iov.len) < 0) { r->eax = (uint32_t)-1; return; }
     int n = netsock_send((int)a, iov.dst_ip, iov.dst_port, pbuf, iov.len);
     serial_printf("[net] sendto sock=%d %uB -> %x:%u rc=%d\n",
-                  (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
+           (int)a, iov.len, iov.dst_ip, iov.dst_port, n);
     r->eax = (uint32_t)n;
 }
 
@@ -470,7 +470,9 @@ void syscall_dispatch(registers_t *r) {
     uint32_t a = r->ebx, b = r->ecx, c = r->edx;
 
     /* 挂起看门狗：一次成功的 syscall 即视为"本进程有实质进展"，刷新 last_prog_tick，
-     * 供调度层判别"被 wait 的子进程只被调度却无 syscall 进展"（本质空转/死循环）。 */
+     * 供调度层判别"被 wait 的子进程只被调度却无 syscall 进展"（本质空转/死循环）。
+     * 注：#120 的串口降噪曾误删此行，导致 wdog_check 对正常 syscall 密集子进程
+     * 误判 kind=2（since_prog 恒旧）触发伪 STALLED dump——已恢复。 */
     sched_mark_progress();
 
     /* ---- A-2 ② 参数语义表（BUG-067 延续，逐类处理原则）----
@@ -596,7 +598,7 @@ void syscall_dispatch(registers_t *r) {
             uint32_t *p = (uint32_t *)shmem_phys[a];
             for (int i = 0; i < 1024; i++) p[i] = 0;   /* 清零 */
             serial_printf("[sem] shmem slot=%u alloc phys=%x (zeroed)\n",
-                          a, shmem_phys[a]);
+                   a, shmem_phys[a]);
         }
         map_page(SHMEM_VBASE + a * 0x1000, shmem_phys[a], 0x7);  /* 当前进程页目录 */
         r->eax = SHMEM_VBASE + a * 0x1000;
@@ -622,7 +624,7 @@ void syscall_dispatch(registers_t *r) {
             uint32_t wpid = msg_send_wake(&msg_objects[a].q, &outv);
             if (wpid != MSG_NO_PID) {
                 serial_printf("[msg] send id=%u -> handoff consumer pid=%u val=%u\n",
-                              a, wpid, outv);
+                       a, wpid, outv);
                 sched_wake_with(wpid, outv);   /* 消费者 recv 直接返回该消息 */
             }
             serial_printf("[msg] send pid=%u id=%u -> ok\n", pid, a);
@@ -685,7 +687,7 @@ void syscall_dispatch(registers_t *r) {
         fdt[a].pos   = (c == 2) ? fs_size(fs_device(), (uint32_t)ino) : 0;
         fdt[a].mode  = c;
         serial_printf("[fs] open fd=%u '%s' inode=%u mode=%u pos=%u (pid=%u)\n",
-                      a, path, ino, c, fdt[a].pos, sched_current_pid());
+               a, path, ino, c, fdt[a].pos, sched_current_pid());
         r->eax = 0;
         return;
     }
@@ -793,7 +795,7 @@ void syscall_dispatch(registers_t *r) {
                 if (!c || c->state != PROC_ZOMBIE || c->parent_pid != cur) continue;
                 uint32_t code = c->exit_code;
                 serial_printf("[dbg] fastpath pid=%u st=%u ppid=%u exit=%u\n",
-                              i, c->state, c->parent_pid, c->exit_code);
+                           i, c->state, c->parent_pid, c->exit_code);
                 if (status) *status = code;      /* 当前地址空间即父进程，直接写 */
                 sched_reap(i);
                 serial_printf("[user] wait any -> pid=%u code=%u (reaped)\n", i, code);
