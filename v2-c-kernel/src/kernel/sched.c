@@ -794,27 +794,35 @@ void sched_wake_with(uint32_t pid, uint32_t eax_val) {
 
 void sched_wake(uint32_t pid) { sched_wake_with(pid, 0); }
 
-/* v0.9: 键盘行完成时由 kb 行回调调用，唤醒等待 sys_readline 的进程（取第一个）。
- * 直接把行拷入等待者的用户缓冲区，并把 syscall 返回值置为行长度。
+/* v0.9: 键盘行完成时由 kb 行回调调用，唤醒等待 sys_readline 的进程。
+ * v0.37（BUG-075）：挂起行队列化后，一次定行可能对应多个 BLOCK_KEYBOARD 等待者、
+ * 队列也可能一次挂多行（粘贴/heredoc 多行暴灌）——循环派发：每轮唤醒一个等待者、
+ * 取一行，直到无行可派或无可唤醒者（多进程同时 readline 各得一行，不再只服务第一个）。
  * v0.11: 该缓冲区属于"等待者"的地址空间，而当前地址空间可能是 idle 或别的进程，
  * 故临时把 CR3 切到等待者的页目录完成拷贝，再切回（行缓冲在低内存恒等映射区，
  * 任何地址空间都可读）。 */
 void sched_wake_keyboard(void) {
-    for (uint32_t i = 1; i < MAX_PROCS; i++) {
-        pcb_t *p = &procs[i];
-        if (p->state == PROC_BLOCKED && p->block_reason == BLOCK_KEYBOARD) {
-            char *out = (char *)p->block_arg;
-            uint32_t max = p->block_arg2 ? p->block_arg2 : KB_LINE_MAX + 1;
-            uint32_t saved_pd = mem_current_pd();
-            if (p->page_dir && p->page_dir != saved_pd)
-                switch_page_dir(p->page_dir);
-            int n = kb_line_take(out, max);
-            switch_page_dir(saved_pd);
-            sched_wake_with(p->pid, (uint32_t)(n < 0 ? 0 : n));
-            serial_printf("[sched] wake keyboard waiter pid=%u (%d bytes)\n",
-                          p->pid, n);
-            return;
+    for (;;) {
+        if (!kb_line_ready()) return;          /* 无行可派 */
+        int woken = 0;
+        for (uint32_t i = 1; i < MAX_PROCS; i++) {
+            pcb_t *p = &procs[i];
+            if (p->state == PROC_BLOCKED && p->block_reason == BLOCK_KEYBOARD) {
+                char *out = (char *)p->block_arg;
+                uint32_t max = p->block_arg2 ? p->block_arg2 : KB_LINE_MAX + 1;
+                uint32_t saved_pd = mem_current_pd();
+                if (p->page_dir && p->page_dir != saved_pd)
+                    switch_page_dir(p->page_dir);
+                int n = kb_line_take(out, max);
+                switch_page_dir(saved_pd);
+                sched_wake_with(p->pid, (uint32_t)(n < 0 ? 0 : n));
+                serial_printf("[sched] wake keyboard waiter pid=%u (%d bytes)\n",
+                              p->pid, n);
+                woken = 1;
+                break;      /* 每轮派一行给一个等待者；外层循环继续 */
+            }
         }
+        if (!woken) return;
     }
 }
 
