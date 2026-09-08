@@ -166,9 +166,25 @@ hrun t_arrg_ok 'int g[100000];int main(){g[0]=7;if(g[99999]==0&&g[0]==7)return 0
 # MC-05：数组长度十六进制解析（旧实现 int g[0x10] 十进制环 → 7210 元素 / 28KB 产物）
 hrun t_arrhexL 'int main(){int a[0x4];a[3]=9;if(a[3]==9)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_arrhex 'int g[0x10];int main(){g[15]=7;return 0;}' 0 'compiled OK' ''
-# MC-05：非数字/空十六进制数组长度仍须拒绝
+# MC-05：非数字/空十六进制数组长度仍须拒绝（空 0x 词法层显式拒绝）
 hrun t_arrhexbad 'int main(){int a[0xG];return 0;}' 1 'bad number' 'compiled OK'
-hrun t_arrhexempty 'int main(){int a[0x];return 0;}' 1 'bad number' 'compiled OK'
+hrun t_arrhexempty 'int main(){int a[0x];return 0;}' 1 'empty hex literal' 'compiled OK'
+# MC-07：八进制字面量（C 语义 010=8，minicc 不实现八进制 → 宁拒不误导）与空 0x 字面量
+hrun t_octal 'int main(){int a;a=010;return a;}' 1 'octal literals not supported' 'compiled OK'
+hrun t_octal0 'int main(){int a;a=0;return a;}' 0 'compiled OK' ''       # 单个 0 仍合法
+hrun t_octal0x 'int main(){int a;a=0x10;return a;}' 0 'compiled OK' ''    # 0x 前置不受八进制拒绝影响
+hrun t_emptyhex 'int main(){int a;a=0x;return a;}' 1 'empty hex literal' 'compiled OK'
+# MC-06：源码含原始 NUL 字节 -> 必须 FAIL + NUL byte in source（bash 变量不能承载 NUL，直接落盘）
+printf 'int main(){return 0;}\x00garbage' >"$VD/t_nul.c"
+nout=$(timeout 15 "${RUN[@]}" "$VD/t_nul.c" "$VD/t_nul.elf" 2>&1); nrc=$?
+if [ "$nrc" -ne 0 ] && echo "$nout" | grep -q 'NUL byte in source'; then
+    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 t_nul (rc=$nrc)"
+else echo "[FAIL] 宿主 t_nul rc=$nrc 未拒绝 NUL"; echo "$nout"|sed 's/^/        /'; HOST_FAIL=$((HOST_FAIL+1)); fi
+# MC-04：函数实参/形参个数不匹配 -> 必须 FAIL + arg count mismatch
+hrun t_arity 'int f(int a,int b){return a+b;}int main(){int x;x=f(1);return x;}' 1 'arg count mismatch' 'compiled OK'
+hrun t_arity2 'int f(int a,int b){return a+b;}int main(){return f(1);}' 1 'arg count mismatch' 'compiled OK'
+hrun t_arity3 'int f(int a){return a;}int main(){return f(1,2);}' 1 'arg count mismatch' 'compiled OK'
+hrun t_arityok 'int f(int a,int b){return a+b;}int main(){return f(1,2)-3;}' 0 'compiled OK' ''
 
 echo "== [2b3] 外部审计 MC-08/09 回归：类型收口 + 落尾告警 + 深度守卫 =="
 # MC-08#1：char 函数返回类型须保留（旧实现抹平为 TY_INT → 调用点当 int，`int* p=cf()` 被
