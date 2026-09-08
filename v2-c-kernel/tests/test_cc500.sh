@@ -557,8 +557,12 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M12 switch贯通 r==111 exit0" "'/tsw3.elf' exited code=0 PASS" 90
     gsend "rm /tsw3.c"; gsend "rm /tsw3.elf"
     # 嵌套 switch：内层 break 只退内层、r==42。若 break 命中错误层级则 FAIL。
+    # 注意：readline 行缓冲上限 128B（KB_LINE_MAX），heredoc 每行仍受此限——
+    # 单行 >128B 会被静默截断（曾致 tswn.c 146B 截到 128B -> cc500 error）。故拆多行。
     gsend "writefile <<M /tswn.c"
-    gsend "int main(){int x;int y;int r;x=1;y=2;r=0;switch(x){case 1:switch(y){case 2:r=42;break;default:r=7;}break;default:r=9;}if(r==42)return 0;return 1;}"
+    gsend "int main(){int x;int y;int r;x=1;y=2;r=0;"
+    gsend "switch(x){case 1:switch(y){case 2:r=42;break;default:r=7;}break;default:r=9;}"
+    gsend "if(r==42)return 0;return 1;}"
     gsend "M"
     gwait "M12 switch嵌套 源写入" "\[writefile\] '/tswn.c' wrote" 40
     gsend "ccrun /tswn.c /tswn.elf"
@@ -566,8 +570,11 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M12 switch嵌套 r==42 exit0" "'/tswn.elf' exited code=0 PASS" 90
     gsend "rm /tswn.c"; gsend "rm /tswn.elf"
     # switch 内循环 break：内层 while break 退循环不退 switch、r==i==2。
+    # 同 tswn：单行源码 130B > 128B 上限会被截断，拆多行。
     gsend "writefile <<M /tswl.c"
-    gsend "int main(){int i;int r;i=0;r=0;switch(3){case 3:while(i<5){i=i+1;if(i==2)break;}r=i;break;default:r=0;}if(r==2)return 0;return 1;}"
+    gsend "int main(){int i;int r;i=0;r=0;"
+    gsend "switch(3){case 3:while(i<5){i=i+1;if(i==2)break;}r=i;break;default:r=0;}"
+    gsend "if(r==2)return 0;return 1;}"
     gsend "M"
     gwait "M12 switch内循环break 源写入" "\[writefile\] '/tswl.c' wrote" 40
     gsend "ccrun /tswl.c /tswl.elf"
