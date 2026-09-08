@@ -254,8 +254,14 @@ $(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o $(BUILD)/apps/crt.o
 #  - `-w`：抑制其余普通警告（含 `in_data == (0-1)` 指针与整数比较的
 #    -Wcompare-distinct-pointer-types 惯用法、-Wmaybe-uninitialized 等），
 #    该源本就不能在源码层修复，只能豁免。GCC 8+ 两者均有效、可并存。
+#  - `-fno-inline`（#132 回归修复）：cc500.c 把万能全局 i 拆成各函数局部量后（adbc7e2），
+#    gcc 可内联 accept/binary2 等小函数，宿主产物 .text 从 19KB 膨胀到 37KB（49KB ELF、
+#    initramfs 多占 5 帧）。膨胀本身功能等价（ccboot P1==P2 仍 byte-identical PASS），
+#    但会改变低 16MB 帧水位、触发既有堆损坏（kfree 链表成环死循环）→ 冻结。
+#    -fno-inline 恢复紧凑产物（27KB），消除触发条件。cc500.c 受 C 子集约束不能加
+#    __attribute__((noinline))（guest 自举编译器无法解析），只能落在宿主编译 flags。
 $(BUILD)/apps/cc500.o: tools/cc500/cc500.c
-	$(CC) $(CFLAGS) -fno-stack-protector -Wno-int-conversion -w -c $< -o $@
+	$(CC) $(CFLAGS) -fno-stack-protector -Wno-int-conversion -w -fno-inline -c $< -o $@
 # cc500 专用 CRT：与 cc500.o 同属工具链，显式豁免 canary（APP_SEC_CFLAGS）。
 # 关键：cc500.elf 只链接 cc500_crt.o + cc500.o（无 crt.o 的 __stack_chk_* 符号），
 # 若这里也带 canary，会因未定义 __stack_chk_guard 链接失败。显式规则优先于 apps 模式规则。
