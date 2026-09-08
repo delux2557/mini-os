@@ -124,5 +124,52 @@ int main(void) {
     CHECK(heap_audit() > 0u);
     kfree(h2);                                  /* 收尾：恢复链表（审计后状态不影响断言） */
 
+    /* 13) L3（BUG-074）地址序结构不变量：混合分配-释放后链表须按地址严格递增，
+     * 审计地址序断言不得误报（heap_add_pages 按地址插入、block_claim 分裂天然有序）。 */
+    pool_next = 0;
+    heap_init();
+    for (int i = 0; i < 8; i++) {
+        void *p = kmalloc(100 + i * 8);
+        CHECK(p != 0);
+        kfree(p);               /* 每次释放触发与邻居合并，全部路径过地址序检查 */
+    }
+    CHECK_EQ(heap_audit(), 0u);
+
+    /* 14) L3：人为破坏地址序（模拟回退旧 heap_add_pages 的 head 插入）-> 审计必须检出。
+     * 取两块已分配块头，交换 next 使链表地址降序，地址序断言当场报告。 */
+    pool_next = 0;
+    heap_init();
+    void *x1 = kmalloc(64);
+    void *x2 = kmalloc(64);
+    CHECK(x1 && x2);
+    {
+        struct probe_block *pb1 = (struct probe_block *)((char *)x1 - sizeof(struct probe_block));
+        struct probe_block *pb2 = (struct probe_block *)((char *)x2 - sizeof(struct probe_block));
+        void *tmp = pb1->next;      /* 两块按地址序相邻，交换 next 制造降序 */
+        pb1->next = pb2;
+        pb2->next = tmp;
+        CHECK(heap_audit() > 0u);   /* 地址序断言必须捕获 */
+    }
+    kfree(x2);
+    kfree(x1);
+
+    /* 15) L3：人为制造 next 成环后 kfree 不得死循环（防环上限兜底仍在）。
+     * 构造 head->next 自环，再释放一个物理不相邻的块：合并遍历遇环靠 max_blocks
+     * 提前 break，绝不整机冻结（宿主侧即"测试不挂起"）。 */
+    pool_next = 0;
+    heap_init();
+    void *y1 = kmalloc(64);                 /* y1 在链表头部区域 */
+    void *y2 = kmalloc(64);                 /* y2 紧随 y1（地址序相邻） */
+    CHECK(y1 && y2);
+    {
+        struct probe_block *py1 = (struct probe_block *)((char *)y1 - sizeof(struct probe_block));
+        struct probe_block *py2 = (struct probe_block *)((char *)y2 - sizeof(struct probe_block));
+        py1->next = py1;                    /* 自环：y1 -> y1 */
+        py2->next = py1;                    /* y2 -> 环入口 */
+        kfree(y2);                          /* 遇环遍历在 max_blocks 步内终止（不死循环） */
+        kfree(y1);                          /* 同上 */
+        CHECK(heap_audit() > 0u);           /* 环被防环上限捕获 */
+    }
+
     UTEST_SUMMARY("heap");
 }

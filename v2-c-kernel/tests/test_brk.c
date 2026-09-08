@@ -10,7 +10,7 @@
 
 int main(void) {
     uint32_t base = USER_HEAP_BASE;   /* 0x801A4000（v0.26#3 重排后的堆区起点） */
-    uint32_t max  = USER_HEAP_MAX;    /* 0x801F4000 */
+    uint32_t max  = USER_HEAP_MAX;    /* 0x805A4000 */
 
     /* ---- brk_pages_up：扩展需处理页数（old_brk 页对齐） ---- */
     CHECK_EQ(brk_pages_up(base, base), 0u);            /* 不动 */
@@ -24,7 +24,7 @@ int main(void) {
 
     /* 全堆区跨度 = USER_HEAP_PAGES */
     CHECK_EQ(brk_pages_up(base, max), (uint32_t)((max - base) / 4096));
-    CHECK_EQ((max - base) / 4096, (uint32_t)USER_HEAP_PAGES); /* 布局一致：正好 64 页 */
+    CHECK_EQ((max - base) / 4096, (uint32_t)USER_HEAP_PAGES); /* 布局一致：正好 1024 页 */
 
     /* ---- brk_in_range：地址落在 [base, max] 才合法 ---- */
     CHECK(brk_in_range(base, base, max));              /* 起点 */
