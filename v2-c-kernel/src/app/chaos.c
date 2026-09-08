@@ -89,13 +89,28 @@ void app_main(int argc, char **argv) {
         }
     }
 
-    /* 内核自审计：若任一子进程异常导致资源泄漏（帧/信号量/PCB），这里暴露 */
+    /* 内核自审计：若任一子进程异常导致资源泄漏（帧/信号量/PCB），这里暴露。
+     * 输出须拼进同一缓冲一次 sys_print——多段 sys_print 是多个独立 syscall，
+     * 之间可被调度/内核日志插入，整行 grep 断言（survived N rounds audit=0）
+     * 会被撕裂误判（CI flake，同 heapdemo puthex_nl 教训）。 */
     uint32_t audit = sys_kern_audit();
-    sys_print("[chaos] survived ");
-    user_putdec(CHAOS_ROUNDS);
-    sys_print(" rounds audit=");
-    user_putdec(audit);
-    if (audit == 0) sys_print(" (clean)\n");
-    else sys_print(" (LEAK)\n");
+    char buf[48];
+    uint32_t i = 0;
+    { const char *s = "[chaos] survived "; uint32_t j = 0;
+      while (s[j]) buf[i++] = s[j++]; }
+    { uint32_t n = CHAOS_ROUNDS, d[10], nd = 0;
+      if (n == 0) d[nd++] = 0;
+      while (n) { d[nd++] = n % 10; n /= 10; }
+      while (nd) buf[i++] = (char)('0' + d[--nd]); }
+    { const char *s = " rounds audit="; uint32_t j = 0;
+      while (s[j]) buf[i++] = s[j++]; }
+    { uint32_t n = audit, d[10], nd = 0;
+      if (n == 0) d[nd++] = 0;
+      while (n) { d[nd++] = n % 10; n /= 10; }
+      while (nd) buf[i++] = (char)('0' + d[--nd]); }
+    { const char *s = audit == 0 ? " (clean)\n" : " (LEAK)\n"; uint32_t j = 0;
+      while (s[j]) buf[i++] = s[j++]; }
+    buf[i] = 0;
+    sys_print(buf);
     sys_exit(audit == 0 ? 0 : 4);
 }
