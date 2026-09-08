@@ -47,9 +47,23 @@ int cc500_main(char *argv, int argc)
   return main1(argv, argc);
 }
 
+/* OOM 兜底：malloc 失败返回 -1(0xFFFFFFFF)，若不检查即 new[i]=old[i] 会向
+ * 0xFFFFFFFF 打写 → 页错误。xmalloc 失败即干净报错退出，绝不返回 -1 指针。
+ * （open_input 的 in_data 不走 xmalloc：它保留 -1 返回契约、由 main1 报错。） */
+char *xmalloc(int n)
+{
+  char *p;
+  p = malloc(n);
+  if (p == 0 - 1) {
+    sys_print("cc500: out of memory\x0a");
+    exit(1);
+  }
+  return p;
+}
+
 char *my_realloc(char *old, int oldlen, int newlen)
 {
-  char *new = malloc(newlen);
+  char *new = xmalloc(newlen);
   int i = 0;
   while (i <= oldlen - 1) {
     new[i] = old[i];
@@ -252,6 +266,12 @@ int code_offset;
  * 重算值与 be_start 相同，零改动；全局在前者修复入口跳转）。 */
 int entry_call_done;
 
+/* ELF 头字节布局偏移（单一事实源，赋值见 be_start 顶部；be_finish / program 复用） */
+int off_ph_filesz;
+int off_ph_memsz;
+int off_entry_rel32;
+int off_entry_next;
+
 void save_int(char *p, int n)
 {
   p[0] = n;
@@ -403,6 +423,16 @@ void sym_get_value(char *s)
  * 旧桩为裸 call（不编组参数），自编译产物 exec 带 argv 时静默丢参（BUG-032）。 */
 void be_start()
 {
+  /* ELF 头字节布局偏移（单一事实源）。由下方 emit blob 决定，改动头部字节必须同步改这里，
+   * 否则入口 call / p_filesz / p_memsz 被写错，且只在 guest 运行期暴露（页错误/挂死）。
+   * 推导：ELF 头 52B(e_phoff=0x34) + program header 32B → 入口 stub 起于 84(0x54)；
+   *   p_filesz = 52+16 = 68(0x44)、p_memsz = 52+20 = 72(0x48)；
+   *   入口 stub 内 call(e8) 位于 stub 第 10 字节 → 84+10 = 94，rel32=95，call 下一条=99。 */
+  off_ph_filesz = 68;
+  off_ph_memsz = 72;
+  off_entry_rel32 = 95;
+  off_entry_next = 99;
+
   emit(16, "\x7f\x45\x4c\x46\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00");
   /* e_type=ET_EXEC e_machine=EM_386 e_version=1 e_entry=0x800A0054 e_phoff=0x34 */
   emit(16, "\x02\x00\x03\x00\x01\x00\x00\x00\x54\x00\x0a\x80\x34\x00\x00\x00");
@@ -412,7 +442,7 @@ void be_start()
   emit(16, "\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0a\x80");
   /* p_paddr=0x800A0000 p_filesz/memsz 由 be_finish 回填 p_flags=RWX */
   emit(16, "\x00\x00\x0a\x80\x10\x4b\x00\x00\x10\x4b\x00\x00\x07\x00\x00\x00");
-  /* p_align=0x1000；入口 stub（见上注释），call 的 rel32 由 save_int(code+95) 回填 */
+  /* p_align=0x1000；入口 stub（见上注释），call 的 rel32 由 save_int(code + off_entry_rel32) 回填 */
   emit(16, "\x00\x10\x00\x00\x8b\x44\x24\x08\x50\x8b\x44\x24\x08\x50\xe8\x00");
   emit(9,  "\x00\x00\x00\x89\xc3\x31\xc0\xcd\x80");
 
@@ -428,7 +458,7 @@ void be_start()
   emit(2, "\xcd\x80");
   emit(1, "\xc3");
 
-  save_int(code + 95, codepos - 99); /* entry stub 的 call rel32 -> 首函数 */
+  save_int(code + off_entry_rel32, codepos - off_entry_next); /* entry stub 的 call rel32 -> 首函数 */
 }
 
 void be_finish()
@@ -453,8 +483,8 @@ void be_finish()
     sys_print("cc500: undefined symbol\x0a");
     error();
   }
-  save_int(code + 68, codepos);
-  save_int(code + 72, codepos);
+  save_int(code + off_ph_filesz, codepos);
+  save_int(code + off_ph_memsz, codepos);
   i = 0;
   while (i <= codepos - 1) {
     putchar(code[i]);
@@ -1576,10 +1606,10 @@ void program()
       if (accept(";") == 0) {
 	if (entry_call_done == 0) {
 	  entry_call_done = 1;
-	  /* 首个函数：把入口 stub 的 call rel32 重定位到该函数起点。codepos-99
+	  /* 首个函数：把入口 stub 的 call rel32 重定位到该函数起点。codepos-off_entry_next
 	   * 同 be_start 公式（文件偏移 codepos → 目标 vaddr=0x800A0000+codepos，
-	   * call 下一条 0x63，rel32=codepos-0x63=codepos-99）。 */
-	  save_int(code + 95, codepos - 99);
+	   * call 下一条 0x63=off_entry_next，rel32=codepos-off_entry_next）。 */
+	  save_int(code + off_entry_rel32, codepos - off_entry_next);
 	}
 	sym_define_global(current_symbol);
 	statement();
@@ -1737,14 +1767,14 @@ int main1(char *argv, int argc)
   /* v0.35 F-4：先分配 token 缓冲。token 为全局指针（初值 NULL），正常路径靠 takechar()
    * -> my_realloc 惰性分配；但对空/纯空白源一次 takechar 都不触发，get_token 末尾
    * `token[i]=0` 会写 NULL -> SIGSEGV(139)（而非干净报错）。预分配后空源走干净 error。 */
-  token = malloc(32);
+  token = xmalloc(32);
   token_size = 32;
   /* v0.36 M5：预分配 break/continue 循环帧栈堆缓冲（cc500 无数组声明，唯有指针下标）。
    * 18 层帧×8B + 两侧挂起池各 256×4B，测试源足够；越界由 stmt_break/continue 的计数守卫兜底。 */
-  loop_frames = malloc(144);
-  loop_breaks = malloc(1024);
-  loop_conts = malloc(1024);
-  lbl_tab = malloc(256);   /* M11：标签表（函数级，lbl_end 清表） */
+  loop_frames = xmalloc(144);
+  loop_breaks = xmalloc(1024);
+  loop_conts = xmalloc(1024);
+  lbl_tab = xmalloc(256);   /* M11：标签表（函数级，lbl_end 清表） */
   lbl_size = 256;
   lbl_pos = 0;
   be_start();
