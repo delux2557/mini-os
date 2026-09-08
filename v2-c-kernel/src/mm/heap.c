@@ -105,11 +105,24 @@ void kfree(void *ptr) {
 
     /* 与相邻空闲块合并（循环直到无可合并）。
      * 注：每次合并后从头重扫，最坏 O(n²)；仅适用于小块数场景（当前内核堆 <20 块）。
-     * 若未来引入 mmap/COW 等复杂内存管理，需改为按地址序链表或二叉堆优化。 */
+     * 若未来引入 mmap/COW 等复杂内存管理，需改为按地址序链表或二叉堆优化。
+     * SEC-08/L1：合并遍历必须防环——堆空闲链表若被越界写/双重释放破坏成环（next 指回
+     * 自身或前驱），此处 `for (o=head; o; o=o->next)` 永不走到 NULL → 在调用方可能处于
+     * cli 段的路径（如 exec 的 load_elf_file 内 kfree）整机冻结。与 heap_audit 的
+     * max_blocks 防环口径一致：超过块数上界即判成环，停止合并并打印诊断（宁丢一次
+     * 合并收益，不把"可诊断的堆损坏"升级成"静默整机冻结"）。 */
     int merged;
+    uint32_t max_blocks = page_count * PAGE_SIZE / 24u + 4u;   /* 同 heap_audit 防环上界 */
+    uint32_t walk = 0;
     do {
         merged = 0;
         for (block_t *o = head; o; o = o->next) {
+            if (++walk > max_blocks) {
+                serial_printf("[heap] kfree: chain loop/suspect (walk>%u) b=%x — abort merge\n",
+                              max_blocks, (uint32_t)b);
+                merged = 0;
+                break;
+            }
             if (o == b || !o->free) continue;
             block_t *low = b, *high = o;
             if ((uint32_t)o < (uint32_t)b) { low = o; high = b; }
