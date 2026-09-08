@@ -115,24 +115,30 @@ int main(void) {
     kb_set_line_hook(0);                /* 解除回调 */
     CHECK_EQ(kb_line_take(line, sizeof(line)), 1);  /* 取走，清理状态 */
 
-    /* 12) 已有未取行时，新回车不覆盖、不重复触发 */
+    /* 12) 队列化（v0.37 BUG-069）：未取走时的第二次回车——旧实现忽略，新实现入队空行并再次触发回调 */
     hook_count = 0;
     kb_set_line_hook(line_hook_test);
     kb_feed_scan(SCAN_A);
     kb_feed_scan(0x1C);                 /* 完成 "a" */
-    kb_feed_scan(0x1C);                 /* 未取走前的第二次回车：忽略 */
-    CHECK_EQ(hook_count, 1);
-    CHECK_EQ(kb_line_take(line, sizeof(line)), 1);
+    kb_feed_scan(0x1C);                 /* 未取走前的第二次回车：入队空行（不再忽略） */
+    CHECK_EQ(hook_count, 2);
+    CHECK_EQ(kb_line_take(line, sizeof(line)), 1);   /* 第一行 "a" */
     CHECK_EQ(line[0], 'a');
+    CHECK_EQ(kb_line_take(line, sizeof(line)), 0);   /* 第二行空行（长度 0） */
     kb_set_line_hook(0);
 
-    /* 13) v0.30（BUG-034）：行就绪未取时，可打印字符不再追加（防两行合并 "a"+"bc" -> "abc"） */
+    /* 13) v0.30（BUG-034）防两行合并的本质在队列化后仍成立：
+     *     行未取期间的新字符开始新行（不追加进旧行）——队列 ["a","bc"] 各取各的，
+     *     绝无 "a"+"bc" 串成 "abc"；旧实现直接丢弃后续输入，新实现保留为新行。 */
     kb_feed_scan(SCAN_A);
-    kb_feed_scan(0x1C);                 /* 完成 "a"，行就绪未取 */
-    kb_feed_scan(SCAN_B);               /* 行就绪期间输入 'b'：应被忽略 */
-    kb_feed_scan(SCAN_C);               /* 行就绪期间输入 'c'：应被忽略 */
-    CHECK_EQ(kb_line_take(line, sizeof(line)), 1);
+    kb_feed_scan(0x1C);                 /* 完成 "a" */
+    kb_feed_scan(SCAN_B);               /* 组装第二行 "b" */
+    kb_feed_scan(SCAN_C);               /* "bc" */
+    kb_feed_scan(0x1C);                 /* 完成 "bc" */
+    CHECK_EQ(kb_line_take(line, sizeof(line)), 1);   /* 第一行 "a" */
     CHECK_EQ(line[0] == 'a' && line[1] == 0, 1);
+    CHECK_EQ(kb_line_take(line, sizeof(line)), 2);   /* 第二行 "bc"（不与 "a" 合并） */
+    CHECK_EQ(line[0] == 'b' && line[1] == 'c', 1);
 
     UTEST_SUMMARY("kb");
 }
