@@ -30,7 +30,13 @@ static uint32_t free_bytes;
 
 void heap_init(void) { head = 0; page_count = 0; used_bytes = 0; free_bytes = 0; }
 
-/* 从帧分配器要 npages 张连续物理页，作为一个大空闲块挂入链表 */
+/* 扫描兜底：链表成环时（#132 排查中）限步数并报告，防 kmalloc/插入自身死循环 */
+static uint32_t heap_scan_limit(void) { return page_count * PAGE_SIZE / 24u + 4u; }
+
+/* 从帧分配器要 npages 张连续物理页，作为一个大空闲块挂入链表。
+ * L3（BUG-074 结构根治）：链表按**地址严格递增**插入——使「物理相邻 ⇔ 链表相邻」
+ * 成为结构不变量：物理相邻的两块在链表中必然相邻且顺序正确，合并任何写法（含旧的
+ * 全链表扫描物理相邻）都不可能成环。插入 O(n)（内核堆 ~20 块，可忽略）。 */
 static void heap_add_pages(uint32_t npages) {
     if (npages == 0) npages = 1;
     uint32_t phys = frame_alloc_run(npages);
@@ -39,11 +45,20 @@ static void heap_add_pages(uint32_t npages) {
         return;
     }
     block_t *b = (block_t *)phys;
-    b->next  = head;
     b->size  = npages * PAGE_SIZE - HDR_SIZE;
     b->free  = 1;
     b->magic = MAGIC_FREE;
-    head = b;
+    /* 找第一个地址 > b 的节点，插它前面；找不到（b 最大）则挂尾部。
+     * 防环上限同 heap_audit/kfree：链表被破坏成环时不至于死循环。 */
+    uint32_t lim = heap_scan_limit(), walk = 0;
+    block_t *p = 0, *o = head;
+    while (o && (uint32_t)o < (uint32_t)b) {
+        if (++walk > lim) break;
+        p = o;
+        o = o->next;
+    }
+    if (p) { b->next = p->next; p->next = b; }
+    else   { b->next = head;    head    = b; }
     page_count += npages;
     free_bytes += npages * PAGE_SIZE - HDR_SIZE;   /* 新空闲块负载入账 */
 }
@@ -70,22 +85,40 @@ static void *block_claim(block_t *b, uint32_t size) {
     return (void *)(b + 1);
 }
 
+static void heap_report_loop(const char *where, uint32_t walk) {
+    serial_printf("[heap] LOOP at %s (walk>%u) head=%x\n", where, walk, (uint32_t)head);
+    block_t *w = head;
+    uint32_t n = 0;
+    while (w && n < 5) {
+        serial_printf("  blk %x next=%x size=%u magic=%x free=%u\n",
+                      (uint32_t)w, (uint32_t)w->next, w->size, w->magic, w->free);
+        w = w->next; n++;
+    }
+}
+
 void *kmalloc(uint32_t size) {
     if (size == 0) size = 1;
     size = (size + 7u) & ~7u;             /* 8 字节对齐 */
 
-    for (block_t *b = head; b; b = b->next)
+    uint32_t lim = heap_scan_limit(), walk;
+    walk = 0;
+    for (block_t *b = head; b; b = b->next) {
+        if (++walk > lim) { heap_report_loop("kmalloc pass1", walk); break; }
         if (b->free && b->size >= size)
             return block_claim(b, size);
+    }
 
     /* 不够则按需补连续页再试一次。
      * BUG-056/审计：need 须含 16B 块头——否则请求恰为 N*4096 时新块
      * (N*4096-16 < size) 恒分配失败（可用内存却 OOM）。 */
     uint32_t need = (size + HDR_SIZE + PAGE_SIZE - 1) / PAGE_SIZE;
     heap_add_pages(need);
-    for (block_t *b = head; b; b = b->next)
+    walk = 0;
+    for (block_t *b = head; b; b = b->next) {
+        if (++walk > lim) { heap_report_loop("kmalloc pass2", walk); break; }
         if (b->free && b->size >= size)
             return block_claim(b, size);
+    }
 
     serial_printf("[heap] kmalloc(%u) FAILED\n", size);
     return 0;
@@ -104,35 +137,47 @@ void kfree(void *ptr) {
     b->magic = MAGIC_FREE;
 
     /* 与相邻空闲块合并（循环直到无可合并）。
-     * 注：每次合并后从头重扫，最坏 O(n²)；仅适用于小块数场景（当前内核堆 <20 块）。
-     * 若未来引入 mmap/COW 等复杂内存管理，需改为按地址序链表或二叉堆优化。
-     * SEC-08/L1：合并遍历必须防环——堆空闲链表若被越界写/双重释放破坏成环（next 指回
-     * 自身或前驱），此处 `for (o=head; o; o=o->next)` 永不走到 NULL → 在调用方可能处于
-     * cli 段的路径（如 exec 的 load_elf_file 内 kfree）整机冻结。与 heap_audit 的
-     * max_blocks 防环口径一致：超过块数上界即判成环，停止合并并打印诊断（宁丢一次
-     * 合并收益，不把"可诊断的堆损坏"升级成"静默整机冻结"）。 */
+     * 注：#132 排查确认原实现有环缺陷——合并条件按"物理地址相邻"（high == low+16+size）
+     * 找全链表扫描，但空闲链表**不按地址排序**（heap_add_pages 新块插 head、block_claim
+     * 分裂插中间），物理相邻的 two blocks 在链表中可能顺序相反（high 在 low 之前）。
+     * 此时 `low->next = high->next` 会把 low 接回 high 之后（更早的链位）→ 环：
+     *   merge low=5c2100(sz48880)->+high=5ce000(sz49136) => 98032 后紧接 chain loop。
+     * 修复：只与**链表相邻**的空闲块合并（b 的后继/前驱），物理相邻但链表不相邻的块
+     * 不合并（保留碎片）——正确性优先，内核堆仅 ~20 块，碎片代价可忽略。
+     * 防环上限（heap_audit 同口径）仍保留，任何异常不再升级为 cli 段整机冻结。
+     * L3（BUG-074）：heap_add_pages 已按地址序插入后，链表"物理相邻 ⇔ 链表相邻"
+     * 恒成立——本逻辑恰好合并**全部**物理相邻空闲块，碎片也一并消除。 */
     int merged;
     uint32_t max_blocks = page_count * PAGE_SIZE / 24u + 4u;   /* 同 heap_audit 防环上界 */
     uint32_t walk = 0;
     do {
         merged = 0;
-        for (block_t *o = head; o; o = o->next) {
-            if (++walk > max_blocks) {
-                serial_printf("[heap] kfree: chain loop/suspect (walk>%u) b=%x — abort merge\n",
-                              max_blocks, (uint32_t)b);
-                merged = 0;
-                break;
+
+        /* 1) 与后继合并（b 在前，b->next 紧随 b 之后且空闲） */
+        if (b->next && b->next->free &&
+            (uint32_t)b->next == (uint32_t)b + HDR_SIZE + b->size) {
+            b->size += HDR_SIZE + b->next->size;
+            b->next = b->next->next;
+            free_bytes += HDR_SIZE;   /* 中间块头被合并回收，变为可用负载 */
+            merged = 1;
+            continue;
+        }
+
+        /* 2) 与前驱合并（prev 在 b 之前，b 紧随 prev 之后且 prev 空闲） */
+        {
+            block_t *prev = 0;
+            walk = 0;
+            for (block_t *o = head; o && o != b; o = o->next) {
+                if (++walk > max_blocks) break;
+                prev = o;
             }
-            if (o == b || !o->free) continue;
-            block_t *low = b, *high = o;
-            if ((uint32_t)o < (uint32_t)b) { low = o; high = b; }
-            if ((uint32_t)high == (uint32_t)low + HDR_SIZE + low->size) {
-                low->size += HDR_SIZE + high->size;
-                low->next  = high->next;
-                b = low;
-                free_bytes += HDR_SIZE;  /* 两块之间的头被合并回收，变为可用负载 */
+            if (prev && prev->free &&
+                (uint32_t)b == (uint32_t)prev + HDR_SIZE + prev->size) {
+                prev->size += HDR_SIZE + b->size;
+                prev->next = b->next;
+                free_bytes += HDR_SIZE;   /* 中间块头被合并回收，变为可用负载 */
+                b = prev;
                 merged = 1;
-                break;
             }
         }
     } while (merged);
@@ -153,9 +198,18 @@ uint32_t heap_audit(void) {
     /* 每块至少 8 字节负载 + 16 字节头，块数不可能超过 总字节/24+4 */
     uint32_t max_blocks = page_count * PAGE_SIZE / 24u + 4u;
     block_t *b = head;
+    block_t *prev = 0;
     while (b) {
         if (++blocks > max_blocks) {
             serial_printf("[audit] heap FAIL: next chain loop/suspect (walk>%u)\n", max_blocks);
+            bad++;
+            break;
+        }
+        /* L3（BUG-074）：地址序结构不变量——链表必须按地址严格递增。
+         * 任何破坏排序的插入（回退旧 heap_add_pages 之类）在此当场暴露。 */
+        if (prev && (uint32_t)b <= (uint32_t)prev) {
+            serial_printf("[audit] heap FAIL: addr order violated @%x after %x\n",
+                          (uint32_t)b, (uint32_t)prev);
             bad++;
             break;
         }
@@ -177,6 +231,7 @@ uint32_t heap_audit(void) {
         }
         if (b->free) { free_sum += b->size; free_cnt++; }
         else         { used_sum += b->size; }
+        prev = b;
         b = b->next;
     }
     if (!bad && (free_sum != free_bytes || used_sum != used_bytes)) {
