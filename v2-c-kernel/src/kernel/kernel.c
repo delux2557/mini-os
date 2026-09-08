@@ -15,6 +15,7 @@
 #include "e1000.h"
 #include "netif.h"     /* v1.1 Step 1：netif 抽象层——协议/系统代码不再直调具体网卡 */
 #include "uart_netif.h" /* v1.1 Step 2：COM2 串口网卡（SLIP）——第二个 netif 后端 */
+#include "wdt.h"       /* NMI 看门狗（i6300esb + QEMU inject-nmi） */
 #include "userprog_offsets.h"
 #include "version.h"   /* v0.30（评估 L-4）：版本单一来源，启动横幅取 MINI_OS_VERSION */
 #include <stdint.h>
@@ -108,6 +109,10 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     e1000_icmp_selftest(); /* v0.23：ICMP Echo 自检——PING 通宿主（SLIRP 网关回显） */
 
     timer_init(100);      /* 100 Hz 心跳 */
+    /* NMI 看门狗武装（紧随 timer_init：首 tick 即开始喂狗，无引导空隙误报）。
+     * 此后任何 cli 段死循环（如 BUG-074 kfree 链表成环）中断被屏蔽 → 停止喂狗 →
+     * ~6s 后 QEMU 注入 NMI 突破死循环并软复位（见 drv/wdt.c）。 */
+    wdt_init();
     kb_init();
     /* v0.10：串口 COM1 接收 -> 键盘行缓冲，`qemu -serial stdio` 即成可交互串口终端 */
     serial_set_rx_hook(kb_feed_char);
