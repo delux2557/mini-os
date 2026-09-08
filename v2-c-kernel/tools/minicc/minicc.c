@@ -84,6 +84,7 @@ typedef struct {
     int len;                    /* V2d：数组元素个数（非数组=0） */
     int val;                    /* FUNC: 代码偏移(未定义=-1)；GLOBAL: 数据偏移；
                                    LOCAL: 帧字节偏移；ARG: 参数序号 */
+    int nargs;                  /* FUNC: 形参个数（未定义/未知=-1）——MC-04 实参/形参个数校验收敛用 */
 } Sym;
 
 typedef struct { char name[32]; int pos; int kind; } Patch;
@@ -308,6 +309,7 @@ static int sym_add(const char *name, int kind, int ty, int bty, int len, int val
     syms[nsym].bty = bty;
     syms[nsym].len = len;
     syms[nsym].val = val;
+    syms[nsym].nargs = kind == K_FUNC ? -1 : 0;   /* FUNC 形参个数未知；其余无意义 */
     return nsym++;
 }
 
@@ -505,6 +507,7 @@ static void next_tok(void) {
             if (peekc() == '_' || (peekc() >= '0' && peekc() <= '9') ||
                 (peekc() >= 'a' && peekc() <= 'z') || (peekc() >= 'A' && peekc() <= 'Z'))
                 fail("bad number");
+            if (n == 2) fail("empty hex literal");   /* FIX-E（审计 MC-07）：0x 后无十六进制位，宁拒不坑 */
             toklen = n;
             tok_is_num = 1;
             return;
@@ -515,6 +518,9 @@ static void next_tok(void) {
             else break;
         }
         tok[n] = 0;
+        /* FIX-E（审计 MC-07）：minicc 不支持八进制，`010` 若按十进制会被静默解成 10（C 语义应为 8）。
+         * 拒绝前导 0 + 多位数字的八进制形态，宁拒不误导（`0` 单个合法；0x 前置分支不落到此）。 */
+        if (tok[0] == '0' && tok[1]) fail("octal literals not supported");
         if (peekc() == '_' || (peekc() >= 'a' && peekc() <= 'z') ||
             (peekc() >= 'A' && peekc() <= 'Z'))
             fail("bad number");
@@ -759,6 +765,16 @@ static Node *primary(void) {
             }
             expect(")");
             n->a = head;
+            /* FIX-G（审计 MC-04）：实参/形参个数一致性。被调函数已定义(形参已知)→直接比对；
+             * 未定义→记录本次实参个数（首次记录 / 重复比对），留待定义处交叉核对。 */
+            int fidx = si < 0 ? nsym - 1 : si;
+            if (syms[fidx].val >= 0) {                       /* 已定义，形参个数已知 */
+                if (n->nargs != syms[fidx].nargs) fail("arg count mismatch");
+            } else if (syms[fidx].nargs >= 0) {              /* 已见同名调用 */
+                if (n->nargs != syms[fidx].nargs) fail("arg count mismatch");
+            } else {
+                syms[fidx].nargs = n->nargs;                 /* 首次见，记录本次实参个数 */
+            }
             return n;
         }
         int si = sym_find(name);
@@ -1229,6 +1245,10 @@ static void parse_program(void) {
             }
             expect(")");
             fn->nargs = cur_nargs;
+            /* FIX-G（审计 MC-04）：定义处交叉核对先前同名调用记录的实参个数 */
+            if (syms[si].nargs >= 0 && syms[si].nargs != cur_nargs)
+                fail("arg count mismatch");
+            syms[si].nargs = cur_nargs;    /* 固化形参个数 */
             fn->a = params;
             /* MC-08#3：入口 stub 是 `call main` 不带参，main 带形参时 argc 读到垃圾/0（与 gcc 参考差 1 位），
              * 用户无从知晓 —— 宁拒不坑（契约：main() 固定无参）。 */
@@ -1654,6 +1674,8 @@ int minicc_main(char *argv, int argc) {
     src = in_data;
     src_len = in_len;
     src_pos = 0;
+    for (int i = 0; i < src_len; i++)    /* FIX-F（审计 MC-06）：拒绝源码中的原始 NUL 字节（`\0` 转义为 `\\0`，不受影响） */
+        if (src[i] == 0) fail("NUL byte in source");
     next_tok();
     parse_program();
     if (tok[0] != 0) fail("unexpected token");
