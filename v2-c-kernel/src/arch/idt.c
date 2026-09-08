@@ -91,6 +91,13 @@ void isr_handler(registers_t *r) {
         if (irq >= 8) outb(0xA0, 0x20); /* 从片 EOI */
         outb(0x20, 0x20);              /* 主片 EOI */
         if (irq_handlers[irq]) irq_handlers[irq](r);
+    } else if (r->int_no == 2) {
+        /* NMI（不可屏蔽中断）：i6300esb 看门狗超时后由 QEMU 注入（inject-nmi）。
+         * cli 段死循环时 IF=0，定时器 IRQ 与软看门狗全部失效，唯 NMI 能进入；
+         * nmi_handler 打印现场后软复位自救（见 drv/wdt.c）。 */
+        extern void nmi_handler(registers_t *);
+        nmi_handler(r);
+        __asm__ volatile ("cli; hlt");   /* 不可达 */
     } else if (r->int_no == 14) {
         /* 页错误：交由内存管理处理，懒分配区内可恢复重试 */
         extern void pf_handler(registers_t *);
