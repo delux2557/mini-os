@@ -142,9 +142,9 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 
 - ✅ AST 引入（V2a）：Parser 建树 + Codegen 遍历，替换 V1 单遍直接生成；int-only 语义经测试锁定等价。
 
-- ✅ 类型系统 + 指针（V2b）：`TY_INT/TY_PTR`；`int*` 声明/参数/全局；`&` 取地址、`*` 解引用（可读写）；指针算术 `p+n` 按元素尺寸（4 字节）缩放；赋值/初始化/解引用/取地址均编译期类型检查。
+- ✅ 类型系统 + 指针（V2b）：`TY_INT/TY_PTR`；`int*` 声明/参数/全局；`&` 取地址、`*` 解引用（可读写）；指针算术 `p+n` 按元素尺寸（4 字节）缩放；赋值/初始化/解引用/取地址均编译期类型检查。**双指针相加 `p+q` 编译期拒绝**（`invalid operands: pointer + pointer`，审计 MC-08；C 禁止，宁拒不坑）；双指针相减 `p-q` 属 ptrdiff 本项目不支持，codegen 拒绝（`invalid pointer subtraction`）。
 
-- ✅ 字符串/char（V2c）：`TY_CHAR`（无符号）加入；`char` 变量/全局/参数、`char*` 指针（算术按元素尺寸 1 缩放、读写按 8 位 `movzbl/mov %al`）；字符字面量 `'A'`（支持转义）；字符串字面量入只读数据段、表达式为隐式 `char*`，转义 `\n \t \\ \" \' \0 \xNN`（≤254 字节，EOF/换行守卫；借鉴 cc500 已验证的解码，规避其 F-3 自噬）。
+- ✅ 字符串/char（V2c）：`TY_CHAR`（无符号）加入；`char` 变量/全局/参数、`char*` 指针（算术按元素尺寸 1 缩放、读写按 8 位 `movzbl/mov %al`）；字符字面量 `'A'`（支持转义）；字符串字面量入只读数据段、表达式为隐式 `char*`，转义 `\n \t \\ \" \' \0 \xNN`（≤254 字节，EOF/换行守卫；借鉴 cc500 已验证的解码，规避其 F-3 自噬）。**`\x` 精确吃恰好 2 位 hex、且不跨字符贪婪**（`"\x41F"` → 字符 `'A'` + `'F'`，不同于 C 的贪婪合并成单一超值）——本项目为**确定性小值语义**的有意收口，设计契约如此，非缺陷（MC-08#5）。
 
 - ✅ 数组（V2d）：`int a[N]` / `char s[N]` 全局/局部定长；`a[i]` 读写（元素按类型取宽），`&a[i]` 可作指针；帧布局由 4 字节槽改为**纯字节偏移**（数组紧凑 len×元素尺寸，标量**不保证 4 字节对齐**——如 `char s[3]` 后 `int x` 落非对齐偏移，x86 允许未对齐访问、guest 实测无碍；帧 ≤4KB 编译期拒绝）；下标边界不检查、数组名无下标/数组初始化/数组参数编译期拒绝（UB 由用户负责）。
 
@@ -231,6 +231,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
   - UTF-8 非 ASCII 注释字节：`peek/peek2` 用 `& 255` 无符号读取，避免有符号 char 负值被误判为 EOF。
   - 类型检查放宽：`type_eq` 允许右值 int 赋给指针，支撑 `xmalloc`（`brk` 系统调用）返回 int 地址赋给 `char*`。
   - 资源上限：节点池 8192、`PATCH_MAX=4096`、`code_cap=860000`（产物含全局数组零填充数据段 + 文本约 686KB）。
+  - 递归深度守卫（外部审计 MC-09，P1==P2 两侧同 fence）：guest 用户栈每进程仅 **28KB**（`src/mm/mem.h` `USER_STACK_SLOT=32KB` − 永不映射的 `USER_STACK_GUARD=4KB`），深括号/长链会让解析与 codegen 的递归打爆编译器自身栈（SIGSEGV，无编译期诊断）。故双实现同步加深度计数：表达式/一元链/操作数嵌套 `EXPR_DEPTH_MAX=32`、语句/块嵌套 `STMT_DEPTH_MAX=128`、codegen AST 深度 `GEN_DEPTH_MAX=256`，超限一律 `fail("expression nesting too deep")` / `fail("statement nesting too deep")` 受控报错。限幅按 28KB 预算反推（实测括号≥45 层、加法链≥1000 项即崩）并留出安全余量。
   - 宿主侧逻辑快速验证：gcc 直编 `minicc_self.c + host_crt.c`（`-Dmain` 改名避冲突 + `-include` 声明 syscall3）得宿主版 S，S 编 `minicc_self.c` 得 Q，`Q == P1` 逐字节一致 —— 证明 minicc_self.c 逻辑与 minicc.c 语义完全一致，机器码/运行期差异只可能来自 codegen（已被 guest 内 P1==P2 排除）。
 
 ***
@@ -244,6 +245,10 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 | 恢复（可选增强，V2 评估）         | 遇到 `;`/`}` 前跳过 token 继续                  | 用于一次编译报出多个错误；不改变已生成代码的正确性      |
 
 - 诊断格式规范（V2 起）：`minicc: error: <行>:<列>: <消息> [token]`；行/列由 Lexer 维护。
+
+- 告警（非致命，外部审计 MC-08#2）：函数控制流落尾可达而无 `return` 时打印 `warning: function '<名>' control reaches end of function without return (returns residual eax)`，编译继续、退出码 0（与 `-Wreturn-type` 精神一致；近似保守，`while(1){...return}` / `for(;;)` 无限循环惯用法不误报）。
+
+- 入口 stub 契约（外部审计 MC-08#3）：`main` 固定以零参 `call main`（见 §7.1），`int main(int argc,…)` 带形参处编译期报错 `main takes no arguments` —— 拒绝 `argc` 读到垃圾/0 的静默契约违反。
 
 - 纪律：**任何"不支持特性"必须走诊断路径**，禁止静默生成错误机器码（原则 3）。
 
@@ -267,6 +272,8 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 - 宿主 gcc 固定 `-O0 -fno-builtin`：关闭优化与内置替换，使 GCC 行为接近朴素翻译，减少 UB 噪声。
 
 - 比对维度仅 `exit code`（stdout/stderr 在 V2 引入字符串后加入），**不比对汇编/IR**。
+
+- char 参考差分限幅（外部审计 MC-08#4）：`TY_CHAR` 为无符号（见 §6.2），与 gcc 参考（i386 默认 `signed char`）存在**固有假差异**——`carr[i]` 存 >127 时 gcc 退码变负数。差分参照程序凡涉 `char` 一律**只允许 0..127**（对应 [`diffsynth/gen.c`](../../v2-c-kernel/tools/minicc/diffsynth/gen.c) 的 `F_CHAR` 只读源 `rndi(0,127)` 限幅）；这也是函数返回类型保留后（MC-08#1）`char cf()` 与 gcc 在边界值的差异来源，属文档化设计而非缺陷。
 
 ***
 

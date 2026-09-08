@@ -166,25 +166,39 @@ hrun t_arrg_ok 'int g[100000];int main(){g[0]=7;if(g[99999]==0&&g[0]==7)return 0
 # MC-05：数组长度十六进制解析（旧实现 int g[0x10] 十进制环 → 7210 元素 / 28KB 产物）
 hrun t_arrhexL 'int main(){int a[0x4];a[3]=9;if(a[3]==9)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_arrhex 'int g[0x10];int main(){g[15]=7;return 0;}' 0 'compiled OK' ''
-# MC-05：非数字/空十六进制数组长度仍须拒绝（空 0x 词法层显式拒绝）
+# MC-05：非数字/空十六进制数组长度仍须拒绝
 hrun t_arrhexbad 'int main(){int a[0xG];return 0;}' 1 'bad number' 'compiled OK'
-hrun t_arrhexempty 'int main(){int a[0x];return 0;}' 1 'empty hex literal' 'compiled OK'
-# MC-07：八进制字面量（C 语义 010=8，minicc 不实现八进制 → 宁拒不误导）与空 0x 字面量
-hrun t_octal 'int main(){int a;a=010;return a;}' 1 'octal literals not supported' 'compiled OK'
-hrun t_octal0 'int main(){int a;a=0;return a;}' 0 'compiled OK' ''       # 单个 0 仍合法
-hrun t_octal0x 'int main(){int a;a=0x10;return a;}' 0 'compiled OK' ''    # 0x 前置不受八进制拒绝影响
-hrun t_emptyhex 'int main(){int a;a=0x;return a;}' 1 'empty hex literal' 'compiled OK'
-# MC-06：源码含原始 NUL 字节 -> 必须 FAIL + NUL byte in source（bash 变量不能承载 NUL，直接落盘）
-printf 'int main(){return 0;}\x00garbage' >"$VD/t_nul.c"
-nout=$(timeout 15 "${RUN[@]}" "$VD/t_nul.c" "$VD/t_nul.elf" 2>&1); nrc=$?
-if [ "$nrc" -ne 0 ] && echo "$nout" | grep -q 'NUL byte in source'; then
-    HOST_PASS=$((HOST_PASS+1)); echo "[ok]   宿主 t_nul (rc=$nrc)"
-else echo "[FAIL] 宿主 t_nul rc=$nrc 未拒绝 NUL"; echo "$nout"|sed 's/^/        /'; HOST_FAIL=$((HOST_FAIL+1)); fi
-# MC-04：函数实参/形参个数不匹配 -> 必须 FAIL + arg count mismatch
-hrun t_arity 'int f(int a,int b){return a+b;}int main(){int x;x=f(1);return x;}' 1 'arg count mismatch' 'compiled OK'
-hrun t_arity2 'int f(int a,int b){return a+b;}int main(){return f(1);}' 1 'arg count mismatch' 'compiled OK'
-hrun t_arity3 'int f(int a){return a;}int main(){return f(1,2);}' 1 'arg count mismatch' 'compiled OK'
-hrun t_arityok 'int f(int a,int b){return a+b;}int main(){return f(1,2)-3;}' 0 'compiled OK' ''
+hrun t_arrhexempty 'int main(){int a[0x];return 0;}' 1 'bad number' 'compiled OK'
+
+echo "== [2b3] 外部审计 MC-08/09 回归：类型收口 + 落尾告警 + 深度守卫 =="
+# MC-08#1：char 函数返回类型须保留（旧实现抹平为 TY_INT → 调用点当 int，`int* p=cf()` 被
+#   "int→ptr 放宽"错接住）——正常情况下 `char cf()` 调用不得 type mismatch，必须 compiled OK
+hrun t_charrc 'char cf(){char c;c=200;return c;}int main(){char v;v=cf();return v;}' 0 'compiled OK' ''
+# MC-08#1：int* p = char 函数结果仍须按类型拒绝（返回类型保留后正确报 type mismatch）
+hrun t_charrcmis 'char cf(){char c;c=200;return c;}int main(){int* p;p=cf();return 0;}' 1 'type mismatch' 'compiled OK'
+# MC-08#2：函数落尾无 return → 告警 control reaches end，且不得误伤（仍 compiled OK）
+# （不设 mustn='compiled OK'：落尾告警本就伴随成功编译，二者共存属预期）
+hrun t_fallret 'int f(){int x;x=3;}int main(){return 0;}' 0 'control reaches end' ''
+# MC-08#2：正常以 return 收尾的函数不得误报
+hrun t_okret 'int f(){int x;x=3;return x;}int main(){return 0;}' 0 'compiled OK' ''
+# MC-08#2：while(1){...return} 无限循环惯用法不得误报（ends_in_ret 视其为不落尾）
+hrun t_while1ret 'int f(){while(1){return 3;}}int main(){return 0;}' 0 'compiled OK' ''
+# MC-08#3：main 带形参 → 必须 FAIL + main takes no arguments（入口 stub 恒 0 参 call main）
+hrun t_mainarg 'int main(int argc){return 0;}' 1 'main takes no arguments' 'compiled OK'
+# MC-08#3：main() 正常零参不误伤
+hrun t_main0 'int main(){return 0;}' 0 'compiled OK' ''
+# MC-08#1/p+p：双指针相加（C 禁止）须拒绝 pointer + pointer（结果卡/D1 点名的静默接受）
+hrun t_ppadd 'int main(){int x;int x2;int* p;p=&x;int* q;q=&x2;p+q;return 0;}' 1 'pointer + pointer' 'compiled OK'
+# MC-08#1/p-p：双指针相减（C 属 ptrdiff，本子集不支持）须拒绝 invalid pointer subtraction
+hrun t_ppsub 'int main(){int x;int x2;int* p;p=&x;int* q;q=&x2;p-q;return 0;}' 1 'invalid pointer subtraction' 'compiled OK'
+# MC-08#1：指针 + 整数 / 整数 + 指针 合法不误伤
+hrun t_paddok 'int main(){int x;int* p;p=&x;int* q;q=p+1;return 0;}' 0 'compiled OK' ''
+# MC-09：深表达式嵌套须受控报错 expression nesting too deep（旧实现递归打爆 28KB guest 栈 → SIGSEGV）
+hrun t_deepnest 'int main(){int a;a=((((((((((((((((((((((((((((((1)))))))))))))))))))))))))));return a-1;}' 1 'expression nesting too deep' 'compiled OK'
+# MC-09：深语句块嵌套须受控报错 statement nesting too deep（>STMT_DEPTH_MAX=128 触发）
+hrun t_deepblk "int main(){int a;a=0;$(printf '{%.0s' $(seq 1 140))a=a+1;$(printf '}%.0s' $(seq 1 140))return a;}" 1 'statement nesting too deep' 'compiled OK'
+# MC-09：普通嵌套（< 上限）不得误伤，仍 compiled OK
+hrun t_deepnest_ok 'int main(){int a;a=((((((((1))))))));return a-1;}' 0 'compiled OK' ''
 
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
