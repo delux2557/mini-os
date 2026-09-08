@@ -26,10 +26,21 @@ static char *bump_alloc(uint32_t n) {
     return (char *)(top + 8);
 }
 
+/* 输出约定：每行单次 sys_print（原子行，避免被抢占时拆断日志行）。
+ * 注意：tag/hex/换行必须拼进同一缓冲一次性打印——三次 sys_print 是三个独立
+ * syscall，之间可被调度/其他内核日志插入，整行 grep 断言会被撕裂误判（CI flake）。 */
 static void puthex_nl(const char *tag, uint32_t v) {
-    sys_print(tag);
-    user_puthex(v);
-    sys_print("\n");
+    char buf[48];
+    uint32_t i = 0;
+    while (tag[i] && i < sizeof(buf) - 12) { buf[i] = tag[i]; i++; }
+    buf[i++] = '0'; buf[i++] = 'x';
+    for (int s = 28; s >= 0; s -= 4) {
+        uint32_t d = (v >> s) & 0xF;
+        buf[i++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+    }
+    buf[i++] = '\n';
+    buf[i] = 0;
+    sys_print(buf);
 }
 
 void app_main(int argc, char **argv) {
