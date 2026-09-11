@@ -265,6 +265,25 @@ static void cmd_run(char *name) {
     sys_print("\n");
 }
 
+/* v0.37（R1.2 后半，外部审计 A1）：bg <prog>——后台 spawn，不等待退出。
+ * 支撑 init 脚本（/init.rc）承载常驻服务/演示：dhcpd 续约守护、sockdemo 等
+ * 由用户态按需拉起，内核不再在启动序列里硬编码 spawn（"静态 spawn 演示进程"）。 */
+static void cmd_bg(char *name) {
+    if (!name[0]) { sys_print("usage: bg <prog>\n"); return; }
+    int pid = sys_spawn_file(name);
+    if (pid <= 0) {
+        sys_print("bg: cannot load '");
+        sys_print(name);
+        sys_print("'\n");
+        return;
+    }
+    sys_print("[shell] bg '");
+    sys_print(name);
+    sys_print("' pid=");
+    user_putdec((uint32_t)pid);
+    sys_print(" (no wait)\n");
+}
+
 /* v0.12: exec <prog> [args...] —— 经典 fork+exec+argv+wait 全链路。
  * shell fork 出子进程，子进程用 sys_exec 把自己替换为 prog 并携带 argv，
  * 父进程（shell）用 sys_wait 等待其退出。 */
@@ -357,6 +376,7 @@ static void cmd_netdiag(void) {
 }
 
 static void cmd_netping(char *args) {
+    sys_print("[netping]START\n");
     char *tok[4];
     int n = tokenize(args, tok, 4);
     uint32_t ip = 0x0A000202u;          /* 默认 10.0.2.2：SLIRP 网关 */
@@ -832,6 +852,7 @@ static int run_command_line(char *line) {
     else if (user_strcmp(cmd, "rmdir") == 0)      cmd_rmdir(arg);
     else if (user_strcmp(cmd, "rm") == 0)         cmd_rm(arg);
     else if (user_strcmp(cmd, "run") == 0)        cmd_run(arg);
+    else if (user_strcmp(cmd, "bg") == 0)         cmd_bg(arg);
     else if (user_strcmp(cmd, "exec") == 0)       cmd_exec(arg);
     else if (user_strcmp(cmd, "save") == 0)       cmd_save();
     else if (user_strcmp(cmd, "netping") == 0)    cmd_netping(arg);
