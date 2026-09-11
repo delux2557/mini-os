@@ -48,7 +48,14 @@
 #define SYS_LIMIT       36  /* v0.34 BUG-058: per-process syscall 掩码（只收窄） */
 #define SYS_FS_READDIR  37  /* syscall#37: 把目录条目名枚举进用户缓冲（动态盘点，help 自发现） */
 #define SYS_NETDIAG     38  /* v0.35（R1.2）: 网络自检三连（ARP/UDP/ICMP），shell netdiag 命令触发 */
-#define SYS_DHCP_TICK   39  /* v0.36（R1.3）: DHCP 续约心跳——dhcpd 守护进程每 10ms 触发（迁出中断上下文） */
+/* v0.38（R1.3 后半）：DHCP 续约原子能力——状态机移至用户态 dhcpclient。
+ * SYS_DHCP_TICK(39) 撤销：续约不再由守护进程"踢一脚内核状态机"，
+ * 改为用户态直接经以下 5 个原子调用驱动（机制/策略分离）。 */
+#define SYS_DHCP_QUERY   40 /* 查询租约（lease/elapsed/T1/T2） */
+#define SYS_DHCP_SEND    41 /* 发一帧：0=RENEW 1=REBIND 2=DISCOVER 3=REQUEST(req_ip) */
+#define SYS_DHCP_RECV    42 /* 收一条应答并解析（mt/yi/si/rt/ls；1=收到 0=无 -1=败） */
+#define SYS_DHCP_APPLY   43 /* 应用 ACK（yi/rt/ls/tag）回内核租约 */
+#define SYS_DHCP_FALLBACK 44 /* 租约丢失 -> 回退静态兜底 */
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {

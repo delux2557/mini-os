@@ -41,8 +41,8 @@ stack_of() {
 # 其后是按调用深度可达的最深线性路径。任一新根链都须在此登记（门禁才会守护它——
 # L2 将自动化，扫描 cgraph 自动求全，此处为过渡期的人工清单）。
 ROOTS=(
-  "IRQ0/timer·DHCP续约: timer_cb e1000_dhcp_tick dhcp_poll_once netsock_dhcp_recv netsock_drain netif_rx e1000_if_rx"
   "IRQ0/timer·调度: timer_cb sched_tick schedule"
+  "syscall/dhcp-recv: syscall_dispatch e1000_dhcp_recv dhcp_poll_once netsock_dhcp_recv netsock_drain netif_rx e1000_if_rx"
   "IRQ1/键盘: kb_cb sched_wake_keyboard kb_line_take"
   "IRQ4/串口: serial_irq"
   "syscall/recvfrom: syscall_dispatch netsock_recv netsock_drain netif_rx e1000_if_rx"

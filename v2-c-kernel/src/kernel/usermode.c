@@ -25,6 +25,7 @@
 #include "userptr.h"
 #include "netsock.h"
 #include "netio.h"
+#include "e1000.h"   /* v0.38（R1.3 后半）：DHCP 续约原子能力 e1000_dhcp_* */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -1015,12 +1016,40 @@ void syscall_dispatch(registers_t *r) {
         e1000_icmp_selftest();
         r->eax = 0;
         return;
-    case 39:  /* sys_dhcp_tick()：v0.36（R1.3）DHCP 续约心跳。
-         * 由 dhcpd 守护进程每 10ms 触发——续约状态机（e1000_dhcp_tick，非阻塞）
-         * 从 timer 中断上下文迁出到进程上下文（外部审计 A1："策略寄生内核"）。
-         * 无租约/无网卡时内部直接 no-op；e1000_dhcp_tick 自带 MMIO 页目录切换。 */
-        extern void e1000_dhcp_tick(void);
-        e1000_dhcp_tick();
+    case 39:  /* syscall#39 已撤销（v0.38 R1.3 后半）：SYS_DHCP_TICK 被用户态
+                 dhcpclient 状态机取代——续约不再"踢内核状态机"，改经 40-44 原子调用。 */
+        serial_puts("[user] syscall 39 removed (use 40-44 DHCP atomic)\n");
+        r->eax = (uint32_t)-1;
+        return;
+    case 40: { /* sys_dhcp_query(&iov)：v0.38（R1.3 后半）查询租约（lease/elapsed/T1/T2）。
+                 续约状态机在用户态 dhcpclient；内核只暴露租约事实供决策。 */
+        struct dhcp_query_iov q;
+        e1000_dhcp_query(&q.lease_secs, &q.elapsed, &q.t1_ticks, &q.t2_ticks);
+        if (copyout(&q, (void *)a, sizeof(q)) < 0) { r->eax = (uint32_t)-1; return; }
+        r->eax = 0;
+        return;
+    }
+    case 41:  /* sys_dhcp_send(type, req_ip)：发一帧续约/获取报文（0=RENEW 1=REBIND
+                 2=DISCOVER 3=REQUEST）。e1000_dhcp_send 内部 pd_tx 切内核页目录访问 MMIO。 */
+        r->eax = (uint32_t)e1000_dhcp_send(a, b);
+        return;
+    case 42: { /* sys_dhcp_recv(&iov)：取一条 DHCP 应答并解析（mt/yi/si/rt/ls）。
+                 1=收到 0=无包 -1=失败；非阻塞（与轮询驱动一致）。 */
+        struct dhcp_reply_iov rp;
+        int n = e1000_dhcp_recv(&rp.mt, &rp.yi, &rp.si, &rp.rt, &rp.ls);
+        if (n > 0) copyout(&rp, (void *)a, sizeof(rp));   /* 有包才回写出参 */
+        r->eax = (uint32_t)n;
+        return;
+    }
+    case 43: { /* sys_dhcp_apply(&iov)：把 ACK 解析结果应用回内核租约（tag 定日志措辞）。 */
+        struct dhcp_apply_iov ap;
+        if (copyin((const void *)a, &ap, sizeof(ap)) < 0) { r->eax = (uint32_t)-1; return; }
+        e1000_dhcp_apply(ap.yi, ap.rt, ap.ls, ap.tag);
+        r->eax = 0;
+        return;
+    }
+    case 44:  /* sys_dhcp_fallback()：租约丢失/获取失败，回退静态兜底 */
+        e1000_dhcp_fallback();
         r->eax = 0;
         return;
     default:
