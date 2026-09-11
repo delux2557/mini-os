@@ -609,20 +609,26 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
   （DISCOVER→OFFER→REQUEST→ACK，忙等超时 ~2s、NAK/超时重试），失败回退静态
   `NET_STATIC_IP`/`NET_STATIC_GW`；`e1000_my_ip()`/`e1000_gw_ip()` 供 ARP/UDP/ICMP 三自检取动态 IP。
 
-### DHCP 租期续约（v0.28，RFC 2131 §4.4.5）
+### DHCP 租期续约（v0.28 引入，v1.5 状态机全用户态）
 - **T1/T2 定时**：ACK 后记录租期并 tick 化 T1=0.5×lease（单播 RENEW）、T2=0.875×lease
-  （广播 REBIND）；`e1000_dhcp_tick()` 由 timer 心跳每 tick 非阻塞驱动（`timer_cb` 里、
-  `sched_tick` 前，保证不被上下文切换跳过）。
-- **状态机**：`RENEW_NONE → RENEW_SENT → REBIND_SENT →（REACQ_OFFER/REACQ_ACK）`；
-  到 T1 发单播 RENEW（ciaddr + 54 + 50），到 T2 未 ACK 升广播 REBIND（仅 50，任意服务器
-  可续）；ACK 重置定时器继续下一租期；NAK / REBIND 超时 → 重新 DISCOVER→OFFER→REQUEST→ACK
-  重新获取 → 彻底失败回静态兜底。每 tick 至多"发一帧 + 收一帧"，绝不在 ISR 忙等。
+  （广播 REBIND）；阈值在内核由 `dhcp_apply_ack` 计算，经 `SYS_DHCP_QUERY` 供用户态查询。
+- **状态机（RFC 2131 §4.4.5，v1.5 起整体在用户态）**：`RENEW_NONE → RENEW_SENT →
+  REBIND_SENT →（REACQ_OFFER/REACQ_ACK）`由用户态 `dhcpclient` 进程（`src/app/dhcpd.c`）
+  决策：到 T1 发单播 RENEW（ciaddr + 54 + 50），到 T2 未 ACK 升广播 REBIND（仅 50），
+  ACK 经 `SYS_DHCP_APPLY` 应用回内核并重置定时器；NAK / REBIND 超时 → 重新
+  DISCOVER→OFFER→REQUEST→ACK → 彻底失败经 `SYS_DHCP_FALLBACK` 回静态兜底。
+- **机制/策略分离（外部审计 A1"策略寄生内核"收口）**：内核只暴露 5 个原子能力
+  （syscall#40-44）：`SYS_DHCP_QUERY`（查租约/elapsed/T1/T2）、`SYS_DHCP_SEND`（发一帧
+  RENEW/REBIND/DISCOVER/REQUEST）、`SYS_DHCP_RECV`（收一条应答并解析）、`SYS_DHCP_APPLY`
+  （应用 ACK）、`SYS_DHCP_FALLBACK`（回退静态）。原 `e1000_dhcp_tick` 状态机已删除，
+  内核不再承载续约策略；dhcpclient 每 10ms 驱动一次，每次至多"发一帧/收一帧"。
 - **端口 68 专用接收端点**（`netsock_dhcp_open/recv`）：用户 socket 的 recvfrom 会
   "排空"网卡（netsock_drain 取走 NIC 环所有帧），无匹配本地端口的 DHCP 应答被抢先丢弃；
-  注册端口 68 的 DHCP socket 后，分发路径把应答入其队列，续约 tick 经它读取。
-- **两条坑**：① e1000 MMIO 位于高地址（PDE≥512），timer ISR 可能在用户进程页目录
-  （只克隆低 1GB PDE）下运行 → 访问设备寄存器缺页；tick 内临时切内核页目录（与 netsock
-  收发同款），用完切回。② `print_ip` 逐字节须 `& 0xFF`（否则 `10.2560.655362...`）。
+  注册端口 68 的 DHCP socket（内核保留槽）后，分发路径把应答入其队列，`SYS_DHCP_RECV`
+  经它读取（含 A-2 源校验：op==BOOTREPLY、源端口 67、已绑定则源 IP 匹配）。
+- **两条坑**：① e1000 MMIO 位于高地址（PDE≥512），用户态 syscall 上下文（页目录只克隆
+  低 1GB PDE）下访问设备寄存器须临时切内核页目录——DHCP 发帧经 `pd_tx`、收帧由适配层
+  处理（与 netsock 收发同款）。② `print_ip` 逐字节须 `& 0xFF`（否则 `10.2560.655362...`）。
 - **可测性**：Makefile `DHCP_RENEW_SECS`（缺省用服务器租期，SLIRP 为 24h）编译期覆盖
   租期为秒级，test_net 短租期内核在秒级窗口断言 RENEW→ACK 续约闭环（pcap UDP 10→12）。
 
@@ -903,7 +909,7 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
 - **I3 共享状态归属表**：
   | 共享状态 | 消费者 | 互斥机制 |
   |---|---|---|
-  | e1000 rx ring | IRQ0-timer `dhcp_tick` 与 syscall netif 收发 | I2：timer ISR 运行时不进 syscall，反之亦然 |
+  | e1000 rx ring | 用户态 DHCP 原子收帧（`SYS_DHCP_RECV`）与 syscall netif 收发 | I2：syscall 互不并发（门纪律免费串行；DHCP 续约状态机 v1.5 起在用户态，无 IRQ 消费者） |
   | uart 输出行 | IRQ / syscall / IF=1 窗口内任意上下文 | 整行输出须 **xirq 原子化**（`nl_*` 原子行缓冲一次 flush；K1 = 全内核唯一锁原语，为串口行撕裂 BUG-042 而设） |
   | PID / socket / fd 表 | 各 syscall + terminate_current 回收 | I2 + "谁打开谁所有、退出必归还"（v0.31 收口） |
 - **I4 演进禁令**：**使能 e1000 设备中断（真异步）或把 trap gate 改回普通门之前，必须先引入
@@ -920,7 +926,7 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
 | 1~9 | v0.5~v0.11 | 内核主体（sched/IPC/fs/elf/shell/串口/地址空间） |
 | 10 | v0.16~v0.18 | 测试策略五层 + 单行自检 |
 | 11~16 | v0.12~v0.17 | 进程/驱动/存储/syscall 边界/设计取舍 |
-| 17 | v0.18~v1.3 | 网络全链（e1000→UDP→DHCP→netif v1.1→虚拟 TCP 路标） |
+| 17 | v0.18~v1.5 | 网络全链（e1000→UDP→DHCP→netif v1.1→虚拟 TCP 路标；v1.5 续约状态机全用户态） |
 | 18 | v0.26 | 容量三连 |
 | 19 | v0.27~v0.27b | 工具链与自举 |
 | 20 | v0.29~v0.33 | 加固与工程化收口 |

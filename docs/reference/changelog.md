@@ -3,6 +3,43 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [v1.5] - 2026-09-11 · 外部审计 A1 分层整改 + NMI 看门狗 + 编译器修复集
+
+> 09-08~09-11 合并 PR #139~#147。主线：外部审计 A1「总体架构与分层」整改（自检/演示/
+> 服务彻底移出内核启动路径，DHCP 续约状态机全用户态）+ NMI 看门狗 + cc500/minicc 编译器
+> 修复。内核版本串自 v0.33 正式并入 v1.x 线（banner = v1.5，与 changelog 唯一事实源对齐）。
+
+**Engineering**（外部审计 A1 分层整改，PR #144/#145/#146/#147）
+
+* **自检三连移出启动路径（R1.2）**（`SYS_NETDIAG`#38 + shell `netdiag` 命令）：
+  ARP/UDP/ICMP 自检不再由内核启动序列硬编码执行，改按需触发；网关 ARP 学习独立为
+  功能性路径 `e1000_arp_learn_gw`（外发 IPv4 帧寻址，与自检解耦）
+* **demo/服务进 init 脚本（R1.2 后半）**：shell 新增 `bg <prog>`（后台 spawn 不等待）；
+  initramfs 写入 `/init.rc`，开机自动 `source`——sockdemo/dhcpd 由用户态按需拉起，
+  内核启动序列不再硬编码 spawn 演示进程
+* **DHCP 续约迁出中断上下文（R1.3）**：续约执行上下文从 timer ISR 迁至 dhcpd
+  守护进程（每 10ms 触发），消除"续约策略在中断上下文运行"的寄生
+* **续约状态机全用户态（R1.3 后半）**：内核删除 `e1000_dhcp_tick` 状态机，只保留
+  原子能力 syscall#40-44（QUERY/SEND/RECV/APPLY/FALLBACK）；RFC 2131 §4.4.5 的
+  T1 RENEW→T2 REBIND→超时重新获取由用户态 dhcpclient 进程决策——机制/策略彻底分离
+
+**Fixed**
+
+* **BUG-074 后续防线（PR #139）**：NMI 看门狗（`wdt.c`）——cli 段死循环可侦测并救回
+* **cc500 M8（PR #140）**：前缀 `++`/`--` 栈记账错位——值弹栈改走 `binary2` 配对记账
+* **minicc MC-04/06/07（PR #141）**：恢复误删的守卫及对应测试（c6c9272 回归）
+* **cc500 M12（PR #142）**：重复 case 常量拒绝——复用 `error()` 报错路径（外部审计）
+
+**Changed**
+
+* **版本串 v0.33 → v1.5**（`src/version.h`，PR #148 文档整改）：banner/motd/回归断言
+  统一到 v1.x 线，与 changelog 对齐；`v2-c-kernel/README.md`、顶层 README、design/
+  roadmap 相应同步
+* **style(usermode)（PR #143）**：还原 SYSLOG 撤销残留的缩进错乱（纯风格）
+
+**验证**：`make test` 全链绿；test-net 断言零改动即覆盖 init.rc/dhcpclient 新路径；
+test-det/tr/rp 确定性套件不受影响。
+
 ## [v1.4·cc500-M4] - 2026-09-06 · cc500 复合赋值（+= -= *= %=）+ 入口重定位修复
 
 > cc500（GPL，教学对照自举工具链）新增四则复合赋值 `+= -= *= %=`（复用 `binary2` 算术发射 +
