@@ -307,6 +307,7 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tlt.c /tlt.elf"
     gwait "guest < 编译" "cc500: compiled OK" 60
     gwait "guest < 运行 exit0" "'/tlt.elf' exited code=0 PASS" 90
+    gsend "rm /tlt.c"; gsend "rm /tlt.elf"
     # 变量/四则/== 语义（整机真值）：宿主无法运行 cc500 产物（qemu-i386 无内核给不了
     # 真实退出码），须靠整机 ccboot 内核 ccrun。注意 ccrun 仅认 code==0 为 PASS（shell.c
     # `code==0 ? PASS : FAIL`），故验证"a=1+2 后 a==3"要用内部 if 分支决定 return 0/1：
@@ -315,46 +316,55 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /sv.c /sv.elf"
     gwait "guest 变量四则编译" "cc500: compiled OK" 60
     gwait "guest a=1+2==3 return 0" "'/sv.elf' exited code=0 PASS" 90
+    gsend "rm /sv.c"; gsend "rm /sv.elf"
     # M1：for 语义——for(i=0;i<3;i=i+1){s=s+2;} 恰 3 轮 -> s==6（step 后置/双跳摆渡布局错即 FAIL）
     gsend 'writefile /tfor.c int main(){int i;int s;s=0;for(i=0;i<3;i=i+1){s=s+2;}if(s==6)return 0;return 1;}'
     gsend "ccrun /tfor.c /tfor.elf"
     gwait "guest M1 for 编译" "cc500: compiled OK" 60
     gwait "guest M1 for s==6 exit0" "'/tfor.elf' exited code=0 PASS" 90
+    gsend "rm /tfor.c"; gsend "rm /tfor.elf"
     # M1：do-while 语义——先执行一次再判，i 从 0 自增到 3 -> i==3
     gsend 'writefile /tdo.c int main(){int i;i=0;do{i=i+1;}while(i<3);if(i==3)return 0;return 1;}'
     gsend "ccrun /tdo.c /tdo.elf"
     gwait "guest M1 do 编译" "cc500: compiled OK" 60
     gwait "guest M1 do i==3 exit0" "'/tdo.elf' exited code=0 PASS" 90
+    gsend "rm /tdo.c"; gsend "rm /tdo.elf"
     # M2：一元 - 语义——x=-x 应为 -5（一元/二元 '-' token 消歧错即 FAIL）
     gsend 'writefile /tneg.c int main(){int x;x=5;x=-x;if(x==0-5)return 0;return 1;}'
     gsend "ccrun /tneg.c /tneg.elf"
     gwait "guest M2 一元- 编译" "cc500: compiled OK" 60
     gwait "guest M2 x==-5 exit0" "'/tneg.elf' exited code=0 PASS" 90
+    gsend "rm /tneg.c"; gsend "rm /tneg.elf"
     # M2：逻辑非语义——!0 == 1
     gsend 'writefile /tnot.c int main(){int x;x=0;if(!x)return 0;return 1;}'
     gsend "ccrun /tnot.c /tnot.elf"
     gwait "guest M2 !x 编译" "cc500: compiled OK" 60
     gwait "guest M2 !0==1 exit0" "'/tnot.elf' exited code=0 PASS" 90
+    gsend "rm /tnot.c"; gsend "rm /tnot.elf"
     # M2：^ 与 ~ 语义——5^3==6 且 ~6 补码一致
     gsend 'writefile /tbit.c int main(){int x;x=5;x=x^3;if(x==6)if(~x==~6)return 0;return 1;}'
     gsend "ccrun /tbit.c /tbit.elf"
     gwait "guest M2 ^/~ 编译" "cc500: compiled OK" 60
     gwait "guest M2 ^/~ exit0" "'/tbit.elf' exited code=0 PASS" 90
+    gsend "rm /tbit.c"; gsend "rm /tbit.elf"
     # M3：乘/除/模语义——7*6==42 且 17/5==3 且 17%5==2（C99 截断向零/余数随被除数）
     gsend 'writefile /tmul.c int main(){int x;int y;x=7*6;y=17/5;if(x==42)if(y==3)if(17%5==2)return 0;return 1;}'
     gsend "ccrun /tmul.c /tmul.elf"
     gwait "guest M3 乘除模 编译" "cc500: compiled OK" 60
     gwait "guest M3 42/3/2 exit0" "'/tmul.elf' exited code=0 PASS" 90
+    gsend "rm /tmul.c"; gsend "rm /tmul.elf"
     # M3：优先级语义——2+3*4==14（multiplicative 高于 additive）与 (2+3)*4==20
     gsend 'writefile /tpre.c int main(){int x;int y;x=2+3*4;y=(2+3)*4;if(x==14)if(y==20)return 0;return 1;}'
     gsend "ccrun /tpre.c /tpre.elf"
     gwait "guest M3 优先级 编译" "cc500: compiled OK" 60
     gwait "guest M3 14/20 exit0" "'/tpre.elf' exited code=0 PASS" 90
+    gsend "rm /tpre.c"; gsend "rm /tpre.elf"
     # M4：复合赋值链式语义——x=5;x+=3;x-=1;x*=2;x%=5 -> 8-1=7,*2=14,%5=4
     gsend 'writefile /tca.c int main(){int x;x=5;x+=3;x-=1;x*=2;x%=5;if(x==4)return 0;return 1;}'
     gsend "ccrun /tca.c /tca.elf"
     gwait "guest M4 复合赋值 编译" "cc500: compiled OK" 60
     gwait "guest M4 链式==4 exit0" "'/tca.elf' exited code=0 PASS" 90
+    gsend "rm /tca.c"; gsend "rm /tca.elf"
     # M4：char 下标 lvalue 复合赋值运行语义——s[0]+=1（'A'+1=='B'，走 compound_assign
     # 的 8-bit store mov %al 路径）+ 全局 g 在首函数前（读回 g==0 验证全局存取，并验证入口
     # call 不被全局存储偏移：be_start 按「stub 后即首函数」算 rel32，program() 首个函数体处
@@ -364,6 +374,7 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tcalf.c /tcalf.elf"
     gwait "guest M4 char下标 编译" "cc500: compiled OK" 60
     gwait "guest M4 s[0]+=1 exit0" "'/tcalf.elf' exited code=0 PASS" 90
+    gsend "rm /tcalf.c"; gsend "rm /tcalf.elf"
     # M5：for+break 运行语义——0..9 遇 i==5 断，求和 0+1+2+3+4==10（break 跳转错即 FAIL）。
     # 注：M5 源较长，/128B 单行 writefile 会截断导致 compile 错（此前误匹配累计"compiled OK"），
     # 故一律走 heredoc（shell_heredoc.h），并加"源写入"确认锚点规避累计 grep 误判。
@@ -421,10 +432,12 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "ccrun /tvand.c /tvand.elf"
     gwait "guest M6 && 值语义 编译" "cc500: compiled OK" 60
     gwait "guest M6 && 值语义 exit0" "'/tvand.elf' exited code=0 PASS" 90
+    gsend "rm /tvand.c"; gsend "rm /tvand.elf"
     gsend 'writefile /tvandor.c int main(){int a;a=3;if(a>0&&a<5||a==9)return 0;return 1;}'
     gsend "ccrun /tvandor.c /tvandor.elf"
     gwait "guest M6 &&|| 优先级 编译" "cc500: compiled OK" 60
     gwait "guest M6 &&|| 优先级 exit0" "'/tvandor.elf' exited code=0 PASS" 90
+    gsend "rm /tvandor.c"; gsend "rm /tvandor.elf"
     # M7：?: 运行语义——真/假分支各取正确值；且分支互斥（0?A:B 只求值 B）。
     # 单行 writefile 对含 ? 内容偶现 FS create fail → 全走 heredoc + 源写入锚点（防累计 grep 误判）。
     # 真分支：a=2 时 a>1 真 → (a>1?5:6)==5 → return 0
