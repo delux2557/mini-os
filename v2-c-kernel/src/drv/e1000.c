@@ -499,15 +499,21 @@ int e1000_rx(uint8_t *buf, uint32_t max, uint32_t *len) {
     return 1;
 }
 
-void e1000_selftest(void) {
-    if (!ready) { serial_puts("[net] selftest skipped (no e1000)\n"); return; }
-    uint32_t my_ip = e1000_my_ip();   /* v0.25：DHCP 学得或静态兜底 */
+/* ---- v0.35（R1.2，外部审计 A1）：网关 ARP 学习独立为功能性路径 ----
+ * 一切外发 IPv4 帧（netsock/sockdemo/DHCP 单播续约）都经网关 MAC 寻址；
+ * 旧实现把学习藏进 e1000_selftest（演示资产），启动删自检后必须独立。
+ * 启动序列：DHCP 取到 IP/网关后调用一次；失败则外发帧走 bcast/拒发兜底。 */
+int e1000_arp_learn_gw(void) {
+    if (!ready) return -1;
+    uint32_t my_ip = e1000_my_ip();
     uint32_t gw_ip = e1000_gw_ip();
     uint8_t frame[64];
     for (int attempt = 0; attempt < 5; attempt++) {
         int flen = net_build_arp_request(frame, mac, my_ip, gw_ip);
-        if (e1000_tx(frame, (uint32_t)flen) < 0) { serial_puts("[net] selftest: tx fail\n"); return; }
-        serial_printf("[net] selftest: tx ARP req (who has 10.0.2.2) #%d\n", attempt);
+        if (e1000_tx(frame, (uint32_t)flen) < 0) { serial_puts("[net] arp: gw learn tx fail\n"); return -1; }
+        serial_printf("[net] arp: gw learn req (who has %u.%u.%u.%u) #%d\n",
+                      (gw_ip >> 24) & 255, (gw_ip >> 16) & 255,
+                      (gw_ip >> 8) & 255, gw_ip & 255, attempt);
         for (int i = 0; i < 30000; i++) {
             uint8_t rxb[1600];
             uint32_t rlen = 0;
@@ -515,6 +521,57 @@ void e1000_selftest(void) {
                 uint32_t sip = 0;
                 uint8_t smac[6];
                 if (net_parse_arp_reply(rxb, rlen, &sip, smac) == 0) {
+                    for (int j = 0; j < 6; j++) gw_mac[j] = smac[j];
+                    gw_known = 1;
+                    serial_printf("[net] arp: gw %u.%u.%u.%u @ %02x:%02x:%02x:%02x:%02x:%02x -> OK\n",
+                                  (gw_ip >> 24) & 255, (gw_ip >> 16) & 255,
+                                  (gw_ip >> 8) & 255, gw_ip & 255,
+                                  smac[0], smac[1], smac[2], smac[3], smac[4], smac[5]);
+                    return 0;
+                }
+            }
+            for (volatile uint32_t d = 0; d < 2000; d++) ;
+        }
+    }
+    serial_puts("[net] arp: gw learn FAIL (no reply)\n");
+    return -1;
+}
+
+/* ---- v0.35（R1.2，外部审计 A1）：自检经 sys_netdiag 从用户进程上下文触发 ----
+ * e1000 MMIO 位于高地址（PDE>=512），用户进程页目录只克隆低 1GB PDE（见
+ * e1000_netif.c 同款注释）；自检直连驱动收发（绕过 netif 适配层），故收发必须
+ * 临时切内核页目录，与 e1000_netif.c 的 enter/exit 同粒度。 */
+static int pd_tx(const uint8_t *data, uint32_t len) {
+    uint32_t saved = mem_current_pd();
+    if (saved != mem_kernel_pd()) switch_page_dir(mem_kernel_pd());
+    int rc = e1000_tx(data, len);
+    if (saved != mem_kernel_pd()) switch_page_dir(saved);
+    return rc;
+}
+static int pd_rx(uint8_t *buf, uint32_t max, uint32_t *len) {
+    uint32_t saved = mem_current_pd();
+    if (saved != mem_kernel_pd()) switch_page_dir(mem_kernel_pd());
+    int rc = e1000_rx(buf, max, len);
+    if (saved != mem_kernel_pd()) switch_page_dir(saved);
+    return rc;
+}
+
+void e1000_selftest(void) {
+    if (!ready) { serial_puts("[net] selftest skipped (no e1000)\n"); return; }
+    uint32_t my_ip = e1000_my_ip();   /* v0.25：DHCP 学得或静态兜底 */
+    uint32_t gw_ip = e1000_gw_ip();
+    /* L0 栈预算：4KB 内核栈上 dispatch 帧 2224B 后仅剩 ~1.8KB，TX/RX 共用单缓冲 */
+    uint8_t buf[1600];
+    for (int attempt = 0; attempt < 5; attempt++) {
+        int flen = net_build_arp_request(buf, mac, my_ip, gw_ip);
+        if (pd_tx(buf, (uint32_t)flen) < 0) { serial_puts("[net] selftest: tx fail\n"); return; }
+        serial_printf("[net] selftest: tx ARP req (who has 10.0.2.2) #%d\n", attempt);
+        for (int i = 0; i < 30000; i++) {
+            uint32_t rlen = 0;
+            if (pd_rx(buf, sizeof(buf), &rlen) == 1) {
+                uint32_t sip = 0;
+                uint8_t smac[6];
+                if (net_parse_arp_reply(buf, rlen, &sip, smac) == 0) {
                     for (int j = 0; j < 6; j++) gw_mac[j] = smac[j];
                     gw_known = 1;
                     serial_printf("[net] selftest: rx ARP reply 10.0.2.2 @ "
@@ -533,22 +590,21 @@ void e1000_udp_selftest(void) {
     if (!ready || !gw_known) { serial_puts("[net] udp selftest skipped (no gw)\n"); return; }
     uint32_t my_ip = e1000_my_ip();   /* v0.25：DHCP 学得或静态兜底 */
     uint32_t gw_ip = e1000_gw_ip();   /* 10.0.2.2 -> 宿主 127.0.0.1（SLIRP 别名） */
-    uint8_t frame[BUF_SIZE];
+    uint8_t buf[1600];                /* L0 栈预算：TX/RX 共用单缓冲（见 e1000_selftest） */
     /* 向宿主 UDP echo 服务（127.0.0.1:7777）发 PING；echo server 回 PONG+原载荷 */
-    int flen = udp_build_frame(frame, gw_mac, mac, my_ip, gw_ip, 7777, 7777,
+    int flen = udp_build_frame(buf, gw_mac, mac, my_ip, gw_ip, 7777, 7777,
                                (const uint8_t *)"PING", 4);
-    if (flen <= 0 || e1000_tx(frame, (uint32_t)flen) < 0) {
+    if (flen <= 0 || pd_tx(buf, (uint32_t)flen) < 0) {
         serial_puts("[net] udp selftest: tx fail\n"); return;
     }
     serial_printf("[net] udp: tx %dB -> 10.0.2.2:7777 (PING)\n", flen);
     for (int attempt = 0; attempt < 5; attempt++) {
         for (int i = 0; i < 30000; i++) {
-            uint8_t rxb[1600];
             uint32_t rlen = 0;
-            if (e1000_rx(rxb, sizeof(rxb), &rlen) == 1) {
+            if (pd_rx(buf, sizeof(buf), &rlen) == 1) {
                 uint32_t sip = 0; uint16_t sp = 0, dp = 0;
                 const uint8_t *pay = 0; uint32_t plen = 0;
-                if (udp_parse(rxb, rlen, &sip, &sp, &dp, &pay, &plen) == 0 &&
+                if (udp_parse(buf, rlen, &sip, &sp, &dp, &pay, &plen) == 0 &&
                     dp == 7777 && plen >= 4 && pay[0] == 'P' && pay[1] == 'O' &&
                     pay[2] == 'N' && pay[3] == 'G') {
                     serial_printf("[net] udp echo: rx %uB 'PONG' from 10.0.2.2:%u -> OK\n",
@@ -566,25 +622,24 @@ void e1000_icmp_selftest(void) {
     if (!ready || !gw_known) { serial_puts("[net] icmp selftest skipped (no gw)\n"); return; }
     uint32_t my_ip = e1000_my_ip();   /* v0.25：DHCP 学得或静态兜底 */
     uint32_t gw_ip = e1000_gw_ip();   /* SLIRP 网关（内置 ICMP 回显） */
-    uint8_t frame[BUF_SIZE];
+    uint8_t buf[1600];                /* L0 栈预算：TX/RX 共用单缓冲（见 e1000_selftest） */
     /* 发 Echo 请求（id=0x4242, seq=1, 载荷 "PING"）；SLIRP 回 Echo 应答（type=0） */
-    int flen = icmp_build_frame(frame, gw_mac, mac, my_ip, gw_ip,
+    int flen = icmp_build_frame(buf, gw_mac, mac, my_ip, gw_ip,
                                 0x4242u, 1, (const uint8_t *)"PING", 4);
-    if (flen <= 0 || e1000_tx(frame, (uint32_t)flen) < 0) {
+    if (flen <= 0 || pd_tx(buf, (uint32_t)flen) < 0) {
         serial_puts("[net] icmp selftest: tx fail\n"); return;
     }
     serial_printf("[net] icmp: tx echo req (%dB) -> 10.0.2.2\n", flen);
     uint32_t t0 = (uint32_t)ticks;
     for (int attempt = 0; attempt < 5; attempt++) {
         for (int i = 0; i < 30000; i++) {
-            uint8_t rxb[1600];
             uint32_t rlen = 0;
-            if (e1000_rx(rxb, sizeof(rxb), &rlen) == 1) {
+            if (pd_rx(buf, sizeof(buf), &rlen) == 1) {
                 uint32_t sip = 0;
                 uint8_t type = 0, code = 0;
                 uint16_t id = 0, seq = 0;
                 const uint8_t *pay = 0; uint32_t plen = 0;
-                if (icmp_parse(rxb, rlen, &sip, &type, &code, &id, &seq, &pay, &plen) == 0 &&
+                if (icmp_parse(buf, rlen, &sip, &type, &code, &id, &seq, &pay, &plen) == 0 &&
                     type == ICMP_TYPE_ECHO_REP && code == 0 &&
                     id == 0x4242u && seq == 1 && plen >= 4 &&
                     pay[0] == 'P' && pay[1] == 'I' && pay[2] == 'N' && pay[3] == 'G') {
