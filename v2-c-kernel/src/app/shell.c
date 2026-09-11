@@ -350,6 +350,12 @@ static void nl_u(uint32_t v) {
 }
 static void nl_end(void) { nl_buf[nl_len++] = '\n'; nl_buf[nl_len] = 0; sys_print(nl_buf); }
 
+/* v0.35（R1.2，外部审计 A1）：网络自检三连（ARP/UDP/ICMP）——从启动路径移入
+ * shell 命令按需触发（内核不承担演示/自检职责；无网卡时内核侧打印 skipped）。 */
+static void cmd_netdiag(void) {
+    syscall3(SYS_NETDIAG, 0, 0, 0);
+}
+
 static void cmd_netping(char *args) {
     char *tok[4];
     int n = tokenize(args, tok, 4);
@@ -829,6 +835,7 @@ static int run_command_line(char *line) {
     else if (user_strcmp(cmd, "exec") == 0)       cmd_exec(arg);
     else if (user_strcmp(cmd, "save") == 0)       cmd_save();
     else if (user_strcmp(cmd, "netping") == 0)    cmd_netping(arg);
+    else if (user_strcmp(cmd, "netdiag") == 0)    cmd_netdiag();
     else if (user_strcmp(cmd, "ccboot") == 0)     cmd_ccboot();
     else if (user_strcmp(cmd, "writefile") == 0)  cmd_writefile(arg);
     else if (user_strcmp(cmd, "patch") == 0)      cmd_patch(arg);

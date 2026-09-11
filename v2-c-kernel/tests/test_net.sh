@@ -104,12 +104,12 @@ wait_after() {   # wait_after <起始行> <说明> <正则> [超时秒]；命中
     return 1
 }
 
-# 等待自检完成（内核级 UDP 回环 + 用户态 sockdemo 回环均 OK / 任一步失败 / 超时）
+# 等待 sockdemo 用户态回环完成（启动 ARP 学习已提供网关 MAC；内核自检三连
+# 已移出启动路径，由下方 netdiag 命令按需触发——v0.35 R1.2）
 END=$((SECONDS + DURATION))
 while [ "$SECONDS" -lt "$END" ]; do
-    if grep -aq "udp echo: .* -> OK" "$LOG" 2>/dev/null && \
-       grep -aq "\[sock\] UDP round-trip OK" "$LOG" 2>/dev/null; then break; fi
-    if grep -aq "ARP exchange FAIL\|udp echo FAIL\|icmp echo FAIL\|selftest: tx fail\|UDP round-trip FAIL" "$LOG" 2>/dev/null; then break; fi
+    if grep -aq "\[sock\] UDP round-trip OK" "$LOG" 2>/dev/null; then break; fi
+    if grep -aq "ARP exchange FAIL\|udp echo FAIL\|icmp echo FAIL\|selftest: tx fail\|UDP round-trip FAIL\|arp: gw learn FAIL" "$LOG" 2>/dev/null; then break; fi
     if ! kill -0 "$QPID" 2>/dev/null; then break; fi
     sleep 0.25
 done
@@ -123,6 +123,17 @@ if kill -0 "$QPID" 2>/dev/null; then
     NET_START=$(wc -l < "$LOG")
     sendkeys $'netping\n'
     wait_after "$NET_START" "shell netping -> PONG" "\[netping\] 10.0.2.2:7777 PONG" 15 || true
+fi
+# ---- v0.35（R1.2）：netdiag 内核自检三连——自检从启动路径移入 shell 命令，
+# 按需触发（ARP/UDP/ICMP 逐段等权威日志；sync 执行完三连才返回 shell）。
+# 三连在同一 syscall 内近乎瞬间完成，故三个等待共用 netdiag 前的同一锚点，
+# 避免首段命中后锚点后移把已写入的后续日志排除（[4/4] 校验仍逐条 grep 全日志）。 ----
+if kill -0 "$QPID" 2>/dev/null; then
+    NET_START=$(wc -l < "$LOG")
+    sendkeys $'netdiag\n'
+    wait_after "$NET_START" "netdiag ARP 交换" "selftest: rx ARP reply 10.0.2.2 @ .* -> OK" 20 || true
+    wait_after "$NET_START" "netdiag UDP 回环" "udp echo: rx .* 'PONG' from .* -> OK" 20 || true
+    wait_after "$NET_START" "netdiag ICMP 回显" "\[icmp\] echo reply from 10.0.2.2 OK" 20 || true
 fi
 # ---- v0.28 等续约闭环（T1=1s）出现再杀 QEMU：DURATION 循环会因 sockdemo 提前 break，
 #     早杀会漏掉 tick=100 的首次 RENEW（本轮回归的核心断言）。确定性轮询等待而非固定 sleep。 ----
@@ -155,13 +166,13 @@ check "DHCP 收到 ACK（动态取 IP）" "\[dhcp\] .*ACK: ip [0-9].*gw [0-9]"
 # ---- v0.28 DHCP 租期续约：短租期下 T1 单播 RENEW -> ACK，续约闭环（RFC 2131 §4.4.5） ----
 check "DHCP 续约 RENEW 发出"     "\[dhcp\] renew: sent RENEW (unicast)"
 check "DHCP 续约收到 ACK"        "\[dhcp\] renew ACK: ip [0-9]\|\[dhcp\] rebind ACK: ip [0-9]"
-check "ARP 请求发出"               "selftest: tx ARP req (who has 10.0.2.2)"
-check "收到 SLIRP ARP 回复"        "selftest: rx ARP reply 10.0.2.2 @ .* -> OK"
-check "UDP 发送 PING"              "udp: tx .*B -> 10.0.2.2:7777 (PING)"
-check "UDP 回环收到 PONG"          "udp echo: rx .* 'PONG' from .* -> OK"
+check "ARP 请求发出（启动学习）"    "\[net\] arp: gw learn req"
+check "收到 SLIRP ARP 回复（学习）" "\[net\] arp: gw .* -> OK"
+check "UDP 发送 PING（netdiag）"    "udp: tx .*B -> 10.0.2.2:7777 (PING)"
+check "UDP 回环收到 PONG（netdiag）" "udp echo: rx .* 'PONG' from .* -> OK"
 # ---- v0.23 ICMP Echo：发请求到网关，SLIRP 回显应答（PING 通宿主） ----
-check "ICMP 发送 Echo 请求"        "icmp: tx echo req .* -> 10.0.2.2"
-check "ICMP 收到 Echo 应答"        "\[icmp\] echo reply from 10.0.2.2 OK"
+check "ICMP 发送 Echo 请求（netdiag）" "icmp: tx echo req .* -> 10.0.2.2"
+check "ICMP 收到 Echo 应答（netdiag）" "\[icmp\] echo reply from 10.0.2.2 OK"
 # ---- v0.20 用户态 UDP socket：sockdemo 经 sys_net_* 系统调用端到端回环 ----
 check "sockdemo 进程生成"          "\[boot\] sockdemo pid=[0-9][0-9]*"
 check "内核创建 UDP socket"        "\[net\] socket port=0 -> id=[0-9]"

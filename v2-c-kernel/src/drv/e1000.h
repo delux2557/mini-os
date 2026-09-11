@@ -25,6 +25,10 @@ int e1000_rx(uint8_t *buf, uint32_t max, uint32_t *len);
  * 学到网关 MAC 后缓存，供 e1000_udp_selftest 使用 */
 void e1000_selftest(void);
 
+/* v0.35（R1.2，外部审计 A1）：网关 ARP 学习独立为功能性路径——启动序列在
+ * DHCP 之后调用，供一切外发 IPv4 帧寻址；selftest 仅作验证保留。返回 0=成功。 */
+int e1000_arp_learn_gw(void);
+
 /* v0.19 UDP 回环自检：向宿主 127.0.0.1:7777 的 echo 服务发 PING 收 PONG */
 void e1000_udp_selftest(void);
 
