@@ -26,8 +26,21 @@
 #include "netsock.h"
 #include "netio.h"
 #include "e1000.h"   /* v0.38（R1.3 后半）：DHCP 续约原子能力 e1000_dhcp_* */
+#include "syscall_table.h"   /* R1.1（外部审计 A5）：syscall 号/名/掩码唯一事实源 */
 #include <stddef.h>
 #include <stdint.h>
+
+/* ---- R1.1（外部审计 A5）：syscall 号由 syscall_table.h 单源展开 ----
+ * 分发表 case 标签用枚举名（不再裸数字）；名表供 audit 报告 ABI 版本与号表。 */
+#define SYS_ENUM_ENTRY(num, name, mask) name = num,
+enum { SYS_TABLE(SYS_ENUM_ENTRY) };
+#undef SYS_ENUM_ENTRY
+
+#define SYS_NAME_ENTRY(num, name, mask) { num, #name },
+static const struct { uint32_t num; const char *name; } syscall_tab[] = {
+    SYS_TABLE(SYS_NAME_ENTRY)
+};
+#undef SYS_NAME_ENTRY
 
 /* ---- v0.6 IPC/同步：内核信号量表（用户通过固定 id 引用，id 0 保留） ---- */
 #define SEM_MAX_OBJ 16
@@ -298,6 +311,16 @@ void usermode_set_esp0(uint32_t esp0) { tss.esp0 = esp0; }
  * 本函数汇总返回失败检查项总数（0=全部通过）。 */
 static uint32_t kern_audit(void) {
     uint32_t bad = 0;
+    /* R1.1（外部审计 A5）：ABI 版本戳 + 号表自检——报告版本号与表项数，
+     * 并校验号表自 0 连续密集（防增删时留洞/错位未被发现）。 */
+    serial_printf("[audit] ABI version %u (%u syscalls)\n", SYSCALL_ABI_VERSION,
+                  (uint32_t)(sizeof(syscall_tab) / sizeof(syscall_tab[0])));
+    for (uint32_t i = 0; i < sizeof(syscall_tab) / sizeof(syscall_tab[0]); i++) {
+        if (syscall_tab[i].num != i) {
+            serial_printf("[audit] syscall_tab[%u] num=%u (sparse!)\n", i, syscall_tab[i].num);
+            bad++;
+        }
+    }
     bad += mem_audit();
     bad += heap_audit();
     bad += sched_audit();
@@ -506,12 +529,12 @@ void syscall_dispatch(registers_t *r) {
     }
 
     switch (num) {
-    case 0:   /* sys_exit(code) */
+    case SYS_EXIT:   /* sys_exit(code) */
         serial_printf("[user] sys_exit(%u) pid=%u\n", a, sched_current_pid());
         sched_exit(r, a);
         __asm__ volatile ("cli; hlt");   /* 不可达 */
         return;
-    case 1:   /* sys_print(string)：先拷贝进内核缓冲（v0.17 校验用户指针） */
+    case SYS_PRINT:   /* sys_print(string)：先拷贝进内核缓冲（v0.17 校验用户指针） */
         {
             char sbuf[256];
             if (copyin_str((const char *)a, sbuf, sizeof(sbuf)) < 0) {
@@ -523,21 +546,21 @@ void syscall_dispatch(registers_t *r) {
         }
         r->eax = 0;
         return;
-    case 2:   /* sys_get_ticks() */
+    case SYS_GET_TICKS:   /* sys_get_ticks() */
         r->eax = ticks;
         return;
-    case 3:   /* sys_sleep(ticks) */
+    case SYS_SLEEP:   /* sys_sleep(ticks) */
         sched_sleep(r, a);
         __asm__ volatile ("cli; hlt");   /* 不可达 */
         return;
-    case 4:   /* sys_yield() */
+    case SYS_YIELD:   /* sys_yield() */
         sched_yield(r);
         __asm__ volatile ("cli; hlt");   /* 不可达 */
         return;
-    case 5:   /* sys_get_pid() */
+    case SYS_GET_PID:   /* sys_get_pid() */
         r->eax = sched_current_pid();
         return;
-    case 6:   /* sys_sem_create(id, init)：在固定 id 槽创建/获取信号量 */
+    case SYS_SEM_CREATE:   /* sys_sem_create(id, init)：在固定 id 槽创建/获取信号量 */
         if (a == 0 || a >= SEM_MAX_OBJ) { r->eax = (uint32_t)-1; return; }
         /* A-2 ② SEM-1：init 按 int32 解释，负数（含"误传 -1"这类哨兵）会令 sem 计数为负，
          * 触发 sem_invariant_ok 审计误报且无合法语义——显式拒绝（fail-closed，打日志）。 */
@@ -553,7 +576,7 @@ void syscall_dispatch(registers_t *r) {
         }
         r->eax = a;
         return;
-    case 7: { /* sys_sem_wait(id)：占用资源，必要时阻塞当前进程（不返回） */
+    case SYS_SEM_WAIT: { /* sys_sem_wait(id)：占用资源，必要时阻塞当前进程（不返回） */
         if (a == 0 || a >= SEM_MAX_OBJ || !sem_objects[a].used) {
             r->eax = (uint32_t)-1; return;
         }
@@ -573,7 +596,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)-1;   /* 等待队列满 */
         return;
     }
-    case 8: { /* sys_sem_signal(id)：释放资源，唤醒队首等待者 */
+    case SYS_SEM_SIGNAL: { /* sys_sem_signal(id)：释放资源，唤醒队首等待者 */
         if (a == 0 || a >= SEM_MAX_OBJ || !sem_objects[a].used) {
             r->eax = (uint32_t)-1; return;
         }
@@ -587,7 +610,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
-    case 9: { /* sys_shmem(slot)：确保共享页已映射，返回其虚拟地址。
+    case SYS_SHMEM: { /* sys_shmem(slot)：确保共享页已映射，返回其虚拟地址。
                 * v0.11: 每个进程独立地址空间，物理帧只在首次分配，
                 * 但必须"每次都"把共享页映射进当前进程的页目录，
                 * 否则第二个进程再调用时会因缺页崩溃。
@@ -605,7 +628,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = SHMEM_VBASE + a * 0x1000;
         return;
     }
-    case 10:  /* sys_msg_create(id, capacity)：在固定 id 槽创建有界消息队列 */
+    case SYS_MSG_CREATE:  /* sys_msg_create(id, capacity)：在固定 id 槽创建有界消息队列 */
         if (a == 0 || a >= MSG_MAX_OBJ) { r->eax = (uint32_t)-1; return; }
         if (!msg_objects[a].used) {
             msg_objects[a].used = 1;
@@ -614,7 +637,7 @@ void syscall_dispatch(registers_t *r) {
         }
         r->eax = a;
         return;
-    case 11: { /* sys_msg_send(id, value)：发消息；缓冲满则阻塞本生产者（不返回） */
+    case SYS_MSG_SEND: { /* sys_msg_send(id, value)：发消息；缓冲满则阻塞本生产者（不返回） */
         if (a == 0 || a >= MSG_MAX_OBJ || !msg_objects[a].used) {
             r->eax = (uint32_t)-1; return;
         }
@@ -640,7 +663,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)-1;   /* 生产者等待队列满 */
         return;
     }
-    case 12: { /* sys_msg_recv(id)：收消息；缓冲空则阻塞本消费者（不返回） */
+    case SYS_MSG_RECV: { /* sys_msg_recv(id)：收消息；缓冲空则阻塞本消费者（不返回） */
         if (a == 0 || a >= MSG_MAX_OBJ || !msg_objects[a].used) {
             r->eax = (uint32_t)-1; return;
         }
@@ -665,7 +688,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)-1;   /* 消费者等待队列满 */
         return;
     }
-    case 13: { /* sys_fs_create(name)：根目录建文件，返回 inode 或 -1 */
+    case SYS_FS_CREATE: { /* sys_fs_create(name)：根目录建文件，返回 inode 或 -1 */
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
         int ino = fs_create(fs_device(), path);
@@ -673,7 +696,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)ino;
         return;
     }
-    case 14: { /* sys_fs_open(fd, name, mode)：fd 为本进程约定号；mode 0=只读 1=只写 2=追加(v0.14) */
+    case SYS_FS_OPEN: { /* sys_fs_open(fd, name, mode)：fd 为本进程约定号；mode 0=只读 1=只写 2=追加(v0.14) */
         fs_file_t *fdt = cur_fdt();
         if (a == 0 || a >= FS_FDS_PER_PROC || fdt[a].used) { r->eax = (uint32_t)-1; return; }
         char path[64];
@@ -692,7 +715,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
-    case 15: { /* sys_fs_write(fd, buf, len)：从当前位置写（buf 须为合法用户指针） */
+    case SYS_FS_WRITE: { /* sys_fs_write(fd, buf, len)：从当前位置写（buf 须为合法用户指针） */
         fs_file_t *fdt = cur_fdt();
         if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
         fs_file_t *f = &fdt[a];
@@ -704,7 +727,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)n;
         return;
     }
-    case 16: { /* sys_fs_read(fd, buf, len)：从当前位置读（buf 须为合法用户指针） */
+    case SYS_FS_READ: { /* sys_fs_read(fd, buf, len)：从当前位置读（buf 须为合法用户指针） */
         fs_file_t *fdt = cur_fdt();
         if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
         fs_file_t *f = &fdt[a];
@@ -716,7 +739,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)n;
         return;
     }
-    case 17: { /* sys_fs_close(fd) */
+    case SYS_FS_CLOSE: { /* sys_fs_close(fd) */
         fs_file_t *fdt = cur_fdt();
         if (a == 0 || a >= FS_FDS_PER_PROC || !fdt[a].used) { r->eax = (uint32_t)-1; return; }
         fdt[a].used = 0;
@@ -724,11 +747,11 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
-    case 18:  /* sys_fs_ls(path)：列出目录内容（v0.14 路径化；path 空/0=根目录）。
+    case SYS_FS_LS:  /* sys_fs_ls(path)：列出目录内容（v0.14 路径化；path 空/0=根目录）。
                  L1：大缓冲 ents[2048B] 下沉 sys_fs_ls_case（栈预算总账） */
         sys_fs_ls_case(r, a);
         return;
-    case 19: { /* sys_fs_delete(name)：删除文件（v0.14 支持路径；目录用 sys_fs_rmdir） */
+    case SYS_FS_DELETE: { /* sys_fs_delete(name)：删除文件（v0.14 支持路径；目录用 sys_fs_rmdir） */
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
         blockdev_t *bd = fs_device();
@@ -741,7 +764,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)rc;
         return;
     }
-    case 20: { /* sys_readline(buf, max)：阻塞式读一行；行已就绪则直接返回长度 */
+    case SYS_READLINE: { /* sys_readline(buf, max)：阻塞式读一行；行已就绪则直接返回长度 */
         char *out = (char *)a;
         /* v0.36（红队 RBT-2026-013，BUG-067）：max=0 不是"未指定"哨兵。旧写 0 被吞成
          * KB_LINE_MAX+1(129)，会向"零容量"调用方缓冲整行写入（契约违反）。调用方必须给
@@ -762,7 +785,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)n;
         return;
     }
-    case 21: { /* sys_spawn_file(name)：从文件系统加载 ELF 应用到 app 槽，返回 pid */
+    case SYS_SPAWN_FILE: { /* sys_spawn_file(name)：从文件系统加载 ELF 应用到 app 槽，返回 pid */
         /* v0.35（红队 F1 修复）：name 缓冲 64B（path 约定）；copyin_str_full 使
          * 超长名字显式失败（返回 -2 → 本次 -1），不静默截断撞前名前缀误加载。 */
         char namebuf[64];
@@ -776,7 +799,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)pid;
         return;
     }
-    case 22: { /* sys_wait(pid, *status)：等待子进程退出（经典 wait/waitpid，v0.15）。
+    case SYS_WAIT: { /* sys_wait(pid, *status)：等待子进程退出（经典 wait/waitpid，v0.15）。
                   - pid = -1：等待"任意"子进程（wait()）
                   - pid 具体：等待该子进程（waitpid(pid)）
                   返回：被回收的子进程 pid；无子进程/非法参数返回 -1；
@@ -839,7 +862,7 @@ void syscall_dispatch(registers_t *r) {
             return;                                  /* 显式返回，抑制 fallthrough 告警 */
         }
     }
-    case 23: { /* sys_map_page(addr)：在"当前进程"地址空间映射一张清零物理页。
+    case SYS_MAP_PAGE: { /* sys_map_page(addr)：在"当前进程"地址空间映射一张清零物理页。
                 * v0.11 每进程地址空间演示：同一虚拟地址在不同进程映射到不同物理页，
                 * 互不可见；页面随进程退出回收。要求页对齐且位于用户半区、未映射。 */
         if (a < 0x80000000u || a >= 0xFFC00000u || (a & 0xFFF)) {
@@ -868,15 +891,15 @@ void syscall_dispatch(registers_t *r) {
         r->eax = a;
         return;
     }
-    case 24:  /* sys_fork()：复制当前进程。父进程返回子 pid；子进程从调用点继续（返回 0） */
+    case SYS_FORK:  /* sys_fork()：复制当前进程。父进程返回子 pid；子进程从调用点继续（返回 0） */
         r->eax = (uint32_t)sched_fork(r);
         return;
-    case 25:  /* sys_exec(name, argc, argv)：加载 ELF 替换当前进程（镜像替换）。
+    case SYS_EXEC:  /* sys_exec(name, argc, argv)：加载 ELF 替换当前进程（镜像替换）。
                  argv 为用户空间指针数组（argc 个 char*，最多 8 条）。成功不返回；失败返回 -1。
                  L1：大缓冲下沉 sys_exec_case，避免抬高 dispatch 单帧（栈预算总账） */
         sys_exec_case(r, a, b, c);
         return;
-    case 26: { /* sys_fs_seek(fd, off)：定位读写位置，返回新位置或 -1。
+    case SYS_FS_SEEK: { /* sys_fs_seek(fd, off)：定位读写位置，返回新位置或 -1。
         * A-2 ② 参数语义：off 按**无符号 uint32 原生**处理（fs pos 即 uint32）。
         * 负偏移经符号位回绕成巨大 uint32 后照存 pos；其"风险"是后续 read/write 落在文件
         * 尾部之外返回失败/0——已由 read/write 的长度/越界哨兵 fail-closed，非内存不安全，
@@ -888,7 +911,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = fdt[a].pos;
         return;
     }
-    case 27: { /* sys_fs_mkdir(path)：建目录（父目录须存在），返回 inode 或 -1 */
+    case SYS_FS_MKDIR: { /* sys_fs_mkdir(path)：建目录（父目录须存在），返回 inode 或 -1 */
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
         int ino = fs_mkdir(fs_device(), path);
@@ -896,7 +919,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)ino;
         return;
     }
-    case 28: { /* sys_fs_rmdir(path)：删空目录（非空/非目录返回 -1） */
+    case SYS_FS_RMDIR: { /* sys_fs_rmdir(path)：删空目录（非空/非目录返回 -1） */
         char path[64];
         if (copyin_str((const char *)a, path, sizeof(path)) < 0) { r->eax = (uint32_t)-1; return; }
         blockdev_t *bd = fs_device();
@@ -908,13 +931,13 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)rc;
         return;
     }
-    case 29: { /* sys_fs_sync()：把 ramdisk 全量写回真盘（v0.16 持久化）；无盘返回 -1 */
+    case SYS_FS_SYNC: { /* sys_fs_sync()：把 ramdisk 全量写回真盘（v0.16 持久化）；无盘返回 -1 */
         int rc = storage_sync();
         serial_printf("[fs] sync -> %d\n", rc);
         r->eax = (uint32_t)rc;
         return;
     }
-    case 30: { /* sys_net_socket(port)：创建 UDP socket；port=0 自动分配；返回 socket id */
+    case SYS_NET_SOCKET: { /* sys_net_socket(port)：创建 UDP socket；port=0 自动分配；返回 socket id */
         if (b || c) { r->eax = (uint32_t)-1; return; }
         int s = netsock_open((uint16_t)a);
         if (s < 0) serial_printf("[net] socket table full\n");   /* v0.31 观测：表满专项日志 */
@@ -922,11 +945,11 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)s;
         return;
     }
-    case 31:  /* sys_net_sendto(sock, *iov)：发 UDP 数据报，返回实际发送字节数或 -1。
+    case SYS_NET_SENDTO:  /* sys_net_sendto(sock, *iov)：发 UDP 数据报，返回实际发送字节数或 -1。
                  L1：发送缓冲 pbuf[1400] 下沉 sys_sendto_case（栈预算总账） */
         sys_sendto_case(r, a, b);
         return;
-    case 32: { /* sys_net_recvfrom(sock, *iov)：非阻塞收 UDP 数据报（0=无包）；src_* 出参 */
+    case SYS_NET_RECVFROM: { /* sys_net_recvfrom(sock, *iov)：非阻塞收 UDP 数据报（0=无包）；src_* 出参 */
         struct net_recv_iov iov;
         if (copyin((const void *)b, &iov, sizeof(iov)) < 0) { r->eax = (uint32_t)-1; return; }
         if (iov.max > 1400) iov.max = 1400;
@@ -937,15 +960,15 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)n;
         return;
     }
-    case 33: { /* sys_net_close(sock)：v0.31 仅可关自己打开的 socket；内核保留(DHCP)槽不可关 */
+    case SYS_NET_CLOSE: { /* sys_net_close(sock)：v0.31 仅可关自己打开的 socket；内核保留(DHCP)槽不可关 */
         r->eax = (uint32_t)netsock_close_if_owner((int)a, sched_current_pid());
         return;
     }
-    case 34: /* sys_kern_audit()：v0.21 内核自审计——帧配平/信号量守恒/PCB 状态机。
+    case SYS_KERN_AUDIT: /* sys_kern_audit()：v0.21 内核自审计——帧配平/信号量守恒/PCB 状态机。
                 返回失败检查项总数（0=全部通过），细节见 [audit] 日志行 */
         r->eax = kern_audit();
         return;
-    case 35: { /* sys_brk(addr)：v0.26#2 用户堆。addr=0 返回当前 brk（sbrk(0) 风格）；
+    case SYS_BRK: { /* sys_brk(addr)：v0.26#2 用户堆。addr=0 返回当前 brk（sbrk(0) 风格）；
                 否则设置 program break，返回 0 成功 / -1 失败。
                 向上扩展按页补映射（记账 heap_frames[]）；收缩只更新 brk 保留映射复用。 */
         pcb_t *p = sched_get(sched_current_pid());
@@ -992,7 +1015,7 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
-    case 36: { /* sys_limit(mask_lo, mask_hi)：v0.34 BUG-058 per-process syscall 掩码 · 只收窄。
+    case SYS_LIMIT: { /* sys_limit(mask_lo, mask_hi)：v0.34 BUG-058 per-process syscall 掩码 · 只收窄。
                  a=mask 低 32 位, b=高 32 位；与当前掩码按位 OR（|= 无清位/放宽路径）。
                  若本进程已禁用位 36，则入口检查会挡住本调用（只能继续收窄）——单向语义自洽。 */
         pcb_t *p = sched_get(sched_current_pid());
@@ -1003,10 +1026,10 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
-    case 37:  /* sys_fs_readdir(path, buf, cap)：目录条目枚举到用户缓冲（v0.37 动态盘点） */
+    case SYS_FS_READDIR:  /* sys_fs_readdir(path, buf, cap)：目录条目枚举到用户缓冲（v0.37 动态盘点） */
         sys_fs_readdir_case(r, a, b, c);
         return;
-    case 38:  /* sys_netdiag()：v0.35（R1.2）网络自检三连（ARP/UDP/ICMP）。
+    case SYS_NETDIAG:  /* sys_netdiag()：v0.35（R1.2）网络自检三连（ARP/UDP/ICMP）。
          * 自检是演示/诊断资产，从启动路径移入 shell `netdiag` 命令按需触发。 */
         extern void e1000_selftest(void);
         extern void e1000_udp_selftest(void);
@@ -1016,12 +1039,12 @@ void syscall_dispatch(registers_t *r) {
         e1000_icmp_selftest();
         r->eax = 0;
         return;
-    case 39:  /* syscall#39 已撤销（v0.38 R1.3 后半）：SYS_DHCP_TICK 被用户态
+    case SYS_DHCP_TICK:  /* syscall#39 已撤销（v0.38 R1.3 后半）：被用户态
                  dhcpclient 状态机取代——续约不再"踢内核状态机"，改经 40-44 原子调用。 */
         serial_puts("[user] syscall 39 removed (use 40-44 DHCP atomic)\n");
         r->eax = (uint32_t)-1;
         return;
-    case 40: { /* sys_dhcp_query(&iov)：v0.38（R1.3 后半）查询租约（lease/elapsed/T1/T2）。
+    case SYS_DHCP_QUERY: { /* sys_dhcp_query(&iov)：v0.38（R1.3 后半）查询租约（lease/elapsed/T1/T2）。
                  续约状态机在用户态 dhcpclient；内核只暴露租约事实供决策。 */
         struct dhcp_query_iov q;
         e1000_dhcp_query(&q.lease_secs, &q.elapsed, &q.t1_ticks, &q.t2_ticks);
@@ -1029,11 +1052,11 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     }
-    case 41:  /* sys_dhcp_send(type, req_ip)：发一帧续约/获取报文（0=RENEW 1=REBIND
+    case SYS_DHCP_SEND:  /* sys_dhcp_send(type, req_ip)：发一帧续约/获取报文（0=RENEW 1=REBIND
                  2=DISCOVER 3=REQUEST）。e1000_dhcp_send 内部 pd_tx 切内核页目录访问 MMIO。 */
         r->eax = (uint32_t)e1000_dhcp_send(a, b);
         return;
-    case 42: { /* sys_dhcp_recv(&iov)：取一条 DHCP 应答并解析（mt/yi/si/rt/ls）。
+    case SYS_DHCP_RECV: { /* sys_dhcp_recv(&iov)：取一条 DHCP 应答并解析（mt/yi/si/rt/ls）。
                  1=收到 0=无包 -1=失败；非阻塞（与轮询驱动一致）。 */
         struct dhcp_reply_iov rp;
         int n = e1000_dhcp_recv(&rp.mt, &rp.yi, &rp.si, &rp.rt, &rp.ls);
@@ -1041,14 +1064,14 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)n;
         return;
     }
-    case 43: { /* sys_dhcp_apply(&iov)：把 ACK 解析结果应用回内核租约（tag 定日志措辞）。 */
+    case SYS_DHCP_APPLY: { /* sys_dhcp_apply(&iov)：把 ACK 解析结果应用回内核租约（tag 定日志措辞）。 */
         struct dhcp_apply_iov ap;
         if (copyin((const void *)a, &ap, sizeof(ap)) < 0) { r->eax = (uint32_t)-1; return; }
         e1000_dhcp_apply(ap.yi, ap.rt, ap.ls, ap.tag);
         r->eax = 0;
         return;
     }
-    case 44:  /* sys_dhcp_fallback()：租约丢失/获取失败，回退静态兜底 */
+    case SYS_DHCP_FALLBACK:  /* sys_dhcp_fallback()：租约丢失/获取失败，回退静态兜底 */
         e1000_dhcp_fallback();
         r->eax = 0;
         return;
