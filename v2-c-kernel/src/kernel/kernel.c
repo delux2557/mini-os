@@ -104,9 +104,9 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
 #endif
     netif_init_all(); /* 初始化并选定当前网卡（无网卡则跳过，netif_ready()=-1） */
     e1000_dhcp_run(); /* v0.25：DISCOVER->OFFER->REQUEST->ACK 动态取 IP/网关（失败回退静态） */
-    e1000_selftest(); /* v0.18：ARP 请求/应答自检（验证 TX+RX） */
-    e1000_udp_selftest(); /* v0.19：经 SLIRP 网关回环到宿主 UDP echo（PING/PONG） */
-    e1000_icmp_selftest(); /* v0.23：ICMP Echo 自检——PING 通宿主（SLIRP 网关回显） */
+    /* v0.35（R1.2，外部审计 A1）：网关 ARP 学习是功能性路径（外发帧寻址），
+     * 与自检分离——启动只做学习；ARP/UDP/ICMP 自检三连移入 shell `netdiag` 命令。 */
+    e1000_arp_learn_gw();
 
     timer_init(100);      /* 100 Hz 心跳 */
     /* NMI 看门狗武装（紧随 timer_init：首 tick 即开始喂狗，无引导空隙误报）。

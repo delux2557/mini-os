@@ -47,6 +47,7 @@
 #define SYS_BRK         35  /* v0.26#2: 用户堆（brk/sbrk） */
 #define SYS_LIMIT       36  /* v0.34 BUG-058: per-process syscall 掩码（只收窄） */
 #define SYS_FS_READDIR  37  /* syscall#37: 把目录条目名枚举进用户缓冲（动态盘点，help 自发现） */
+#define SYS_NETDIAG     38  /* v0.35（R1.2）: 网络自检三连（ARP/UDP/ICMP），shell netdiag 命令触发 */
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {
