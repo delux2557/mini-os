@@ -130,6 +130,17 @@ static void initramfs_setup(void) {
         "Mini-OS " MINI_OS_VERSION ": toolchain self-host (cc500 compiles itself). Try: ccboot\n"
         "Commands: help ls cat mkdir rmdir rm run exec save selftest exit netping ccboot\n";
     initramfs_file("motd", motd, (uint32_t)(sizeof(motd) - 1));
+    /* v0.37（R1.2 后半，外部审计 A1）：init 脚本——网络 demo/服务由用户态按需
+     * 后台拉起（`bg`），内核启动序列不再硬编码 spawn（"静态 spawn 演示进程"）。
+     * shell 开机自动 source /init.rc（do_source，silent=1：不存在则静默）。
+     * 无网卡环境（-nic none）：sockdemo 无 DHCP 租约、dhcpd 无租约 no-op，
+     * 两者皆无害空转，符合"演示/服务不进内核启动路径"的分层原则。 */
+    static const char initrc[] =
+        "# v0.37 init script: userland services/demos (R1.2)\n"
+        "# 网络可用时由本脚本按需拉起；无网卡时下方进程自行空转/退出\n"
+        "bg sockdemo\n"
+        "bg dhcpd\n";
+    initramfs_file("init.rc", initrc, (uint32_t)(sizeof(initrc) - 1));
     initramfs_file("hello",
                    _binary_hello_elf_start,
                    (uint32_t)(_binary_hello_elf_end - _binary_hello_elf_start));

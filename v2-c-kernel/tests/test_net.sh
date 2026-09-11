@@ -174,7 +174,8 @@ check "UDP 回环收到 PONG（netdiag）" "udp echo: rx .* 'PONG' from .* -> OK
 check "ICMP 发送 Echo 请求（netdiag）" "icmp: tx echo req .* -> 10.0.2.2"
 check "ICMP 收到 Echo 应答（netdiag）" "\[icmp\] echo reply from 10.0.2.2 OK"
 # ---- v0.20 用户态 UDP socket：sockdemo 经 sys_net_* 系统调用端到端回环 ----
-check "sockdemo 进程生成"          "\[boot\] sockdemo pid=[0-9][0-9]*"
+# v0.37（R1.2 后半）：sockdemo 不再由内核启动序列 spawn，改由 /init.rc `bg` 拉起
+check "sockdemo 进程生成"          "\[shell\] bg 'sockdemo' pid=[0-9][0-9]*"
 check "内核创建 UDP socket"        "\[net\] socket port=0 -> id=[0-9]"
 check "用户态 socket 打开"         "\[netsock\] open id=.* port="
 check "用户态 sendto PING"         "\[sock\] sendto PING -> 4B"
