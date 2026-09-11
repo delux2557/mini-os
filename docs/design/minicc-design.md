@@ -133,7 +133,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 | 字面量 | 十进制整数                                                                               | 拒绝 `0x10`/`123abc`（宿主 t\_hex/t\_mixnum） |
 | 变量  | 局部/参数/全局（全局仅常量初始化）                                                                  | 全局 + while 累加 guest 用例                  |
 | 运算符 | `+ - * / % < <= > >= == !=`、逻辑与或（`&&`、`\|\|`）、`!`、一元负号、`=`                          | 17/5 除模、fact(5) 递归、`&&`/`!` guest 用例    |
-| 语句  | `{}`、声明、`if/else`、`while`、`for`、`do`-while、`break`/`continue`、`return`、表达式语句 | guest 运行语义                              |
+| 语句  | `{}`、声明、`if/else`、`while`、`for`、`return`、表达式语句（`do`-while、`break`/`continue` 属 6.2c V3b 新增，非 V1） | guest 运行语义                              |
 | 函数  | 多参数、递归、前向调用                                                                         | `fact(5)==120`                          |
 | 注释  | 块注释、`//` 行注释                                                                        | 未闭合注释报错（宿主 t\_comment）                  |
 | 拒绝  | 结构体/预处理/`switch`、全局非常量初始化（字面量/字符除外）、数组初始化/数组参数/数组名无下标 | 编译期报错断言                                 |
@@ -306,7 +306,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 | V1 ✅ | `int main(){return 0;}` 起逐特性打通 int-only | 700 行编译器 + `micc` 命令 + `make test-minicc` 全绿                                                 |
 | V2 ✅ | 指针/字符串/数组/下标 → 产物可调 `syscall3`（I/O 可观察） | AST（V2a）+ 指针（V2b）+ 字符串/char/syscall3 stub（V2c）+ 数组（V2d）完成，guest 已断言产物运行期输出与数组运行语义；L4 语义对照待上线 |
 | V3 ✅ | 编译器自举                                   | `minicc_self.c` 全子集编写（并行数组 + int 句柄）+ P1==P2 不动点验证（`miccboot`）+ L3 启用（`test_miccboot.sh` 全绿） |
-| V4+  | struct、`for/switch` 扩展（位运算已并入 V3a）     | 特性↔测试清单滚动更新；cc500 教学对照·许可边界 ADR                                                      |
+| V4+  | struct、`switch`（§6.3 当前拒绝，V4 计划支持；`for` 已自 V1 支持，V4 无扩展）     | 特性↔测试清单滚动更新；cc500 教学对照·许可边界 ADR                                                      |
 
 风险提示：V2 的 AST 引入是对 V1 单遍生成的**结构性重构**，应在一个切片内完成并保持 L1/L2 全绿后合入，避免长分支。
 
