@@ -20,11 +20,12 @@
 
 | 版本   | 里程碑 |
 | ---- | ------ |
-| v0.31 | 内核资源归属收口：per-process fd 表 + socket 归属/退出回收/保留槽防任意 close |
-| v0.32 | cc500 编译器三缺陷修复：未闭合字符串自噬 / 未定义符号静默 / 关系运算残缺 + error 诊断 |
-| v0.33 | 回归可观测性收口：selftest 行撕裂 / pid 表静默 + harness 退出码统一 + CI 全链 |
+| v1.5 | 外部审计 A1 分层整改：自检/demo/DHCP 续约状态机全用户态（netdiag 命令 + /init.rc + dhcpclient）+ NMI 看门狗 + 编译器修复集；版本串并入 v1.x 线 |
+| v1.4 | 虚拟 TCP 下行滑动窗口（host→guest，吞吐 W/RTT）+ 工具链循环控制补齐（cc500 M4/M5 + minicc） |
+| v1.3 | 虚拟 TCP 上行滑动窗口（guest 发送窗口 TCP_TXWIN=8，吞吐 1/RTT → W/RTT） |
 
-> 当前主线已到 **v1.x**（网络抽象层 netif + 虚拟 TCP 薄包装 → 上行滑动窗口，见 changelog）。
+> 当前主线：**v1.x**（网络抽象层 netif + 虚拟 TCP 薄包装 → 滑动窗口 → 外部审计 A1 分层整改，
+> 见 [changelog](docs/reference/changelog.md)）。
 
 ### cc500 方言边界（guest 内写-编-跑须知）
 
