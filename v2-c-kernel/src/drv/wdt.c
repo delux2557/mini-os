@@ -81,7 +81,7 @@ static void esb_unlock(void) {
 /* 喂狗：解锁后字写 RELOAD bit8=1 → QEMU 重置 stage1 计时。
  * MMIO 基址落在 PDE>=512（高地址），用户页目录只克隆低 1GB PDE，凡访问
  * 须临时切到内核页目录（与 e1000_netif 的 enter_kernel_pd 同款；IRQ 上下文
- * 切换 CR3 是该内核既有模式，e1000_dhcp_tick 同样从 timer_cb 进来）。 */
+ * 切换 CR3 是该内核既有模式，DHCP 原子能力同样在 syscall 上下文切换）。 */
 void wdt_feed(void) {
     if (!wdt_ok) return;
     uint32_t saved = mem_current_pd();

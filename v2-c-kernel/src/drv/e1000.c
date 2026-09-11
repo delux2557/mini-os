@@ -88,29 +88,26 @@ static uint8_t tx_buf[TX_N][BUF_SIZE] __attribute__((aligned(16)));
 static uint32_t rx_tail = 0, tx_cur = 0;
 static uint8_t mac[6];
 static int ready = 0;
+
+/* v0.38（R1.3 后半）：pd_tx/pd_rx 前向声明——DHCP 原子发帧（dhcp_send_*）改经它们
+ * 在用户 syscall 上下文访问 e1000 MMIO（切内核页目录），与 selftest 同款。 */
+static int pd_tx(const uint8_t *data, uint32_t len);
+static int pd_rx(uint8_t *buf, uint32_t max, uint32_t *len);
 static uint8_t gw_mac[6];      /* 10.0.2.2 网关 MAC（ARP 自检学到） */
 static int gw_known = 0;
 /* v0.25：本机/网关 IP——DHCP 动态学得；失败保持静态兜底（单一配置点 NET_STATIC_*） */
 static uint32_t my_ip = NET_STATIC_IP;
 static uint32_t gw_ip = NET_STATIC_GW;
 
-/* ---- v0.28 DHCP 租期续约状态（RFC 2131 §4.4.5）----
- * 由 timer 心跳每 tick 驱动 e1000_dhcp_tick()（非阻塞，每 tick 至多收一帧）。
- * RENEW_NONE      : 已取得租约，等待 T1；
- * RENEW_SENT      : T1 已发单播 RENEW，等 ACK；到 T2 未 ACK 则升 REBIND；
- * REBIND_SENT     : T2 已发广播 REBIND，等 ACK；超时则重新获取；
- * REACQ_OFFER/ACK : 续约失败后的重新获取（DISCOVER->OFFER->REQUEST->ACK）。
- * 所有状态只做"发一帧 / 收一帧"的轻量动作，绝不在 ISR 里忙等。 */
-enum { DHCP_RENEW_NONE = 0, DHCP_RENEW_SENT, DHCP_REBIND_SENT,
-       DHCP_REACQ_OFFER, DHCP_REACQ_ACK };
-static int      dhcp_renew_state = DHCP_RENEW_NONE;
+/* ---- v0.28 DHCP 租期（v0.38 R1.3 后半：续约状态机移至用户态 dhcpclient）----
+ * 内核只保存租约事实（IP/网关/租期/T1/T2 阈值）供查询，不再做续约决策；
+ * RFC 2131 §4.4.5 的状态机在用户态进程（src/app/dhcpclient.c）经 syscall#40-44 驱动。 */
 static uint32_t dhcp_lease_secs = 0;     /* ACK 学到的租期；0 = 未取得（静态兜底） */
 static uint32_t dhcp_t1_ticks = 0;       /* T1 截止（相对 acquired_tick） */
 static uint32_t dhcp_t2_ticks = 0;       /* T2 截止（相对 acquired_tick） */
 static uint32_t dhcp_acquired_tick = 0;  /* 最近一次 ACK 的 tick */
 static uint32_t dhcp_xid = 0;
 static uint32_t dhcp_server_ip = 0;
-static uint32_t dhcp_state_tick = 0;     /* 进入当前状态时的 tick（作超时基准） */
 
 static inline uint32_t rd(uint32_t off) { return regs[off / 4]; }
 static inline void wr(uint32_t off, uint32_t v) { regs[off / 4] = v; }
@@ -246,7 +243,6 @@ static void dhcp_apply_ack(uint32_t yi, uint32_t rt, uint32_t ls) {
     dhcp_acquired_tick = ticks;
     dhcp_t1_ticks = (ls * 100u * DHCP_T1_RATIO_NUM) / DHCP_T1_RATIO_DEN;
     dhcp_t2_ticks = (ls * 100u * DHCP_T2_RATIO_NUM) / DHCP_T2_RATIO_DEN;
-    dhcp_renew_state = DHCP_RENEW_NONE;
 }
 
 static void dhcp_log_ack(const char *tag) {
@@ -259,13 +255,13 @@ static void dhcp_log_ack(const char *tag) {
 static void dhcp_send_discover(void) {
     uint8_t frame[512];
     uint32_t flen = dhcp_build_discover(frame, mac, dhcp_xid);
-    if (e1000_tx(frame, flen) < 0) serial_puts("[dhcp] re-acquire: discover tx fail\n");
+    if (pd_tx(frame, flen) < 0) serial_puts("[dhcp] re-acquire: discover tx fail\n");
     else serial_puts("[dhcp] re-acquire: sent DISCOVER\n");
 }
 static void dhcp_send_request(uint32_t req_ip) {
     uint8_t frame[512];
     uint32_t flen = dhcp_build_request(frame, mac, dhcp_xid, dhcp_server_ip, req_ip);
-    if (e1000_tx(frame, flen) < 0) serial_puts("[dhcp] re-acquire: request tx fail\n");
+    if (pd_tx(frame, flen) < 0) serial_puts("[dhcp] re-acquire: request tx fail\n");
     else serial_puts("[dhcp] re-acquire: sent REQUEST\n");
 }
 static void dhcp_send_renew(void) {
@@ -274,114 +270,71 @@ static void dhcp_send_renew(void) {
     const uint8_t *dst = e1000_gw_mac();
     uint32_t flen = dhcp_build_renew(frame, mac, dst ? dst : bcast_mac,
                                      dhcp_xid, my_ip, dhcp_server_ip);
-    if (e1000_tx(frame, flen) < 0) serial_puts("[dhcp] renew: RENEW tx fail\n");
+    if (pd_tx(frame, flen) < 0) serial_puts("[dhcp] renew: RENEW tx fail\n");
     else serial_puts("[dhcp] renew: sent RENEW (unicast)\n");
 }
 static void dhcp_send_rebind(void) {
     uint8_t frame[512];
     uint32_t flen = dhcp_build_rebind(frame, mac, dhcp_xid, my_ip);
-    if (e1000_tx(frame, flen) < 0) serial_puts("[dhcp] renew: REBIND tx fail\n");
+    if (pd_tx(frame, flen) < 0) serial_puts("[dhcp] renew: REBIND tx fail\n");
     else serial_puts("[dhcp] renew: sent REBIND (broadcast)\n");
 }
 
-/* 续约失败：重新走 DISCOVER->OFFER->REQUEST->ACK 获取 */
-static void dhcp_start_reacquire(void) {
-    dhcp_send_discover();
-    dhcp_renew_state = DHCP_REACQ_OFFER;
-    dhcp_state_tick = ticks;
+/* v0.38（R1.3 后半，外部审计 A1）：DHCP 续约原子能力——状态机移至用户态 dhcpclient。
+ * 内核只保留机制：查询租约 / 发一帧 / 收一帧 / 应用 ACK / 回退静态，全部在用户
+ * syscall 上下文（CR3=用户页目录）下执行，故直接访问 e1000 MMIO 前须切内核页目录
+ *（pd_tx / netsock_dhcp_recv 适配层自带，见 pd_tx 与 netsock.c 注释）。 */
+
+/* 查询租约：lease_secs=0（静态兜底/未取址）时用户态 no-op，无需续约 */
+void e1000_dhcp_query(uint32_t *lease_secs, uint32_t *elapsed,
+                      uint32_t *t1_ticks, uint32_t *t2_ticks) {
+    *lease_secs = dhcp_lease_secs;
+    *elapsed    = (uint32_t)(ticks - dhcp_acquired_tick);
+    *t1_ticks   = dhcp_t1_ticks;
+    *t2_ticks   = dhcp_t2_ticks;
 }
-/* 重获取失败：放弃 DHCP，回静态兜底 */
+
+/* 发一帧：0=RENEW（单播） 1=REBIND（广播） 2=DISCOVER 3=REQUEST(req_ip) */
+int e1000_dhcp_send(uint32_t type, uint32_t req_ip) {
+    switch (type) {
+    case 0: dhcp_send_renew();  return 0;
+    case 1: dhcp_send_rebind(); return 0;
+    case 2: dhcp_send_discover(); return 0;
+    case 3: dhcp_send_request(req_ip); return 0;
+    default: return -1;
+    }
+}
+
+/* 收一条 DHCP 应答并解析（复用 dhcp_poll_once：端口 68 reserved socket + A-2 源校验）；
+ * 返回 1=收到（出参有效） 0=无包 -1=失败 */
+int e1000_dhcp_recv(uint32_t *mt, uint32_t *yi, uint32_t *si,
+                    uint32_t *rt, uint32_t *ls) {
+    uint8_t mt0 = 0; uint32_t yi0 = 0, si0 = 0, rt0 = 0, ls0 = 0;
+    int n = dhcp_poll_once(&mt0, &yi0, &si0, &rt0, &ls0);
+    if (n == 1) {
+        *mt = mt0; *yi = yi0; *si = si0; *rt = rt0; *ls = ls0;
+    }
+    return n;
+}
+
+/* 应用 ACK 回内核租约并打对应措辞日志（tag：0=renew 1=rebind 2=re-acquire）。
+ * 更新 my_ip/gw_ip/租期并重置 T1/T2 与状态（状态机已移至用户态，RENEW_NONE 即"空闲"）。 */
+void e1000_dhcp_apply(uint32_t yi, uint32_t rt, uint32_t ls, uint32_t tag) {
+    dhcp_apply_ack(yi, rt, ls);
+    dhcp_log_ack(tag == 1 ? "rebind" : tag == 2 ? "re-acquire" : "renew");
+}
+
+/* 重获取失败/租约丢失：放弃 DHCP，回静态兜底（由用户态 dhcpclient 决定何时调用） */
 static void dhcp_fallback_static(void) {
     my_ip = NET_STATIC_IP;
     gw_ip = NET_STATIC_GW;
     dhcp_lease_secs = 0;
-    dhcp_renew_state = DHCP_RENEW_NONE;
     serial_puts("[dhcp] lease lost -> static fallback\n");
 }
 
-/* v0.28：timer 心跳每 tick 调用（timer_cb 里、sched_tick 前，保证不被上下文切换跳过）。
- * 非阻塞：每个 tick 至多"发一帧 / 收一帧"。 */
-void e1000_dhcp_tick(void) {
-    if (!ready || dhcp_lease_secs == 0) return;   /* 静态兜底/未取得租约则不续约 */
-
-    /* e1000 MMIO 位于高地址（PDE≥512），用户进程页目录只克隆低 1GB PDE；
-     * timer ISR 可能在任意用户进程上下文运行，须临时切内核页目录访问 MMIO
-     *（与 netsock 收发同款，见 v0.20），用完切回（须在 sched_tick 前恢复）。 */
-    uint32_t saved_pd = mem_current_pd();
-    uint32_t kpd = mem_kernel_pd();
-    if (saved_pd != kpd) switch_page_dir(kpd);
-
-    uint8_t mt = 0; uint32_t yi = 0, si = 0, rt = 0, ls = 0;
-    uint32_t el = (uint32_t)(ticks - dhcp_acquired_tick);
-
-    switch (dhcp_renew_state) {
-    case DHCP_RENEW_NONE:
-        if (el >= dhcp_t2_ticks) {                 /* 已过 T2（跳过了 T1）：直接 REBIND */
-            dhcp_send_rebind();
-            dhcp_renew_state = DHCP_REBIND_SENT;
-            dhcp_state_tick = ticks;
-        } else if (el >= dhcp_t1_ticks) {          /* 到 T1：单播 RENEW */
-            dhcp_send_renew();
-            dhcp_renew_state = DHCP_RENEW_SENT;
-            dhcp_state_tick = ticks;
-        }
-        break;
-
-    case DHCP_RENEW_SENT:
-        if (dhcp_poll_once(&mt, &yi, &si, &rt, &ls)) {
-            if (mt == DHCP_MSG_ACK) {
-                dhcp_apply_ack(yi, rt, ls); dhcp_log_ack("renew");
-            } else if (mt == DHCP_MSG_NAK) {
-                serial_puts("[dhcp] renew: NAK -> re-acquire\n");
-                dhcp_start_reacquire();
-            }
-        } else if (el >= dhcp_t2_ticks) {          /* T1 后 T2 到仍未 ACK：升 REBIND */
-            dhcp_send_rebind();
-            dhcp_renew_state = DHCP_REBIND_SENT;
-            dhcp_state_tick = ticks;
-        }
-        break;
-
-    case DHCP_REBIND_SENT:
-        if (dhcp_poll_once(&mt, &yi, &si, &rt, &ls)) {
-            if (mt == DHCP_MSG_ACK) {
-                dhcp_apply_ack(yi, rt, ls); dhcp_log_ack("rebind");
-            } else if (mt == DHCP_MSG_NAK) {
-                serial_puts("[dhcp] renew: NAK -> re-acquire\n");
-                dhcp_start_reacquire();
-            }
-        } else if ((uint32_t)(ticks - dhcp_state_tick) > (dhcp_t2_ticks - dhcp_t1_ticks)) {
-            serial_puts("[dhcp] renew: rebind timeout -> re-acquire\n");
-            dhcp_start_reacquire();
-        }
-        break;
-
-    case DHCP_REACQ_OFFER:
-        if (dhcp_poll_once(&mt, &yi, &si, &rt, &ls) && mt == DHCP_MSG_OFFER) {
-            dhcp_server_ip = si;
-            dhcp_send_request(yi);
-            dhcp_renew_state = DHCP_REACQ_ACK;
-            dhcp_state_tick = ticks;
-        } else if ((uint32_t)(ticks - dhcp_state_tick) > 200) {   /* 2s 超时 */
-            dhcp_fallback_static();
-        }
-        break;
-
-    case DHCP_REACQ_ACK:
-        if (dhcp_poll_once(&mt, &yi, &si, &rt, &ls)) {
-            if (mt == DHCP_MSG_ACK) {
-                dhcp_apply_ack(yi, rt, ls); dhcp_log_ack("re-acquire");
-            } else if (mt == DHCP_MSG_NAK) {
-                serial_puts("[dhcp] re-acquire: NAK -> rediscover\n");
-                dhcp_start_reacquire();
-            }
-        } else if ((uint32_t)(ticks - dhcp_state_tick) > 200) {   /* 2s 超时 */
-            dhcp_fallback_static();
-        }
-        break;
-    }
-
-    if (saved_pd != kpd) switch_page_dir(saved_pd);   /* 切回原进程页目录 */
+/* 租约丢失/获取失败：回退静态兜底 */
+void e1000_dhcp_fallback(void) {
+    dhcp_fallback_static();
 }
 
 /* v0.25 DHCP 客户端：DISCOVER->OFFER->REQUEST->ACK 从 SLIRP DHCP 服务器动态获取
@@ -472,9 +425,9 @@ int e1000_tx(const uint8_t *data, uint32_t len) {
     tx_cur++;
     wr(REG_TDT, tx_cur % TX_N);   /* 尾指针 = 下一空闲槽（排他） */
     /* 等设备取走并发送完成（轮询 DD 位）。v0.30：上限从 300 万降到 30 万次——
-     * 本函数可能被 e1000_dhcp_tick 在 timer_cb（IRQ0 ISR）上下文调用，3M 次忙等在
-     * 100MHz 级主频下约阻塞 30ms 且期间中断被屏蔽；30 万次（约 3ms）已远超正常
-     * 完成所需（正常 <100 次即返回），设备故障时也能更快让出 CPU。 */
+     * 本函数可能在 syscall 上下文被 DHCP 原子发帧（pd_tx）或 netif 发送调用，
+     * 30 万次（约 3ms）已远超正常完成所需（正常 <100 次即返回），设备故障时
+     * 也能更快让出 CPU。 */
     for (int i = 0; i < 300000; i++)
         if (d->status & 1u) return 0;   /* 设备取走并发送完成 */
     serial_printf("[net] TX timeout: TDH=%x TDT=%x TCTL=%x status=%x\n",
