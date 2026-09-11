@@ -1698,10 +1698,19 @@ int stmt_do()
 int stmt_case()
 {
   int c;
+  int k;          /* M12 查重：本 switch case 表游标 */
   if (switch_depth <= 0)
     error();
   c = sw_const();
   expect(":");
+  /* 重复 case 常量：C 约束违例（gcc 拒绝 duplicate case value），minicc 同款宁拒不坑。
+   * 复用 error() 报错路径（同"重复标签"lbl_def_anchor 机制）；case 表起点存于本帧 +8。 */
+  k = bget4(sw_frames, (sw_depth - 1) * 12 + 8);
+  while (k <= sw_case_cnt - 1) {
+    if (bget4(sw_cases, k * 8) == c)
+      error();
+    k = k + 1;
+  }
   bput4(sw_cases, sw_case_cnt * 8, c);
   bput4(sw_cases, sw_case_cnt * 8 + 4, codepos);
   sw_case_cnt = sw_case_cnt + 1;
