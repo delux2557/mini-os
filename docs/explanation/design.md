@@ -687,7 +687,7 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
 
 ## 19. 工具链与自举（v0.27 / v0.27b 核心）
 
-### cc500 编译器移植（`tools/cc500/cc500.c`，~877 行）
+### cc500 编译器移植（`tools/cc500/cc500.c`，~2049 行）
 - 移植 E. Grimley-Evans 自托管 C 子集编译器（~750 行上游，GPL-2.0 参考/自写）：stdin 读 C →
   stdout 出 x86-32 ELF，无 libc 依赖；头注释逐条列移植改动、保留原作者声明。
 - 链接基址 `code_offset=0x800A0000`（APP_LINK），ELF 头 e_entry/p_vaddr/p_paddr 同步改址。
@@ -697,13 +697,16 @@ v0.17 之前，syscall 处理器直接解引用用户传入的指针：一个恶
 - **专用 CRT**（`src/app/cc500_crt.c`）：`_start` 以 `cc500_main()` 返回值 `sys_exit`
   （普通 crt.o 固定退出 0，无法把编译成败传给 shell）；不 include user_lib.h
   （其 static inline syscall3 会与外部 syscall3 重名冲突）。
-- **语言子集约束**：无 `break/continue/for/switch/&&/||/!/</>/%/类型转换`，循环用 done 标志退出、
-  `>=` 用操作数交换为 `<=`、换行用 `\x0a`——自举源必须能被自己编译。
+- **编译器本体源码的自举子集纪律**（区别于"编译器支持的能力"——后者见
+  `tools/cc500/README.md` 语言快照，已含 for/switch/短路/三目/自增自减等 M1~M12 全量）：
+  本体源码保持保守子集（无类型转换、循环用 done 标志退出等），且纪律#1 保证"新特性不用于
+  自身源码"——自举源必须能被自己编译，P1==P2 逐字节不动点随里程碑保持。
 - **I/O 走 mini-fs**：整读输入文件（v0.27b 起 `argv[1]`，缺省 `/cc500.c`）进堆做 getchar 源；
   `putchar` 为空操作，编译完 `flush_output` 把 code 缓冲写回输出路径（`argv[2]`，缺省 `/out.elf`）
   ——绕开无 stdin/stdout 重定向限制。
-- **输入大小守卫（S6）**：`in_data=malloc(32768)`；缓冲满后再探 1 字节，仍有数据则显式
-  `input too big (>32KB)` 报错，杜绝静默截半编译。
+- **输入大小守卫（S6→OBS-CC-5）**：v0.27 用 `in_data=malloc(32768)` + 满后探 1 字节显式
+  `input too big (>32KB)` 报错；OBS-CC-5 起改为**动态扩容**（初配 64KB，读满翻倍，
+  `input_grow`），不再有硬上限，杜绝静默截半编译。
 - initramfs 嵌入：`cc500`（编译器 ELF）+ `cc500.c`（自举源，objcopy 原始字节）两个文件。
 - **BUG-026**：畸形输入（形参列表 EOF 未闭合）死循环——符号表无界增长；加 EOF 守卫。
 
