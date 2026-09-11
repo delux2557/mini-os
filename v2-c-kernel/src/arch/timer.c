@@ -17,10 +17,9 @@ static void timer_cb(registers_t *r) {
      * 到达 → 停止喂狗 → QEMU 注入 NMI 突破死循环（见 drv/wdt.c）。 */
     extern void wdt_feed(void);
     wdt_feed();
-    /* v0.28 DHCP 租期续约：每 tick 非阻塞轮询（须在 sched_tick 之前——
-     * sched_tick 里 schedule 可能上下文切换且不返回，排在它后面会被跳过） */
-    extern void e1000_dhcp_tick(void);
-    e1000_dhcp_tick();
+    /* v0.36（R1.3）：DHCP 租期续约已迁出中断上下文——由 dhcpd 守护进程每
+     * 10ms 经 syscall#39 触发 e1000_dhcp_tick（外部审计 A1："策略寄生内核"）。
+     * 此处不再在 IRQ0 ISR 里跑续约状态机。 */
     /* 交由调度器：唤醒到期进程 + 抢占切换（可能不返回） */
     extern void sched_tick(registers_t *);
     sched_tick(r);

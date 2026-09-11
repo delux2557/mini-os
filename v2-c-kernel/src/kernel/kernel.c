@@ -147,6 +147,13 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
         int sock_pid = usermode_spawn_elf("sockdemo", APP_LINK, 0);
         serial_printf("[boot] sockdemo pid=%d\n", sock_pid);
     }
+    /* v0.36（R1.3，外部审计 A1）：DHCP 租期续约守护进程——续约状态机从 timer
+     * 中断迁到本进程（每 10ms 经 syscall#39 触发 e1000_dhcp_tick）。无网卡则不
+     * spawn（无租约可续）；e1000_dhcp_tick 无租约时本就 no-op。 */
+    if (netif_ready() == 0) {
+        int dhcp_pid = usermode_spawn_elf("dhcpd", APP_LINK, 0);
+        serial_printf("[boot] dhcpd pid=%d\n", dhcp_pid);
+    }
 #ifdef TCP_DEMO
     /* v1.1 Step 4：TCP_DEMO 构建时自动 spawn 虚拟 TCP HTTP demo（宿主转发器 + HTTP 服务
      * 由 tests/test_tcp.sh 提供）。不依赖网卡类型：e1000 走 SLIRP/UDP，串口走 SLIP/IP。 */
