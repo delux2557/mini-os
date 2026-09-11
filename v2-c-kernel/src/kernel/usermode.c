@@ -1015,6 +1015,14 @@ void syscall_dispatch(registers_t *r) {
         e1000_icmp_selftest();
         r->eax = 0;
         return;
+    case 39:  /* sys_dhcp_tick()：v0.36（R1.3）DHCP 续约心跳。
+         * 由 dhcpd 守护进程每 10ms 触发——续约状态机（e1000_dhcp_tick，非阻塞）
+         * 从 timer 中断上下文迁出到进程上下文（外部审计 A1："策略寄生内核"）。
+         * 无租约/无网卡时内部直接 no-op；e1000_dhcp_tick 自带 MMIO 页目录切换。 */
+        extern void e1000_dhcp_tick(void);
+        e1000_dhcp_tick();
+        r->eax = 0;
+        return;
     default:
         serial_printf("[user] unknown syscall %u\n", num);
         r->eax = (uint32_t)-1;

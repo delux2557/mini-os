@@ -189,7 +189,7 @@ $(USERPROG_OFFS): $(USERPROG_ELF)
 # SEC-01 回归：badinsn 以 ring3 执行 ud2（#UD），验证用户态 CPU 异常被隔离杀进程而非整机停机
 APP_ADDR   = 0x800A0000
 SHELL_ADDR = 0x80090000
-APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash sandboxdemo badinsn chaos
+APPS       = hello echo crash isol forkdemo args stackovf deep deepfork deepexec heapdemo fsdemo waitdemo abuse sockdemo bigdemo cc500 httpdemo dldemo cansmash sandboxdemo badinsn chaos dhcpd
 APP_ELFOBJS  = $(addprefix $(BUILD)/apps/, $(addsuffix _elf.o, $(APPS)))
 SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
@@ -239,6 +239,9 @@ $(BUILD)/apps/abuse.elf: $(BUILD)/apps/abuse.o $(BUILD)/apps/crt.o
 $(BUILD)/apps/sockdemo.elf: $(BUILD)/apps/sockdemo.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/bigdemo.elf: $(BUILD)/apps/bigdemo.o $(BUILD)/apps/crt.o
+	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
+# v0.36（R1.3）：DHCP 续约守护进程（kernel.c 网卡就绪时 spawn）
+$(BUILD)/apps/dhcpd.elf: $(BUILD)/apps/dhcpd.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(APP_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
 $(BUILD)/apps/shell.elf: $(BUILD)/apps/shell.o $(BUILD)/apps/crt.o
 	$(LD) -m elf_i386 -Ttext $(SHELL_ADDR) -e _start -o $@ $(BUILD)/apps/crt.o $<
