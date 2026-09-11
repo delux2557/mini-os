@@ -140,20 +140,10 @@ void kernel_main(uint32_t magic, uint32_t mb_info) {
     int shell_pid = usermode_spawn_elf("shell", SHELL_LINK, 1);
     serial_printf("[boot] shell pid=%d\n", shell_pid);
 
-    /* v0.20：网络可用时启动用户态 UDP socket 演示（sockdemo 用 sys_net_* 系统调用
-     * 与宿主 UDP echo 服务端到端回环；依赖 ARP 自检已学到网关 MAC）。
-     * 无网卡（e1000_ready()=-1）则不生成，避免无网络环境下的噪音。 */
-    if (netif_ready() == 0) {
-        int sock_pid = usermode_spawn_elf("sockdemo", APP_LINK, 0);
-        serial_printf("[boot] sockdemo pid=%d\n", sock_pid);
-    }
-    /* v0.36（R1.3，外部审计 A1）：DHCP 租期续约守护进程——续约状态机从 timer
-     * 中断迁到本进程（每 10ms 经 syscall#39 触发 e1000_dhcp_tick）。无网卡则不
-     * spawn（无租约可续）；e1000_dhcp_tick 无租约时本就 no-op。 */
-    if (netif_ready() == 0) {
-        int dhcp_pid = usermode_spawn_elf("dhcpd", APP_LINK, 0);
-        serial_printf("[boot] dhcpd pid=%d\n", dhcp_pid);
-    }
+    /* v0.37（R1.2 后半，外部审计 A1）：网络 demo/服务不再由内核启动序列硬编码 spawn
+     * （"静态 spawn 演示进程"）——sockdemo / dhcpd 移入 /init.rc，由 shell 开机自动
+     * source 时按需 `bg` 拉起（netif 就绪与否由 initramfs 的 /init.rc 内容决定）。
+     * 内核启动序列只保留功能性路径（netif init / DHCP 取址 / 网关 ARP 学习）与 shell。 */
 #ifdef TCP_DEMO
     /* v1.1 Step 4：TCP_DEMO 构建时自动 spawn 虚拟 TCP HTTP demo（宿主转发器 + HTTP 服务
      * 由 tests/test_tcp.sh 提供）。不依赖网卡类型：e1000 走 SLIRP/UDP，串口走 SLIP/IP。 */
