@@ -1,61 +1,18 @@
 /* mini-os/v2-c-kernel/src/app/user_lib.h
  * 用户态共享库（v0.9）：系统调用号、syscall 内联封装、打印/字符串小工具。
  * 由 shell / hello / echo / crash 等独立编译的 ELF 应用 #include。
- * 与内核 usermode.c 的 syscall 分发表严格对应。
- */
+ * R1.1（外部审计 A5）：系统调用号由 src/syscall_table.h（X-Macro 唯一事实源）
+ * 经 enum 展开生成，不再手写——加号只改表 + 内核分发表实现。 */
 #ifndef _USER_LIB_H
 #define _USER_LIB_H
 #include <stdint.h>
 #include "netio.h"   /* v0.20: 网络 I/O 参数结构（与内核 ABI 一致） */
+#include "syscall_table.h"   /* R1.1: 号/名/默认掩码 单源（X-Macro） */
 
-/* ---- 系统调用号（与内核 usermode.c 一致） ---- */
-#define SYS_EXIT       0
-#define SYS_PRINT      1
-#define SYS_GET_TICKS  2
-#define SYS_SLEEP      3
-#define SYS_YIELD      4
-#define SYS_GET_PID    5
-#define SYS_SEM_CREATE 6
-#define SYS_SEM_WAIT   7
-#define SYS_SEM_SIGNAL 8
-#define SYS_SHMEM      9
-#define SYS_MSG_CREATE 10
-#define SYS_MSG_SEND   11
-#define SYS_MSG_RECV   12
-#define SYS_FS_CREATE  13
-#define SYS_FS_OPEN    14
-#define SYS_FS_WRITE   15
-#define SYS_FS_READ    16
-#define SYS_FS_CLOSE   17
-#define SYS_FS_LS      18
-#define SYS_FS_DELETE  19
-#define SYS_READLINE   20
-#define SYS_SPAWN_FILE 21
-#define SYS_WAIT       22
-#define SYS_MAP_PAGE   23   /* v0.11: 在当前进程地址空间映射一张私有页 */
-#define SYS_FORK       24   /* v0.12: 复制当前进程（地址空间深拷贝，共享内存共享） */
-#define SYS_EXEC       25   /* v0.12: 加载 ELF 替换当前进程（可传 argv） */
-#define SYS_FS_SEEK    26   /* v0.14: 定位打开文件槽的读写位置 */
-#define SYS_FS_MKDIR   27   /* v0.14: 建目录（父目录须存在） */
-#define SYS_FS_RMDIR   28   /* v0.14: 删空目录 */
-#define SYS_FS_SYNC    29   /* v0.16: 把 ramdisk 全量写回真盘（持久化） */
-#define SYS_NET_SOCKET  30  /* v0.20: 创建 UDP socket（port=0 自动分配），返回 socket id */
-#define SYS_NET_SENDTO  31  /* v0.20: 发 UDP 数据报（参数在 net_send_iov 中） */
-#define SYS_NET_RECVFROM 32 /* v0.20: 非阻塞收 UDP 数据报（0=无包；出参在 net_recv_iov） */
-#define SYS_NET_CLOSE   33  /* v0.20: 关闭 socket */
-#define SYS_KERN_AUDIT  34  /* v0.21: 内核自审计（帧配平/信号量守恒/PCB 状态机） */
-#define SYS_BRK         35  /* v0.26#2: 用户堆（brk/sbrk） */
-#define SYS_LIMIT       36  /* v0.34 BUG-058: per-process syscall 掩码（只收窄） */
-#define SYS_FS_READDIR  37  /* syscall#37: 把目录条目名枚举进用户缓冲（动态盘点，help 自发现） */
-#define SYS_NETDIAG     38  /* v0.35（R1.2）: 网络自检三连（ARP/UDP/ICMP），shell netdiag 命令触发 */
-/* v0.38（R1.3 后半）：DHCP 续约原子能力——状态机移至用户态 dhcpclient。
- * SYS_DHCP_TICK(39) 撤销：续约不再由守护进程"踢一脚内核状态机"，
- * 改为用户态直接经以下 5 个原子调用驱动（机制/策略分离）。 */
-#define SYS_DHCP_QUERY   40 /* 查询租约（lease/elapsed/T1/T2） */
-#define SYS_DHCP_SEND    41 /* 发一帧：0=RENEW 1=REBIND 2=DISCOVER 3=REQUEST(req_ip) */
-#define SYS_DHCP_RECV    42 /* 收一条应答并解析（mt/yi/si/rt/ls；1=收到 0=无 -1=败） */
-#define SYS_DHCP_APPLY   43 /* 应用 ACK（yi/rt/ls/tag）回内核租约 */
-#define SYS_DHCP_FALLBACK 44 /* 租约丢失 -> 回退静态兜底 */
+/* ---- 系统调用号（由 syscall_table.h 展开；与内核 usermode.c 分发表一致） ---- */
+#define SYS_ENUM_ENTRY(num, name, mask) name = num,
+enum { SYS_TABLE(SYS_ENUM_ENTRY) };
+#undef SYS_ENUM_ENTRY
 
 /* ---- syscall 内联封装（int 0x80） ---- */
 static inline uint32_t syscall3(uint32_t n, uint32_t a, uint32_t b, uint32_t c) {

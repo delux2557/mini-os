@@ -22,6 +22,11 @@
 * **续约状态机全用户态（R1.3 后半）**：内核删除 `e1000_dhcp_tick` 状态机，只保留
   原子能力 syscall#40-44（QUERY/SEND/RECV/APPLY/FALLBACK）；RFC 2131 §4.4.5 的
   T1 RENEW→T2 REBIND→超时重新获取由用户态 dhcpclient 进程决策——机制/策略彻底分离
+* **系统调用 ABI 单源化 + 版本化（R1.1，外部审计 A5 整改）**：新建 `src/syscall_table.h`
+  （X-Macro 唯一事实源：号/名/默认掩码 + `SYSCALL_ABI_VERSION`=1），user_lib.h /
+  userprog.c（enum 展开）与 usermode.c 分发表（枚举 case 标签 + `syscall_tab` 名表 +
+  新 `SYS_ABI_VERSION`#45）全部从表派生，消除号表三处手工同步漂移；`sys_kern_audit`
+  上报 ABI 版本并自检号表 0..45 连续密集。号一经发布不复用（39 撤销号保留空洞）
 
 **Fixed**
 
