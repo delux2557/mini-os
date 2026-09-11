@@ -1,10 +1,12 @@
 # v2-c-kernel（当前版本）
 
-x86 32 位 C 内核，multiboot 引导，运行于 QEMU。当前里程碑：v0.33 回归可观测性收口（F-4 selftest 行撕裂 / F-5 pid 表静默 + harness 退出码统一 + CI 全链）。
+x86 32 位 C 内核，multiboot 引导，运行于 QEMU。当前主线：v1.5——外部审计 A1「总体架构与
+分层」整改（自检三连移出启动路径改 `netdiag` 命令、demo/服务进 `/init.rc`、DHCP 续约状态机
+全用户态）+ NMI 看门狗 + cc500/minicc 编译器修复集（版本史见 [changelog](../docs/reference/changelog.md)）。
 
 ```
 src/     内核源代码（.c/.h/.s/.ld）
-tests/   宿主单元测试 + QEMU 回归脚本（五层）
+tests/   宿主单测 + QEMU 回归脚本（分层矩阵，`make test-layers` 查看全部）
 build/   构建产物（gitignore，make clean 清理）
 ```
 
@@ -19,7 +21,7 @@ make test-qemu  # QEMU 回归（键盘 sendkey 路径）
 make test-serial # QEMU 串口终端回归（模拟外部 agent 经串口驱动 shell）
 make test-persist # QEMU ATA 真盘持久化回归（两次运行共享磁盘镜像）
 make test-net   # QEMU 网络回归（e1000 TX/RX + ARP + UDP + ICMP 与宿主端到端）
-make test       # 全部测试（五层）
+make test       # 全部测试（分层矩阵，`make test-layers` 查看层名，`make test-<层>` 单跑）
 make clean
 ```
 
@@ -32,7 +34,9 @@ make run
 # 方式二：串口终端（无界面模式，可被脚本/另一个 AI agent 驱动）
 qemu-system-i386 -kernel build/kernel.elf -display none -serial stdio -monitor none
 #   外部进程向 QEMU stdin 写入即输入，读 stdout 即输出（双向终端）
-#   shell 命令：help / ls / cat / mkdir / rmdir / rm / run / exec / save / selftest / exit
+#   shell 命令：help / ls / cat / mkdir / rmdir / rm / run / bg / exec / save /
+#   source / selftest / netping / netdiag / ccrun / micc / miccboot / writefile / patch / exit
+#   （开机自动 source /init.rc：bg sockdemo + bg dhcpd）
 
 # 方式三：ATA 真盘持久化（用户数据跨重启存活）
 qemu-system-i386 -kernel build/kernel.elf -hda disk.img -display none -serial stdio -monitor none

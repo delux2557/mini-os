@@ -111,7 +111,7 @@ cmd "shell help"     "help
 cmd "shell ls"       "ls
 "      "\[ls\] /:"
 cmd "cat motd"       "cat motd
-"      "Mini-OS v0.33: toolchain self-host (cc500 compiles itself)"
+"      "Mini-OS v1.5: toolchain self-host (cc500 compiles itself)"
 cmd "run hello"      "run hello
 "      "Hello from 'hello' app! pid=" "\[shell\] 'hello' exited code=0"
 cmd "run echo"       "run echo

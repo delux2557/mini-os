@@ -65,6 +65,7 @@ mini-os 的开发文档遵循三条铁律：
 | docs 目录四象限重组（explanation/ / reference/ 分层） | ✅ 已落地（PR #52：design/roadmap → explanation/，changelog/bugs → reference/；契约与 history/ 留根，不设空 guides/） |
 | external-reviews 命名统一（部分缺审计对象 sha） | ✅ 已闭环（P2 迁移 history/，规则明文化：sha 可考才带后缀） |
 | **CI 健壮性债：`test` job 失败只报 `exit code 2`、原因不可见**（2026-09-05，PR #91 首跑 flake，annotation 无有效输出）| ✅ 已加固（本 PR）：diffsynth 违例行 tee 落 `build/diffsynth/diffsynth.log`；CI/layers artifact glob 扩为递归 `build/**/*.log + build/**/*.c` + `build-logs/*`，子目录日志与失败样例 .c 随 artifact 归档（可下载后薄 ddmin 复现）。仍待办：定位 `test` job 顶层 exit 2 出处（逐层已解，顶层收敛待做） |
+| **版本号/文档漂移债（2026-09-11 盘点）**：changelog 断档 09-08~09-11（#139~#147 未记录）；version.h 停 v0.33 与代码注释 v0.34~v0.38、changelog v1.x 线三处不一致；design/roadmap 引用已删除的 `e1000_dhcp_tick` | ✅ 已整改（PR #148 文档整改）：changelog 补 v1.5 条目；版本串 v0.33 → v1.5（banner/motd/断言统一）；design.md DHCP 续约章节、roadmap 收口项/判断表、README 版本矩阵与命令列表同步 |
 
 ---
 
