@@ -47,6 +47,7 @@
 #define SYS_BRK         35  /* v0.26#2: 用户堆（brk/sbrk） */
 #define SYS_LIMIT       36  /* v0.34 BUG-058: per-process syscall 掩码（只收窄） */
 #define SYS_FS_READDIR  37  /* syscall#37: 把目录条目名枚举进用户缓冲（动态盘点，help 自发现） */
+#define SYS_NETDIAG     38  /* v0.35（R1.2）: 网络自检三连（ARP/UDP/ICMP），shell netdiag 命令触发 */
 #define SYS_DHCP_TICK   39  /* v0.36（R1.3）: DHCP 续约心跳——dhcpd 守护进程每 10ms 触发（迁出中断上下文） */
 
 /* ---- syscall 内联封装（int 0x80） ---- */

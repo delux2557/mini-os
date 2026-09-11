@@ -1005,6 +1005,16 @@ void syscall_dispatch(registers_t *r) {
     case 37:  /* sys_fs_readdir(path, buf, cap)：目录条目枚举到用户缓冲（v0.37 动态盘点） */
         sys_fs_readdir_case(r, a, b, c);
         return;
+    case 38:  /* sys_netdiag()：v0.35（R1.2）网络自检三连（ARP/UDP/ICMP）。
+         * 自检是演示/诊断资产，从启动路径移入 shell `netdiag` 命令按需触发。 */
+        extern void e1000_selftest(void);
+        extern void e1000_udp_selftest(void);
+        extern void e1000_icmp_selftest(void);
+        e1000_selftest();
+        e1000_udp_selftest();
+        e1000_icmp_selftest();
+        r->eax = 0;
+        return;
     case 39:  /* sys_dhcp_tick()：v0.36（R1.3）DHCP 续约心跳。
          * 由 dhcpd 守护进程每 10ms 触发——续约状态机（e1000_dhcp_tick，非阻塞）
          * 从 timer 中断上下文迁出到进程上下文（外部审计 A1："策略寄生内核"）。
