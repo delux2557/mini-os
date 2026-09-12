@@ -9,27 +9,12 @@
  *  - procCrash：越权访问被内核隔离终止
  */
 #include <stdint.h>
+#include "syscall_table.h"   /* R1.1（外部审计 A5）：号表单源——不再手写副本 */
 
-#define SYS_EXIT     0
-#define SYS_PRINT    1
-#define SYS_GET_TICKS 2
-#define SYS_SLEEP    3
-#define SYS_YIELD    4
-#define SYS_GET_PID  5
-#define SYS_SEM_CREATE 6
-#define SYS_SEM_WAIT   7
-#define SYS_SEM_SIGNAL 8
-#define SYS_SHMEM      9
-#define SYS_MSG_CREATE 10
-#define SYS_MSG_SEND   11
-#define SYS_MSG_RECV   12
-#define SYS_FS_CREATE  13
-#define SYS_FS_OPEN    14
-#define SYS_FS_WRITE   15
-#define SYS_FS_READ    16
-#define SYS_FS_CLOSE   17
-#define SYS_FS_LS      18
-#define SYS_FS_DELETE  19
+/* 系统调用号：由 syscall_table.h（X-Macro）展开（与 user_lib.h/usermode.c 同源） */
+#define SYS_ENUM_ENTRY(num, name, mask) name = num,
+enum { SYS_TABLE(SYS_ENUM_ENTRY) };
+#undef SYS_ENUM_ENTRY
 
 /* 信号量 id 约定（与内核 sem 槽对应） */
 #define SEM_MUTEX  1   /* 互斥锁：保护共享计数 */
