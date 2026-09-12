@@ -30,6 +30,15 @@ void app_main(int argc, char **argv) {
     sys_print("[bigdemo] 70KB write+verify sum=");
     user_putdec(sum);
     sys_print("\n");
+    /* R1.1b（A5 整改回归）：单次 sys_print >256B——旧实现 copyin_str 256B 静默截断，
+     * 尾部 LONGPRINT_TAIL（'L' 位于第 260 字节，远超 255B 截断点）会丢失；分块输出后整行完整。
+     * 行长：19（前缀）+ 240（填充）+ 15（尾部）≈ 274B，强制跨过 256B 边界。 */
+    sys_print("[bigdemo] longprint"
+              "000000000000000000000000000000000000000000000000000000000000"
+              "000000000000000000000000000000000000000000000000000000000000"
+              "000000000000000000000000000000000000000000000000000000000000"
+              "000000000000000000000000000000000000000000000000000000000000"
+              "LONGPRINT_TAIL\n");
     sys_print("[bigdemo] survived big-ELF load\n");
     sys_exit(0);
 }
