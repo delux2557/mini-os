@@ -194,18 +194,23 @@ int decode_escape() {
     if (e == '\'') return '\'';
     if (e == '0') return 0;
     if (e == 'x') {
-        int v = 0; int got = 0; int k = 0;
-        while (k < 2) {
+        /* MC-08#5（与 minicc.c 同步）：\x 贪心吃全部十六进制位（C 语义），按 char 宽度
+         * & 255 截断——旧实现固定 2 位把 "\x41F" 拆成 'A','F'（与 C 单一值 0x41F 不符）。
+         * 上限 7 位防溢出；>28bit 显式失败收口。
+         * 注意：不用 break（本自举源不支持 break/continue，stmt 仅 if/while/for/return）。 */
+        int v = 0; int got = 0; int cont = 1;
+        while (cont == 1) {
             int h = peek();
             int ok = 0;
             if (h >= '0' && h <= '9') { v = v * 16 + (h - '0'); ok = 1; }
             else if (h >= 'a' && h <= 'f') { v = v * 16 + (h - 'a' + 10); ok = 1; }
             else if (h >= 'A' && h <= 'F') { v = v * 16 + (h - 'A' + 10); ok = 1; }
-            if (ok == 0) k = 2;
-            else { src_pos = src_pos + 1; got = 1; k = k + 1; }
+            if (ok == 0) { cont = 0; }
+            else { src_pos = src_pos + 1; got = got + 1;
+                if (got > 7) fail("bad \\x escape"); }
         }
         if (got == 0) fail("bad \\x escape");
-        return v;
+        return v & 255;
     }
     fail("bad escape");
     return 0;

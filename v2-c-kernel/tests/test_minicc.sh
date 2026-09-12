@@ -127,6 +127,9 @@ hrun t_ptrarith 'int main(){int a;a=10;int* p;p=&a;if(*(p+0)==10)return 0;return
 # 字符串/char（V2c）：字面量、转义、char 变量/字面量、char* 指针算术/解引用、syscall3 stub
 hrun t_str 'int main(){char* s;s="hello";if(*s==104)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_esc 'int main(){char* s;s="a\nb\x41";if(*(s+1)==10&&*(s+3)==65)return 0;return 1;}' 0 'compiled OK' ''
+# MC-08#5：\x 转义贪心 hex（C 语义）："\x41F" 是单一转义 0x41F -> char 截断 0x1F（=31）；
+# 旧实现固定 2 位 -> 'A'(0x41),'F' 两字符，*s==65 与 C 参考不符。编译层必须 compiled OK（不报错）
+hrun t_xesc 'int main(){char* s;s="\x41F";if(*s==31)return 0;return 1;}' 0 'compiled OK' 'bad \\x escape'
 hrun t_char 'int main(){char c;c='\''A'\'';if(c==65)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_charptr 'int main(){char c;char* p;p=&c;*p=88;if(c==88)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_gchar 'char g='\''B'\'';int main(){if(g==66)return 0;return 1;}' 0 'compiled OK' ''
@@ -394,6 +397,13 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "产物输出 ZY（I/O）" "ZY" 40
     gwait "sys_print I/O 运行" "\[micc\] '/s3.elf' exited code=0 PASS" 40
     gsend "rm /s3.c"; gsend "rm /s3.elf"
+    # MC-08#5：\x 贪心 hex 运行语义——"\x41F" 是单一转义 0x41F -> char 截断 0x1F(=31)；
+    # 旧实现固定 2 位拆成 'A','F' -> *s==65。与 gcc 参考（"\x41F"[0]==0x1F）一致才 PASS
+    gsend "writefile /s4.c int main(){char* s;s=\"\\x41F\";if(*s==31)return 0;return 1;}"
+    gsend "micc /s4.c /s4.elf"
+    gwait "\x41F 贪心 hex 编译" "minicc: compiled OK" 40
+    gwait "\x41F 贪心 hex *s==31 运行" "\[micc\] '/s4.elf' exited code=0 PASS" 40
+    gsend "rm /s4.c"; gsend "rm /s4.elf"
     # 数组（V2d）：局部读写求和、char 数组、全局数组、&a[0] 指针
     gsend "writefile /a1.c int main(){int a[3];a[0]=1;a[1]=2;a[2]=3;return a[0]+a[1]+a[2]-6;}"
     gsend "micc /a1.c /a1.elf"
