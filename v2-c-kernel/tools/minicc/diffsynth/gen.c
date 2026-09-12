@@ -122,6 +122,10 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
     case E_CVAR:{ int i=rndi(0,nc-1); sprintf(dst,"c%d",i); *lo=0;*hi=127; used_flags|=F_CHAR; return; }
     case E_CIDX:{ int i=rndi(0,nca-1); char ix[24]; idx_expr(ix,idx_var());
         sprintf(dst,"ca%d[%s]",i,ix); *lo=0;*hi=255; used_flags|=F_CHAR; return; }
+    /* 注（MC-08#4 限幅纪律）：E_CIDX/E_STR 的 *hi=255 只是表达式界推导的保守上界，
+     * 实际运行时值域由初值限定——ca 初值 rndi(0,127)、STRS 全 ASCII<128（emit_program），
+     * 故 char 恒 0..127，与 gcc signed char 参考一致（无符号扩展假差异）。新加 char 源
+     * 必须同样限幅，否则 L4 差分会把 minicc 无符号 char 与 gcc signed char 的差异当回归。 */
     case E_STR:{ int si=rndi(0,NSTRS-1); const char *s=STRS[si];
         int k=rndi(0,(int)strlen(s)-1); sprintf(dst,"*(\"%s\"+%d)",s,k); *lo=0;*hi=255; used_flags|=F_CHAR; return; }
     case E_CALL:{ int i=rndi(0,nf-1); char a[128]; long l0,h0v;
