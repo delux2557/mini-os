@@ -434,17 +434,24 @@ static int decode_escape(void) {
     if (e == '\'') return '\'';
     if (e == '0') return 0;
     if (e == 'x') {
-        int v = 0, got = 0;
-        for (int k = 0; k < 2; k++) {
+        /* MC-08#5：\x 转义贪心吃全部十六进制位（C 标准语义），再按 char 宽度 & 0xFF 截断——
+         * 旧实现固定 2 位（"\x41F" 被拆成 'A','F' 两字符，与 C 的单一值 0x41F 不符，
+         * 字符串内容隐性差异成 L4 差分噪声源）。上限 7 位防有符号溢出 UB（>28bit 宁拒不坑，
+         * gcc 对超长 hex 同做截断，本子集以显式失败收口）。
+         * 与 minicc_self.c 同构（不用 break——自举源不支持 break/continue，保持 P1==P2）。 */
+        int v = 0, got = 0, cont = 1;
+        while (cont == 1) {
             int h = peekc();
-            if (h >= '0' && h <= '9') v = v * 16 + (h - '0');
-            else if (h >= 'a' && h <= 'f') v = v * 16 + (h - 'a' + 10);
-            else if (h >= 'A' && h <= 'F') v = v * 16 + (h - 'A' + 10);
-            else break;
-            src_pos++; got = 1;
+            int ok = 0;
+            if (h >= '0' && h <= '9') { v = v * 16 + (h - '0'); ok = 1; }
+            else if (h >= 'a' && h <= 'f') { v = v * 16 + (h - 'a' + 10); ok = 1; }
+            else if (h >= 'A' && h <= 'F') { v = v * 16 + (h - 'A' + 10); ok = 1; }
+            if (ok == 0) { cont = 0; }
+            else { src_pos++; got++;
+                if (got > 7) fail("bad \\x escape"); }
         }
         if (!got) fail("bad \\x escape");
-        return v;
+        return v & 0xFF;
     }
     fail("bad escape");
     return 0;
