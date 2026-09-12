@@ -149,7 +149,7 @@ cmd "run heapdemo"   "run heapdemo
 "      "\[heapdemo\] initial brk=0x801a4000" "\[heapdemo\] sbrk(4096) old=0x801a4000" "\[heapdemo\] 4KB page write+verify OK" "\[heapdemo\] 16KB write+verify OK" "\[heapdemo\] shrink+reuse write+verify OK" "\[heapdemo\] bump alloc 3 blocks write+verify OK" "\[heapdemo\] survived heap brk/sbrk demo" "\[shell\] 'heapdemo' exited code=0"
 # ---- v0.26#3 ELF 加载去上限：>64KB 大 ELF（旧 32KB/8 帧上限会拒绝） ----
 cmd "run bigdemo"    "run bigdemo
-"      "\[bigdemo\] pid=.* blob=70KB size=70000" "\[bigdemo\] 70KB write+verify sum=" "\[bigdemo\] survived big-ELF load" "\[shell\] 'bigdemo' exited code=0"
+"      "\[bigdemo\] pid=.* blob=70KB size=70000" "\[bigdemo\] 70KB write+verify sum=" "LONGPRINT_TAIL" "\[bigdemo\] survived big-ELF load" "\[shell\] 'bigdemo' exited code=0"
 # ---- v0.27 工具链自举：cc500 编译自身两次，P1==P2 逐字节一致（写-编-跑闭环） ----
 cmd "ccboot 自举"     "ccboot
 "      "cc500: compiled OK" "\[ccboot\] byte-identical PASS"

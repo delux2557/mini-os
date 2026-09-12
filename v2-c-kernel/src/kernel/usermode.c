@@ -534,15 +534,23 @@ void syscall_dispatch(registers_t *r) {
         sched_exit(r, a);
         __asm__ volatile ("cli; hlt");   /* 不可达 */
         return;
-    case SYS_PRINT:   /* sys_print(string)：先拷贝进内核缓冲（v0.17 校验用户指针） */
+    case SYS_PRINT:   /* sys_print(string)：输出用户字符串。R1.1b（A5 整改）：
+                 旧实现单次 copyin_str 进 sbuf[256]，>255B 的串被**静默截断**；
+                 改为分块（每块 ≤255B 有效字符）拷入内核缓冲并输出，直到读到 NUL——
+                 解除 256B 单次上限，无内建长度封顶（循环由 USER_SPACE_END 边界收口）。
+                 每块仍经 copyin_str 逐页校验用户指针（跨空洞页即 -1，fail-closed）。
+                 注意：长串是多次 puts，可能被抢占拆断行；短串（<256B）仍单次原子输出。 */
         {
-            char sbuf[256];
-            if (copyin_str((const char *)a, sbuf, sizeof(sbuf)) < 0) {
-                r->eax = (uint32_t)-1;
-                return;
+            uint32_t pos = 0;
+            for (;;) {
+                char sbuf[256];
+                int n = copyin_str((const char *)(a + pos), sbuf, sizeof(sbuf));
+                if (n < 0) { r->eax = (uint32_t)-1; return; }
+                vga_puts(sbuf);
+                serial_puts(sbuf);
+                if (n < (int)sizeof(sbuf) - 1) break;  /* 本块内读到 NUL：字符串结束 */
+                pos += (uint32_t)n;                    /* 本块满 255B：继续下一块 */
             }
-            vga_puts(sbuf);
-            serial_puts(sbuf);
         }
         r->eax = 0;
         return;
@@ -764,7 +772,12 @@ void syscall_dispatch(registers_t *r) {
         r->eax = (uint32_t)rc;
         return;
     }
-    case SYS_READLINE: { /* sys_readline(buf, max)：阻塞式读一行；行已就绪则直接返回长度 */
+    case SYS_READLINE: { /* sys_readline(buf, max)：阻塞式读一行；行已就绪则直接返回长度。
+                  R1.1b（A5 整改契约注释）：阻塞是接口既定语义（同 POSIX read），且输入侧
+                  已与消费解耦：键盘/串口注入由 kb 组装进"挂起行队列"（v0.37 BUG-075），
+                  多个 readline 等待者在定行时各派一行（sched_wake_keyboard 循环派发）；
+                  本调用仅在"无已就绪行"时阻塞。残余耦合=单一键盘输入源（演示机硬件
+                  约束）与 128B 行上限（KB_LINE_MAX，超长截断已告警），非本层可消除。 */
         char *out = (char *)a;
         /* v0.36（红队 RBT-2026-013，BUG-067）：max=0 不是"未指定"哨兵。旧写 0 被吞成
          * KB_LINE_MAX+1(129)，会向"零容量"调用方缓冲整行写入（契约违反）。调用方必须给

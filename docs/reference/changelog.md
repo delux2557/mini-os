@@ -27,6 +27,11 @@
   userprog.c（enum 展开）与 usermode.c 分发表（枚举 case 标签 + `syscall_tab` 名表 +
   新 `SYS_ABI_VERSION`#45）全部从表派生，消除号表三处手工同步漂移；`sys_kern_audit`
   上报 ABI 版本并自检号表 0..45 连续密集。号一经发布不复用（39 撤销号保留空洞）
+* **sys_print 解除 256B 截断上限（R1.1 续，A5 减分项）**：`SYS_PRINT` 由单次
+  copyin_str 进 256B 缓冲（>255B 静默截断）改为分块输出直到 NUL——长串完整输出、
+  无内建长度封顶（USER_SPACE_END 收口），每块仍逐页校验用户指针；bigdemo 增
+  >256B 长打印回归（`LONGPRINT_TAIL` 位于第 260 字节）。`SYS_READLINE` 阻塞
+  耦合以契约注释收口：输入已由挂起行队列 + 多等待者循环派发解耦，阻塞为既定语义
 
 **Fixed**
 
