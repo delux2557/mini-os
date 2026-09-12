@@ -32,6 +32,14 @@
   无内建长度封顶（USER_SPACE_END 收口），每块仍逐页校验用户指针；bigdemo 增
   >256B 长打印回归（`LONGPRINT_TAIL` 位于第 260 字节）。`SYS_READLINE` 阻塞
   耦合以契约注释收口：输入已由挂起行队列 + 多等待者循环派发解耦，阻塞为既定语义
+* **minicc `\x` 转义贪心 hex + char 差分限幅纪律落码（MC-08#4/#5 整改）**：
+  `decode_escape` 的 `\x` 由固定 2 位改为**贪心吃全部十六进制位**并按 char 宽度
+  `& 0xFF` 截断（`"\x41F"` 从 'A','F' 两字符修正为单一 0x1F，与 C/gcc 参考一致；
+  >28bit 宁拒不坑），minicc.c 与 minicc_self.c 双源同步（自举不动点约束）；
+  test_minicc 增宿主 `t_xesc` 编译断言 + guest 运行语义断言（`*s==31`）。
+  char 限幅纪律（§9.4 已有文档）补落到 gen.c 代码侧：E_CIDX/E_STR 的 `*hi=255`
+  仅为推导上界，运行时值域由初值 rndi(0,127)/ASCII 限定，防后续新增 char 源
+  引入 gcc signed char 符号扩展假差异
 
 **Fixed**
 
