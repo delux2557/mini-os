@@ -218,6 +218,14 @@ hrun t_deepnest 'int main(){int a;a=((((((((((((((((((((((((((((((1)))))))))))))
 hrun t_deepblk "int main(){int a;a=0;$(printf '{%.0s' $(seq 1 140))a=a+1;$(printf '}%.0s' $(seq 1 140))return a;}" 1 'statement nesting too deep' 'compiled OK'
 # MC-09：普通嵌套（< 上限）不得误伤，仍 compiled OK
 hrun t_deepnest_ok 'int main(){int a;a=((((((((1))))))));return a-1;}' 0 'compiled OK' ''
+# MC-08 末角：函数重定义/撞名不得静默接受。根因是旧判定 `Sym.val >= 0` 只在 codegen 期（gen_func）
+# 才赋非负，parse 期恒 -1 → 同名函数定义两次被静默放行、调用点绑定到最后定义（语义漂移）。
+# 现改为 parse 期 defined 标记判定。以下三例必须 FAIL + redefined：
+hrun t_redef1 'int f(){return 0;}int f(){return 1;}int main(){return 0;}' 1 'redefined' 'compiled OK'
+hrun t_redef2 'int g;int g(){return 0;}int main(){return 0;}' 1 'redefined' 'compiled OK'
+hrun t_redef3 'int f(){return 0;}int f;' 1 'redefined' 'compiled OK'
+# MC-08 末角：调用先于定义（隐式声明→定义处补写返回类型）不得被新判定误伤，仍 compiled OK
+hrun t_forward 'int main(){return f();}int f(){return 0;}' 0 'compiled OK' ''
 
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
