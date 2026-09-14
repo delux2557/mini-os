@@ -86,6 +86,9 @@ typedef struct {
     int val;                    /* FUNC: 代码偏移(未定义=-1)；GLOBAL: 数据偏移；
                                    LOCAL: 帧字节偏移；ARG: 参数序号 */
     int nargs;                  /* FUNC: 形参个数（未定义/未知=-1）——MC-04 实参/形参个数校验收敛用 */
+    char defined;               /* MC-08 末角：FUNC/GLOBAL 是否已给出定义（parse 期即可判定；1=已定义）。
+                                   Sym.val 只在 codegen 期（gen_func）才被赋非负代码偏移，parse 期恒 -1，
+                                   旧 `val >= 0` 判定恒假 → 同名函数重定义被静默接受；本字段收口。 */
 } Sym;
 
 typedef struct { char name[32]; int pos; int kind; } Patch;
@@ -311,6 +314,8 @@ static int sym_add(const char *name, int kind, int ty, int bty, int len, int val
     syms[nsym].len = len;
     syms[nsym].val = val;
     syms[nsym].nargs = kind == K_FUNC ? -1 : 0;   /* FUNC 形参个数未知；其余无意义 */
+    syms[nsym].defined = kind == K_FUNC ? 0 : 1;  /* MC-08 末角：仅 FUNC 需区分"隐式声明(0)/已定义(1)"；
+                                                     GLOBAL/LOCAL/ARG 定义即存在，重定义判定不需要它 */
     return nsym++;
 }
 
@@ -776,7 +781,7 @@ static Node *primary(void) {
             /* FIX-G（审计 MC-04）：实参/形参个数一致性。被调函数已定义(形参已知)→直接比对；
              * 未定义→记录本次实参个数（首次记录 / 重复比对），留待定义处交叉核对。 */
             int fidx = si < 0 ? nsym - 1 : si;
-            if (syms[fidx].val >= 0) {                       /* 已定义，形参个数已知 */
+            if (syms[fidx].defined) {                     /* 已定义，形参个数已知（parse 期标记；旧 val>=0 恒假） */
                 if (n->nargs != syms[fidx].nargs) fail("arg count mismatch");
             } else if (syms[fidx].nargs >= 0) {              /* 已见同名调用 */
                 if (n->nargs != syms[fidx].nargs) fail("arg count mismatch");
@@ -1219,14 +1224,16 @@ static void parse_program(void) {
             /* ---- 函数定义 ---- */
             int si = sym_find(name);
             if (si >= 0) {
-                if (syms[si].kind != K_FUNC || syms[si].val >= 0) fail("redefined");
+                if (syms[si].kind != K_FUNC || syms[si].defined) fail("redefined");
                 /* MC-08#1：先前隐式声明（调用先于定义）带 TY_INT，真定义来了补写真实返回类型 */
                 syms[si].ty = ty;
                 syms[si].bty = (ty == TY_PTR) ? bty_top : 0;
+                syms[si].defined = 1;   /* MC-08 末角：函数已定义（parse 期标记；旧 val>=0 恒假收口） */
             } else {
                 /* MC-08#1：返回类型不再抹平为 TY_INT（旧实现 decl_type 的返回值被丢弃，
                  * 使 `char cf()` 在调用点被当 int → "int→ptr 放宽"错接住 `int* p=cf()`）。 */
                 si = sym_add(name, K_FUNC, ty, bty_top, 0, -1);
+                syms[si].defined = 1;   /* MC-08 末角 */
             }
             Node *fn = node_new(ND_FUNC);
             s_cpy(fn->name, name);

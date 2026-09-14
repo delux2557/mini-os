@@ -40,6 +40,14 @@
   char 限幅纪律（§9.4 已有文档）补落到 gen.c 代码侧：E_CIDX/E_STR 的 `*hi=255`
   仅为推导上界，运行时值域由初值 rndi(0,127)/ASCII 限定，防后续新增 char 源
   引入 gcc signed char 符号扩展假差异
+* **minicc 函数重定义/撞名静默接受收口（MC-08 末角整改）**：根因是重定义判定
+  `Sym.val >= 0` 依赖 codegen 期（gen_func）才赋非负的代码偏移，parse 期恒 -1 →
+  `int f(){} int f(){}` 被静默放行、调用点 patch 绑定到最后定义（语义漂移且无告警）。
+  Sym 增 `defined` 标记（parse 期即可判定：隐式声明=0 / 定义=1），重定义判定改为
+  `kind != K_FUNC || defined`，调用点"已定义"判定（原 `val>=0` 同样恒假）一并收口；
+  minicc_self.c 并行数组 `sdef[256]` 同构同步（自举不动点 P1==P2 约束）。test_minicc
+  增宿主断言：函数重定义/函数撞全局变量/全局变量撞函数三例必须 FAIL + `redefined`，
+  调用先于定义（隐式声明补写返回类型）不误伤仍 compiled OK
 
 **Fixed**
 

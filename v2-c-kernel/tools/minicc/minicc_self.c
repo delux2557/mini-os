@@ -44,6 +44,8 @@ int toklen; int tok_is_word; int tok_is_num; int tok_is_str; int tok_is_char;
 int SYM_MAX = 256; int PATCH_MAX = 2048; int LAB_MAX = 2048;
 int skind[256]; int sty[256]; int sbty[256]; int slen[256]; int sval[256]; int sname[256];
 int snargs[256]; /* FUNC 形参个数（未知=-1）——MC-04 arity 收敛（minicc.c FIX-G 同步） */
+char sdef[256];  /* MC-08 末角（与 minicc.c Sym.defined 同步）：FUNC/GLOBAL 是否已给出定义
+                    （parse 期即可判定；1=已定义）。sval 只在 codegen 期才非负，旧判定 parse 期恒假 */
 int nsym;
 int pk[2048]; int ppos[2048]; int pname[2048];
 int npatch;
@@ -367,6 +369,7 @@ int sym_add(int noff, int kind, int ty, int bty, int len, int val) {
     sname[nsym] = noff; skind[nsym] = kind; sty[nsym] = ty;
     sbty[nsym] = bty; slen[nsym] = len; sval[nsym] = val;
     if (kind == K_FUNC) snargs[nsym] = -1; else snargs[nsym] = 0;   /* FUNC 形参个数未知；其余无意义 */
+    if (kind == K_FUNC) sdef[nsym] = 0; else sdef[nsym] = 1;        /* MC-08 末角（同步） */
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -579,7 +582,7 @@ int primary() {
             na[n] = head;
             /* FIX-G（同步）：实参/形参个数一致性。已定义→直接比对；未定义→记录/比对，留待定义处核对。 */
             int fidx = nval[n];
-            if (sval[fidx] >= 0) {
+            if (sdef[fidx] != 0) {
                 if (nnargs[n] != snargs[fidx]) fail("arg count mismatch");
             } else if (snargs[fidx] >= 0) {
                 if (nnargs[n] != snargs[fidx]) fail("arg count mismatch");
@@ -916,14 +919,16 @@ int parse_program() {
         if (accept_s("(")) {
             int si = sym_find(noff);
             if (si >= 0) {
-                if (skind[si] != K_FUNC || sval[si] >= 0) fail("redefined");
+                if (skind[si] != K_FUNC || sdef[si] != 0) fail("redefined");
                 /* MC-08#1：先前隐式声明带 TY_INT，真定义补写真实返回类型 */
                 sty[si] = ty;
                 if (ty == TY_PTR) sbty[si] = bty_top; else sbty[si] = 0;
+                sdef[si] = 1;   /* MC-08 末角（同步）：函数已定义（parse 期标记；旧 sval>=0 恒假） */
             } else {
                 /* MC-08#1：返回类型不再抹平为 TY_INT（decl_type 返回值被丢弃，
                  * 使 `char cf()` 在调用点当 int → "int→ptr 放宽"错接住 `int* p=cf()`） */
                 si = sym_add(noff, K_FUNC, ty, bty_top, 0, -1);
+                sdef[si] = 1;   /* MC-08 末角（同步） */
             }
             int fn = node_new(ND_FUNC);
             nival[fn] = noff;
