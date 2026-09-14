@@ -227,6 +227,53 @@ hrun t_redef3 'int f(){return 0;}int f;' 1 'redefined' 'compiled OK'
 # MC-08 末角：调用先于定义（隐式声明→定义处补写返回类型）不得被新判定误伤，仍 compiled OK
 hrun t_forward 'int main(){return f();}int f(){return 0;}' 0 'compiled OK' ''
 
+echo "== [2b4] self 编译器 V3b 特性同步回归（双编译器产物逐字节一致） =="
+# V3b（++/-- 前后缀、复合赋值、do-while、break/continue）此前为 host minicc.c 独有，self 词法/解析
+# 均缺——同步补全后须证明两个编译器等价。构建 hostself（gcc 直编 minicc_self.c + host_crt.c，
+# -Dmain 改名避冲突），对同一 V3b 用例断言：①hostself 编译通过/拒绝与 host 一致；②两者产物 sha256 相同。
+if gcc -m32 -std=gnu99 -O1 -w -fpermissive -Dmain=minicc_guest_main -c tools/minicc/minicc_self.c -o "$VD/minicc_self.o" 2>"$VD/hostself.log" \
+   && gcc -m32 -std=gnu99 -O1 -w -fpermissive -c tools/minicc/host_crt.c -o "$VD/host_crt.o" 2>>"$VD/hostself.log" \
+   && gcc -m32 -o "$VD/hostself" "$VD/minicc_self.o" "$VD/host_crt.o" 2>>"$VD/hostself.log"; then
+    echo "      hostself 就绪（gcc 直编 minicc_self.c）"
+else
+    echo "[SKIP] hostself 构建失败（缺 32 位工具链？）；见日志"; tail -5 "$VD/hostself.log"
+fi
+if [ -x "$VD/hostself" ]; then
+    # V3b 用例（与宿主 t_cp/t_inc/t_dec/t_do/t_brk/t_cont 同语义；hostself 固定编译 /minicc.c，用符号链接喂源）
+    printf '%s' 'int main(){int a;a=10;a+=5;a-=3;a*=4;a/=2;a%=7;if(a==3)return 0;return 1;}' >"$VD/v3b_cp.c"
+    printf '%s' 'int main(){int a;int b;a=5;b=++a;if(b==6&&a==6)return 0;return 1;}' >"$VD/v3b_pre.c"
+    printf '%s' 'int main(){int a;int b;a=5;b=a++;if(b==5&&a==6)return 0;return 1;}' >"$VD/v3b_post.c"
+    printf '%s' 'int main(){int i;int s;s=0;i=0;do{s=s+i;i=i+1;}while(i<5);if(s==10)return 0;return 1;}' >"$VD/v3b_do.c"
+    printf '%s' 'int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i==3)break;s=s+i;}if(s==3)return 0;return 1;}' >"$VD/v3b_brk.c"
+    printf '%s' 'int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i%2==0)continue;s=s+i;}if(s==25)return 0;return 1;}' >"$VD/v3b_cnt.c"
+    printf '%s' 'int main(){break;}' >"$VD/v3b_bo.c"    # 负例：循环外 break 必须拒绝
+    if [ -w / ]; then
+        V3B_OK=1
+        for t in v3b_cp v3b_pre v3b_post v3b_do v3b_brk v3b_cnt; do
+            ln -sf "$PWD/$VD/$t.c" /minicc.c
+            qemu-i386 "$VD/hostself" >/dev/null 2>&1; rc=$?
+            rm -f /minicc.c
+            if [ "$rc" -eq 0 ]; then echo "[ok]   self 编译 $t 通过"; else echo "[FAIL] self 编译 $t rc=$rc"; V3B_OK=0; fi
+        done
+        ln -sf "$PWD/$VD/v3b_bo.c" /minicc.c
+        qemu-i386 "$VD/hostself" >/dev/null 2>&1; rc=$?
+        rm -f /minicc.c
+        if [ "$rc" -eq 1 ]; then echo "[ok]   self 拒绝循环外 break"; else echo "[FAIL] self 未拒绝循环外 break rc=$rc"; V3B_OK=0; fi
+        # 双编译器产物逐字节比对（hostminicc vs hostself 编译同一 V3b 用例）
+        for t in v3b_cp v3b_pre v3b_post v3b_do v3b_brk v3b_cnt; do
+            qemu-i386 "$VD/hostminicc" "$VD/$t.c" "$VD/${t}_h.elf" >/dev/null 2>&1
+            ln -sf "$PWD/$VD/$t.c" /minicc.c
+            qemu-i386 "$VD/hostself" >/dev/null 2>&1; cp /out.elf "$VD/${t}_s.elf"
+            rm -f /minicc.c
+            ha=$(sha256sum "$VD/${t}_h.elf" | cut -d' ' -f1); sa=$(sha256sum "$VD/${t}_s.elf" | cut -d' ' -f1)
+            if [ "$ha" = "$sa" ]; then echo "[ok]   $t 双编译器产物一致"; else echo "[FAIL] $t 产物不一致"; V3B_OK=0; fi
+        done
+        [ "$V3B_OK" -eq 1 ] && echo "      self V3b 同步回归通过" || HOST_FAIL=$((HOST_FAIL+1))
+    else
+        echo "[SKIP] 无 / 写权限，无法建 /minicc.c 符号链接（self 固定输入路径）"
+    fi
+fi
+
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
 # 注意源码含 % 与 ;，printf 须用 '%s' 格式防格式串解析
