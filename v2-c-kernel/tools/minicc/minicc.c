@@ -779,8 +779,11 @@ static Node *primary(void) {
             expect(")");
             n->a = head;
             /* FIX-G（审计 MC-04）：实参/形参个数一致性。被调函数已定义(形参已知)→直接比对；
-             * 未定义→记录本次实参个数（首次记录 / 重复比对），留待定义处交叉核对。 */
-            int fidx = si < 0 ? nsym - 1 : si;
+             * 未定义→记录本次实参个数（首次记录 / 重复比对），留待定义处交叉核对。
+             * fidx 必须用 n->val（隐式声明时已保存的符号下标）：实参解析（expr→g()）可能
+             * sym_add 新符号使 nsym 增长，`si<0 ? nsym-1 : si` 重算会指错（MC-04 既有 bug，
+             * 被"调用先于定义 + 实参含函数调用"触发——minicc_self.c 的 fidx 一直用 nval[n]）。 */
+            int fidx = n->val;
             if (syms[fidx].defined) {                     /* 已定义，形参个数已知（parse 期标记；旧 val>=0 恒假） */
                 if (n->nargs != syms[fidx].nargs) fail("arg count mismatch");
             } else if (syms[fidx].nargs >= 0) {              /* 已见同名调用 */

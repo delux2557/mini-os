@@ -48,6 +48,20 @@
   minicc_self.c 并行数组 `sdef[256]` 同构同步（自举不动点 P1==P2 约束）。test_minicc
   增宿主断言：函数重定义/函数撞全局变量/全局变量撞函数三例必须 FAIL + `redefined`，
   调用先于定义（隐式声明补写返回类型）不误伤仍 compiled OK
+* **minicc_self 编译器 V3b 特性同步（双编译器差分一致）**：V3b 的 5 个特性（复合赋值
+  `+= -= *= /= %=`、前缀/后缀 `++ --`、`do-while`、`break`/`continue`）此前为 host minicc.c
+  独有，self 词法/解析/生成三层齐缺（"同一语言两个编译器两套特性"）。现按 §7.3 契约
+  "对外语言子集完全对齐"同步补全：词法新增两字符运算符、解析新增 `ND_POST_INC/DEC/DO/
+  BREAK/CONTINUE` 节点与前/后缀/复合赋值语法糖、生成器补 `loop_brk/loop_cont` 循环帧栈
+  （minicc 不支持多维数组，[32 帧×64 槽] 线性展开，host 用 `[32][64]`）。test_minicc 新增
+  [2b4]：构建 hostself（gcc 直编 minicc_self.c）对同一 V3b 用例断言编译通过/拒绝与 host
+  一致，且两者产物 **sha256 逐字节相同**；自举不动点 P1==P2 复验通过
+* **MC-04 FIX-G 宿主 fidx 错位修复（V3b 同步暴露的既有 bug）**：host minicc.c 调用点核对
+  `fidx = si<0 ? nsym-1 : si` 在实参解析后重算 `nsym-1`，实参含函数调用（`pre(g(),2)`，
+  `g()` 隐式声明使 nsym 增长）时 fidx 指到实参符号而非被调函数 → 误报 `arg count mismatch`。
+  minicc_self.c 一直用 `nval[n]`（正确）。修法：host 改用 `n->val` 对齐 self。此前源码无
+  "调用先于定义 + 实参含函数调用"模式未触发；V3b 同步引入 `prefix_incdec(unary(), ND_ADD)`
+  后暴露，属既有 bug 而非回归。test_minicc 宿主 107 全绿复验
 
 **Fixed**
 
