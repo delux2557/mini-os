@@ -164,6 +164,8 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
   令值域逃逸有符号溢出，与"无 UB 三纪律"冲突）。
 - 测试锚点：Mock 白盒 AST 形状 + 全管线 codegen（断言 76→96）；guest 运行语义（前缀新值/后缀旧值/
   复合链 `/ca.c`、指针 `p+=1` `/cf.c`）；host 编译层用例（`t_cp*` / `t_inc*` / `t_dec*`）。
+  **self 编译器同特性**（V3b 同步，§7.3）：test_minicc [2b4] 构建 hostself 对同一 V3b 用例断言
+  编译通过/拒绝与 host 一致，且两者产物 **sha256 逐字节相同**——双实现 codegen 等价。
 
 ### 6.2c V3b：循环控制 `do-while` / `break` / `continue`（差分对拍 + Mock 补盲）
 
@@ -177,6 +179,8 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 - 测试锚点：Mock 白盒 `t_stmt_do` / `t_stmt_break` / `t_stmt_continue`（AST 形状，断言 96→101）；
   guest 运行语义（do-while 累 0..9==45、break 早退 s==10、continue 累奇==25、嵌套 break 只断内层 s==3）；
   host 编译层（`t_do` / `t_brk` / `t_cont` / `t_do_break` + 循环外报错 `t_breakout` / `t_continueout`）。
+  **self 编译器同特性**（V3b 同步，§7.3）：循环帧栈以 [32 帧×64 槽] 线性展开（minicc 不支持多维数组
+  声明，host 用 `loop_brk[32][64]`）；[2b4] 双编译器产物逐字节比对覆盖 do/break/continue。
 
 ### 6.3 明确拒绝清单（编译期静态报错，不产出坏码）
 
@@ -214,7 +218,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 
 ### 7.3 自举约束与实现（V3 达成）
 
-- 编译器本体以自身子集编写：`tools/minicc/minicc_self.c`（`/minicc-self`，P1）。子集纪律见该文件头部注释（无 struct/enum/typedef/static/include/宏；无 for/switch/`+=`/`++`/`--`/`?:`/多级指针；无函数原型；全部函数返回 int）。
+- 编译器本体以自身子集编写：`tools/minicc/minicc_self.c`（`/minicc-self`，P1）。子集纪律见该文件头部注释（无 struct/enum/typedef/static/include/宏；无 switch/`+=`/`++`/`--`/`?:`/多级指针；无函数原型；全部函数返回 int）。**注意区分两层面**：该纪律约束的是"minicc_self.c 实现自身怎么写"（编译器源码不用这些语法），**编译器对外语言子集与 minicc.c 完全对齐**——V3b 的 `++`/`--`（前/后缀）、复合赋值 `+= -= *= /= %=`、`do-while`、`break`/`continue` 已在 self 词法/解析/生成三层同步实现（`ND_POST_INC/DEC/DO/BREAK/CONTINUE` + 循环帧栈 `loop_brk/loop_cont` 线性展开 [32 帧×64 槽]，host 用 `[32][64]`）。"双编译器差分入网"的前提正是两实现特性一致：test_minicc [2b4] 对同一 V3b 用例断言 hostminicc 与 hostself 产物**逐字节一致**。
 
 - AST 以**并行数组 + int 句柄**表达（无 struct）：节点字段拆成 `nkind/nty/nbty/nlen/nl/nr/na/nb/nnext/nval/nvkind/nvslot/nival/nnargs/nnlocals` 等全局数组，句柄即下标（0 保留为 NULL）。这是子集纪律下承接 V2 结构体 AST 的等价物。
 
@@ -233,6 +237,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
   - 资源上限：节点池 8192、`PATCH_MAX=4096`、`code_cap=860000`（产物含全局数组零填充数据段 + 文本约 686KB）。
   - 递归深度守卫（外部审计 MC-09，P1==P2 两侧同 fence）：guest 用户栈每进程仅 **28KB**（`src/mm/mem.h` `USER_STACK_SLOT=32KB` − 永不映射的 `USER_STACK_GUARD=4KB`），深括号/长链会让解析与 codegen 的递归打爆编译器自身栈（SIGSEGV，无编译期诊断）。故双实现同步加深度计数：表达式/一元链/操作数嵌套 `EXPR_DEPTH_MAX=32`、语句/块嵌套 `STMT_DEPTH_MAX=128`、codegen AST 深度 `GEN_DEPTH_MAX=256`，超限一律 `fail("expression nesting too deep")` / `fail("statement nesting too deep")` 受控报错。限幅按 28KB 预算反推（实测括号≥45 层、加法链≥1000 项即崩）并留出安全余量。
   - 宿主侧逻辑快速验证：gcc 直编 `minicc_self.c + host_crt.c`（`-Dmain` 改名避冲突 + `-include` 声明 syscall3）得宿主版 S，S 编 `minicc_self.c` 得 Q，`Q == P1` 逐字节一致 —— 证明 minicc_self.c 逻辑与 minicc.c 语义完全一致，机器码/运行期差异只可能来自 codegen（已被 guest 内 P1==P2 排除）。
+  - **MC-04 FIX-G 宿主 fidx 错位（V3b 同步时暴露，已修）**：host minicc.c 调用点核对的 `fidx = si<0 ? nsym-1 : si` 在**实参解析后**重算 `nsym-1`——当实参含函数调用（如 `pre(g(),2)`，`g()` 的解析会 sym_add 隐式声明使 nsym 增长）时 fidx 会指到最后一个实参符号而非被调函数，误报 `arg count mismatch`。minicc_self.c 一直用已保存的 `nval[n]`（正确）。修法：host 改为 `fidx = n->val` 与 self 对齐。此前 minicc_self.c 无"调用先于定义 + 实参含函数调用"模式故未触发；V3b 同步引入 `prefix_incdec(unary(), ND_ADD)` 后暴露，属既有 bug 而非回归。
 
 ***
 

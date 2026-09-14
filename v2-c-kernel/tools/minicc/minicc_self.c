@@ -9,6 +9,9 @@
  *
  * 子集纪律（本文件必须完全落于 minicc 支持的子集，任何违规都是 bug）：
  *   - 无 struct/enum/typedef/static/include/宏；无 switch/+=/++/--/?:/多级指针
+ *     （此条约束的是"本实现自身怎么写"：词法器/解析器/生成器对新代码的书写禁律。
+ *      编译器对外语言子集则与 minicc.c 完全对齐——V3b 的 ++/--（前/后缀）、复合赋值、
+ *      do-while、break/continue 已在词法/解析/生成三层同步实现，见下。）
  *   - 无函数原型声明（minicc 隐式声明 + patch 收集，函数可任意顺序定义）
  *   - 无返回指针的函数（函数返回 int）；AST 用"并行数组 + int 句柄"表达
  *   - 常量用全局 int 变量初始化（数字/字符字面量）；数组大小须为数字字面量
@@ -51,6 +54,11 @@ int pk[2048]; int ppos[2048]; int pname[2048];
 int npatch;
 int lpos[2048]; int lkind[2048]; int ltarget[2048];
 int nlab;
+/* V3b 循环帧栈（与 minicc.c 同步）：ND_DO/WHILE/FOR 的 break/continue 未决跳转记录。
+ * minicc 不支持多维数组声明，故以 [32 帧 * 64 槽] 线性展开；host 用 loop_brk[32][64]。 */
+int loop_brk[2048]; int loop_cont[2048];
+int loop_brk_n[32]; int loop_cont_n[32];
+int nloop;
 
 int CODE_BASE = 0x800a0000; /* APP_LINK（hex 字面量，int 可载） */
 int cur_nargs; int cur_frame; int frame_patch;
@@ -76,6 +84,9 @@ int ND_ADDR = 26; int ND_DEREF = 27;
 int ND_INDEX = 28;
 int ND_EXPR_STMT = 29; int ND_BLOCK = 30; int ND_IF = 31; int ND_WHILE = 32; int ND_FOR = 33; int ND_RET = 34;
 int ND_DECL = 35; int ND_FUNC = 36; int ND_GVAR = 37;
+/* V3b（与 minicc.c 同步）：后缀 ++/--（值为旧值）、do-while、break/continue */
+int ND_POST_INC = 38; int ND_POST_DEC = 39;
+int ND_DO = 40; int ND_BREAK = 41; int ND_CONTINUE = 42;
 
 /* MC-09 递归深度守卫（与 host minicc.c 同步；guest 用户栈仅 28KB，超限受控报错非 SIGSEGV）：
  *   EXPR_DEPTH_MAX 32  表达式/操作数嵌套（expr/unary 入口）
@@ -321,7 +332,12 @@ int next_tok() {
     if ((c == '=' && d == '=') || (c == '!' && d == '=') ||
         (c == '<' && d == '=') || (c == '>' && d == '=') ||
         (c == '<' && d == '<') || (c == '>' && d == '>') ||
-        (c == '&' && d == '&') || (c == '|' && d == '|')) {
+        (c == '&' && d == '&') || (c == '|' && d == '|') ||
+        /* V3b（与 minicc.c 同步）：++ -- += -= *= /= %= */
+        (c == '+' && (d == '+' || d == '=')) ||
+        (c == '-' && (d == '-' || d == '=')) ||
+        (c == '*' && d == '=') || (c == '/' && d == '=') ||
+        (c == '%' && d == '=')) {
         tok[0] = c; tok[1] = d; tok[2] = 0;
         src_pos = src_pos + 1; toklen = 2;
         return;
@@ -416,6 +432,59 @@ int emit_store() { emit_op("\x5b\x89\x03"); return 0; }
 int emit_store8() { emit_op("\x5b\x88\x03"); return 0; }
 int emit_test() { emit_op("\x85\xc0"); return 0; }
 int emit_epilogue() { emit_op("\x89\xec\x5d\xc3"); return 0; }
+
+/* V3b（与 minicc.c 同步）：直接目标的条件跳转（0F <op> rel32，向后/绝对目标用，不走 labs
+ * 前向补丁）。指令长 6 字节，rel 相对"指令尾" target - (p+6)。 */
+int emit_cond_direct(int op, int target) {
+    int p = code_len;
+    emit1(0x0f); emit1(op); emit4(target - (p + 6));
+    return 0;
+}
+
+/* ---- V3b 循环 break/continue 目标栈（与 minicc.c loop_enter/loop_patch_* 同步） ---- */
+int loop_enter() {
+    if (nloop >= 32) fail("loop nesting too deep");
+    loop_brk_n[nloop] = 0; loop_cont_n[nloop] = 0;
+    nloop = nloop + 1;
+    return 0;
+}
+int loop_leave() { if (nloop > 0) nloop = nloop - 1; return 0; }
+int loop_brk_add() {
+    int i = nloop - 1;
+    if (loop_brk_n[i] >= 64) fail("too many break in a loop");
+    loop_brk[i * 64 + loop_brk_n[i]] = code_len;
+    loop_brk_n[i] = loop_brk_n[i] + 1;
+    emit1(0xe9); emit4(0);
+    return 0;
+}
+int loop_cont_add() {
+    int i = nloop - 1;
+    if (loop_cont_n[i] >= 64) fail("too many continue in a loop");
+    loop_cont[i * 64 + loop_cont_n[i]] = code_len;
+    loop_cont_n[i] = loop_cont_n[i] + 1;
+    emit1(0xe9); emit4(0);
+    return 0;
+}
+int loop_patch_break(int target) {
+    int i = nloop - 1;
+    int j = 0;
+    while (j < loop_brk_n[i]) {
+        int p = loop_brk[i * 64 + j];
+        save32(p + 1, target - (p + 5));
+        j = j + 1;
+    }
+    return 0;
+}
+int loop_patch_continue(int target) {
+    int i = nloop - 1;
+    int j = 0;
+    while (j < loop_cont_n[i]) {
+        int p = loop_cont[i * 64 + j];
+        save32(p + 1, target - (p + 5));
+        j = j + 1;
+    }
+    return 0;
+}
 
 int emit_add_esp(int n4) {
     if (n4 <= 127) { emit_op("\x83\xc4"); emit1(n4); }
@@ -622,6 +691,12 @@ int primary() {
 }
 
 int unary_inner() {
+    if (accept_s("++")) {               /* V3b：前缀 ++lv → 语法糖 lv = lv+1（值=新值） */
+        return prefix_incdec(unary(), ND_ADD);
+    }
+    if (accept_s("--")) {               /* V3b：前缀 --lv → 语法糖 lv = lv-1 */
+        return prefix_incdec(unary(), ND_SUB);
+    }
     if (accept_s("-")) {
         int n = node_new(ND_NEG);
         nl[n] = unary();
@@ -653,7 +728,39 @@ int unary_inner() {
         nty[n] = nbty[nl[n]];
         return n;
     }
-    return primary();
+    return postfix();
+}
+
+/* V3b：后缀 ++/-- 构造 ND_POST_INC / ND_POST_DEC（表达式值为旧值，见 gen_inner）。
+ * 左值校验与赋值族一致（contract：只作用于可寻址左值）。 */
+int post_incdec(int operand, int kind) {
+    if (nkind[operand] != ND_VAR && nkind[operand] != ND_DEREF && nkind[operand] != ND_INDEX)
+        fail("increment/decrement of non-lvalue");
+    int n = node_new(kind);
+    nl[n] = operand;
+    nty[n] = nty[operand];
+    return n;
+}
+
+/* V3b：后缀表达式 = primary 后接任意 ++/--（优先级高于一元；函数调用/下标已由 primary 消化） */
+int postfix() {
+    int n = primary();
+    int more = 1;
+    while (more) {
+        if (accept_s("++")) n = post_incdec(n, ND_POST_INC);
+        else if (accept_s("--")) n = post_incdec(n, ND_POST_DEC);
+        else more = 0;
+    }
+    return n;
+}
+
+/* V3b：前缀 ++/-- → 语法糖 `++lv = lv = lv±1`。ND_ASSIGN 求值后值留在 eax（新值），
+ * 恰为前缀表达式值。`lv±1` 用 bin(lv, 1, ADD/SUB)。 */
+int prefix_incdec(int operand, int ck) {
+    int one = node_new(ND_NUM);
+    nval[one] = 1;
+    nty[one] = TY_INT;
+    return mk_assign(operand, bin(operand, one, ck));
 }
 
 /* MC-09 守卫 wrapper：一元链（-、!、~、*、&）每重嵌套 +1，与 expr 共享 edepth */
@@ -757,6 +864,29 @@ int lor() {
     return n;
 }
 
+/* V3b：复合赋值运算符（+= -= *= /= %=）→ 对应二元节点 kind；否则 -1。
+ * 仅在当前 token 是这些两字符运算符时命中（字面量 token 不参与，与 accept_s 同一禁止面）。 */
+int compound_op() {
+    if (tok_is_word || tok_is_num || tok_is_str || tok_is_char) return -1;
+    if (tok[0] == '+' && tok[1] == '=') return ND_ADD;
+    if (tok[0] == '-' && tok[1] == '=') return ND_SUB;
+    if (tok[0] == '*' && tok[1] == '=') return ND_MUL;
+    if (tok[0] == '/' && tok[1] == '=') return ND_DIV;
+    if (tok[0] == '%' && tok[1] == '=') return ND_MOD;
+    return -1;
+}
+
+/* V3b：构造 ND_ASSIGN 并统一做左值/类型静态检查（`=`、复合赋值、前缀 ++/-- 共用） */
+int mk_assign(int lv, int rhs) {
+    int a = node_new(ND_ASSIGN);
+    nl[a] = lv; nr[a] = rhs;
+    if (nkind[lv] != ND_VAR && nkind[lv] != ND_DEREF && nkind[lv] != ND_INDEX)
+        fail("assign to non-lvalue");
+    if (type_eq(nty[lv], nbty[lv], nty[rhs], nbty[rhs]) == 0)
+        fail("type mismatch in assignment");
+    return a;
+}
+
 int expr_inner() {
     int n = lor();
     if (accept_s("=")) {
@@ -767,6 +897,14 @@ int expr_inner() {
         if (type_eq(nty[nl[a]], nbty[nl[a]], nty[nr[a]], nbty[nr[a]]) == 0)
             fail("type mismatch in assignment");
         return a;
+    }
+    /* V3b：复合赋值 lv op= rhs → 语法糖改写为 lv = (lv op rhs)。右操作数右结合递归。 */
+    int ck = compound_op();
+    if (ck >= 0) {
+        next_tok();                     /* 消费复合赋运算符 */
+        int rhs = expr();               /* 右结合 */
+        int op = bin(n, rhs, ck);       /* lv op rhs（含指针/取模语义；bin 参数序 (l,r,kind)） */
+        return mk_assign(n, op);
     }
     return n;
 }
@@ -867,6 +1005,19 @@ int stmt() {
         expect_s(";");
         return n;
     }
+    /* V3b：do <body> while(<expr>); —— post-test 循环 */
+    if (accept_s("do")) {
+        n = node_new(ND_DO);
+        nb[n] = stmt();             /* body（先执行一次） */
+        expect_s("while");
+        expect_s("(");
+        nl[n] = expr();             /* 条件（body 后求值） */
+        expect_s(")");
+        expect_s(";");
+        return n;
+    }
+    if (accept_s("break")) { n = node_new(ND_BREAK); expect_s(";"); return n; }
+    if (accept_s("continue")) { n = node_new(ND_CONTINUE); expect_s(";"); return n; }
     n = node_new(ND_EXPR_STMT);
     nl[n] = expr();
     expect_s(";");
@@ -1075,6 +1226,23 @@ int gen_inner(int n) {
         if (nty[nl[n]] == TY_CHAR) emit_store8(); else emit_store();
         return 0;
     }
+    if (nkind[n] == ND_POST_INC || nkind[n] == ND_POST_DEC) {
+        /* V3b（与 minicc.c 同步）：后缀 ++/-- 表达式值为旧值。ebx 暂存左值地址；
+         * 仅复用现有 store/load 指令，无新 emit 原语。 */
+        int width = 4;
+        if (nty[nl[n]] == TY_CHAR) width = 1;
+        gen_addr(nl[n]);           /* eax = 左值地址 */
+        emit_op("\x89\xc3");       /* mov %eax,%ebx */
+        if (width == 1) emit_op("\x0f\xb6\x03");   /* movzbl (%ebx),%eax */
+        else emit_op("\x8b\x03");                  /* mov (%ebx),%eax */
+        emit1(0x50);               /* push 旧值 */
+        if (nkind[n] == ND_POST_INC) emit_op("\x83\xc0\x01");  /* add $1,%eax */
+        else emit_op("\x83\xe8\x01");                          /* sub $1,%eax */
+        if (width == 1) emit_op("\x88\x03");       /* mov %al,(%ebx) */
+        else emit_op("\x89\x03");                  /* mov %eax,(%ebx) */
+        emit_op("\x58");           /* pop %eax：旧值 */
+        return 0;
+    }
     if (nkind[n] == ND_BITAND) { gen(nl[n]); emit1(0x50); gen(nr[n]); emit_op("\x5b\x21\xd8"); return 0; }
     if (nkind[n] == ND_BITOR) { gen(nl[n]); emit1(0x50); gen(nr[n]); emit_op("\x5b\x09\xd8"); return 0; }
     if (nkind[n] == ND_BITXOR) { gen(nl[n]); emit1(0x50); gen(nr[n]); emit_op("\x5b\x31\xd8"); return 0; }
@@ -1183,25 +1351,56 @@ int gen_stmt_inner(int n) {
         return 0;
     }
     if (nkind[n] == ND_WHILE) {
-        int top = code_len;
+        int top = code_len;                 /* continue 目标 = 条件测试 */
         int en = new_lab();
+        loop_enter();
         gen(nl[n]); emit_test(); emit_cond(0x84, en);
         gen_stmt(nr[n]);
         emit_jmp_to(top);
+        loop_patch_break(code_len);         /* break 出口 = 循环末尾 */
+        loop_patch_continue(top);           /* continue → 回测条件 */
+        loop_leave();
         patch_lab(en, code_len);
         return 0;
     }
     if (nkind[n] == ND_FOR) {
         if (nl[n] != 0) gen(nl[n]);
-        int top = code_len;
+        int top = code_len;                 /* 条件测试起点 */
         /* FIX-C1（minicc.c 同步，MC-01）：条件为空不申请 en（en=-1）→ 未 emit 标签不回填，
          * 否则 lpos 保持 0，finish 按 pos+2 把跳转立即数写进 ELF 头，产物被内核拒载 */
         int en = -1;
+        loop_enter();
         if (nr[n] != 0) { en = new_lab(); gen(nr[n]); emit_test(); emit_cond(0x84, en); }
         gen_stmt(nb[n]);
+        int cont_pt = code_len;             /* continue 目标 = step 起点（无 step 则退到 jmp-to-cond） */
         if (na[n] != 0) gen(na[n]);
         emit_jmp_to(top);
+        loop_patch_break(code_len);
+        loop_patch_continue(cont_pt);
+        loop_leave();
         if (en >= 0) patch_lab(en, code_len);
+        return 0;
+    }
+    if (nkind[n] == ND_DO) {
+        int top = code_len;                 /* body 起点（先执行一次） */
+        loop_enter();
+        gen_stmt(nb[n]);
+        int cont_pt = code_len;             /* continue 目标 = body 之后的条件求值 */
+        gen(nl[n]); emit_test();
+        emit_cond_direct(0x85, top);        /* jnz 回 body（条件真则重跑，向后直接跳） */
+        loop_patch_break(code_len);         /* break 出口 = 循环末尾 */
+        loop_patch_continue(cont_pt);
+        loop_leave();
+        return 0;                           /* 条件假 → 自然落出循环 */
+    }
+    if (nkind[n] == ND_BREAK) {
+        if (nloop == 0) fail("break outside loop");
+        loop_brk_add();
+        return 0;
+    }
+    if (nkind[n] == ND_CONTINUE) {
+        if (nloop == 0) fail("continue outside loop");
+        loop_cont_add();
         return 0;
     }
     if (nkind[n] == ND_RET) {
