@@ -30,11 +30,14 @@ gen(){ # gen <tag> <compiler> → "hash  case" 行
   done
 }
 A1=${1:-}; MODE=${A1#--}; MODE=${MODE:-check}
-N=$(ls "$G"/cases/*.c | wc -l)
+N=$(ls "$G"/cases/*.c 2>/dev/null | wc -l)
+[ "$N" = 0 ] && { echo "[golden] ✘ 语料目录为空：$G/cases/"; exit 2; }
 W=$(mktemp -d); trap 'rm -rf "$W" "$B"/g_*.elf' EXIT
 for t in cc500 minicc; do
   case $t in cc500) bin="$B/hostcc500";; *) bin="$B/hostminicc32";; esac
-  gen "$t" "$bin" > "$W/gold_$t" || { echo "[$t] gen 内部失败"; exit 2; }
+  if ! ( gen "$t" "$bin" > "$W/gold_$t" ); then   # 子壳隔离：gen 内部 exit 2 不再静默终结主脚本（dev 复核 P2-F）
+    { echo "[$t] gen 失败——语料越界/编译不通过（见上；stdout 捕获：)"; cat "$W/gold_$t"; } >&2; exit 2
+  fi
   [ "$(wc -l < "$W/gold_$t")" = "$N" ] || { echo "[$t] 产物行数 $ ≠ 语料 $N —— 有例编译失败"; cat "$W/gold_$t"; exit 2; }
 done
 

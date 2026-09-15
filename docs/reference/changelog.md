@@ -3,6 +3,27 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - 测试基建：外部审计锁与产物基线（PR #155/#156）
+
+**Added**
+
+* **FAST 层 `audit`**（`make test-audit`）：四轮外部审计交付固化为常驻机器锁——
+  cc500 E1-E18 一致性快照 + F-01 行为硬断言×3 / minicc 守卫矩阵 13 钉（arity、八进制、
+  空/贪心 hex、char 限幅、NUL、递归深度、MC-08 重定义+名字冲突三形、守卫文本 census）/
+  cc500 启动不动点 P1==P2（纯宿主 freestanding 回环）
+* **FAST 层 `golden`**（`make test-golden` / `make golden-update`）：双编译器对 7 例
+  共享语料的产物 sha256 清单入库；重构批产物面验收闸，变更走"声明制"
+* **guard-lint**（`tests/guard_diff.sh`，PR/main 直推双覆盖，advisory 起步）：diff 中
+  净消失的守卫身份串（`MC-/CC-/F-.../fail("...")`）须以独占行
+  `GUARD-CHANGE: all|<消息>` 声明（改钉协议可执行化）
+
+**Engineering**
+
+* 改钉协议四件套成为常规动作：E 快照翻正 + 行为硬钉 + golden-update + PR 声明；
+  guard-lint advisory 两周零误报后转阻断（升级路径已注释于 layers.yml）
+
+---
+
 ## [v1.5] - 2026-09-11 · 外部审计 A1 分层整改 + NMI 看门狗 + 编译器修复集
 
 > 09-08~09-11 合并 PR #139~#147。主线：外部审计 A1「总体架构与分层」整改（自检/演示/
