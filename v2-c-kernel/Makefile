@@ -413,6 +413,11 @@ test-rp:
 test-repro:
 	bash tests/repro_bugs.sh
 
+# P0-1 外部审计锁（四轮审计交付固化；只 gate 已修守卫，开放项 XFAIL 告警）。
+# 入 FAST：纯宿主 freestanding，无 QEMU/无 32 位 libc 要求；layers.yml fast job 经 TEST_LAYERS_FAST 单源自动消费。
+test-audit:
+	bash tests/test_audit.sh
+
 # 虚拟 TCP 压力/攻击回归（F3 处理项落点）：脏注入 + 合法业务完整交付。
 # 起服务前端口占用检测，命中即 exit 2（环境病），不误杀他人进程。
 test-tcp-attack:
@@ -450,8 +455,8 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp stack
-TEST_LAYERS_FAST  = host stack
+TEST_LAYERS       = host audit qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp stack
+TEST_LAYERS_FAST  = host stack audit
 TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp
 
 test: $(addprefix test-,$(TEST_LAYERS))
@@ -509,4 +514,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-audit test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
