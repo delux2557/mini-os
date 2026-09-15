@@ -30,7 +30,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
-      - name: make test-fast（host stack 顺序跑）
+      # P0-2 守卫消失审查（advisory：提示不阻断，退出码语义见 tests/guard_diff.sh 头注释）。
+      # PR 正文含 "GUARD-CHANGE:" 声明即豁免——改钉协议的可执行化。
+      - name: guard-lint（守卫消失审查，advisory）
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GUARD_DECL: ${{ github.event.pull_request.body }}
+        run: bash tests/guard_diff.sh "${{ github.event.pull_request.base.sha }}"
+        working-directory: v2-c-kernel
+      - name: make test-fast（host stack audit golden 顺序跑）
         run: make test-fast
         working-directory: v2-c-kernel
       - name: 失败上传日志
