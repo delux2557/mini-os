@@ -24,6 +24,26 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # P0-2 守卫消失审查（轻量、秒级、无工具链需求，advisory 起步）。v3 修正（dev 复核 #156）：
+  #  · 独立 job 挂 ci.yml（本仓 PR+push 双事件既有），不再让 layers.yml 加 push 触发——那会让
+  #    每次合并 main 多烧 14 个 HEAVY 并行 job（成本翻倍）；
+  #  · checkout fetch-depth:0 根治浅克隆 base 不可达（v2 的"响亮地什么也没做"+每次 exit2 批注）；
+  #  · 验收口径=本 job 步骤日志出现真实判定行（非"job 绿"），升级判据：步骤日志连续两周 0 未声明
+  #    exit2 → 摘 continue-on-error 转阻断。
+  guard-lint:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: guard-lint（守卫消失审查，advisory）
+        env:
+          GUARD_DECL: ${{ github.event.pull_request.body }}
+          GUARD_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: bash tests/guard_diff.sh "$GUARD_BASE"
+        working-directory: v2-c-kernel
+
   # 编译硬化门禁（P1）：危险 libc 调用检查——秒级，独立并行 job，最先红绿可见。
   # 不放 make test 前序，避免一条慢链把快门禁拖住。
   lint:

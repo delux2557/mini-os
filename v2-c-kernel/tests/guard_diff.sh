@@ -2,7 +2,7 @@
 # guard_diff.sh — P0-2 守卫消失审查（advisory 起步→稳定后转阻断；dev 复核后 v2）。
 # 检测：PR diff 中**净消失**的守卫身份串——编号标记（MC-/CC-/F-/OBS-/BUG-/TD-）与 fail("<消息>")
 #       字面。同串在 + 行重现（移位/重构）不算消失。
-# 豁免（改钉协议）：独占一行（或 markdown 引用行）的
+# 豁免（改钉协议，双声明源=PR 正文 ∪ 范围内提交信息）：独占一行（容忍 markdown 引用/列表前缀）的
 #       `GUARD-CHANGE: all`            → 全局豁免
 #       `GUARD-CHANGE: <core 消息>`    → 逐条豁免（core=fail(...) 的引号内消息裸串/编号原串）
 # 退出码：0 干净或全豁免；2 未声明的消失 或 base 不可达（浅克隆不再恒绿，dev 复核 P0-B）。
@@ -11,7 +11,11 @@ set -u
 K=$(cd "$(dirname "$0")/.." && pwd); cd "$K" || exit 2
 BASE=${1:-}
 if [ -z "$BASE" ]; then BASE=$(git merge-base origin/main HEAD 2>/dev/null || true); fi
-if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+case "$BASE" in
+  *[!0]*) ;;                       # 非全零，正常审查
+  *) echo "[guard-diff] base 为全零（新建分支首推）——无窗口可审，跳过"; exit 0;;
+esac
+if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
   echo "[guard-diff] ✘ base 不可达（浅克隆？显式传参 BASE 或 fetch 完整历史），拒绝在无审查窗口时给出 ✔"
   exit 2
 fi
@@ -30,10 +34,13 @@ grep -oE "$MARK" "$T/add.txt" | sort -u > "$T/addids"
 printf '_sentinel\n' >> "$T/addids"
 awk 'NR==FNR{a[$0]=1;next}{id=substr($0,index($0," ")+1); if(!(id in a)) print id}' "$T/addids" "$T/delids" | sort > "$T/netgone"
 if [ ! -s "$T/netgone" ]; then echo "[guard-diff] ✔ 无守卫身份串净消失"; exit 0; fi
-DECL="${GUARD_DECL:-}"
-# 只认锚定的声明行：可选引用前缀 ">"，整行仅 GUARD-CHANGE: <payload>（防 PR 正文说明性
-# 提及含 'GUARD-CHANGE: all' 字面而自我全豁免，dev 复核 P1-C）。
-printf '%s\n' "$DECL" | sed -nE 's/^[[:space:]>]*GUARD-CHANGE:[[:space:]]*(.*)$/\1/p' \
+# 声明源双通道（dev 复核 v3：push 事件无 PR 正文——commit message 必须能承载声明，否则
+# 合法退役在 main 直推上"永久红且无法申诉"；PR 侧则正文与提交信息并集）：
+#   GUARD_DECL（CI 注入 PR body，可空） + git log --format=%B BASE..HEAD
+# 只认锚定声明行：允许 markdown 引用/列表前缀（> - *），整行余部=gap payload（防正文说明性
+# 提及自我豁免，dev 复核 P1-C；列表容错为其 P3 项建议采纳）。
+{ printf '%s\n' "${GUARD_DECL:-}"; git log --format=%B "${BASE}..HEAD" 2>/dev/null; } \
+  | sed -nE 's/^[[:space:]]*(>[[:space:]]*|[-*][[:space:]]+)*GUARD-CHANGE:[[:space:]]*(.*)$/\2/p' \
   | sed -E 's/[[:space:]]+$//' > "$T/decls"
 HIT=0; EXEMPT=0
 if grep -qxE 'all' "$T/decls" 2>/dev/null; then
