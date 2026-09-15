@@ -12,24 +12,26 @@ BASE=${1:-}
 if [ -z "$BASE" ]; then BASE=$(git merge-base origin/main HEAD 2>/dev/null || true); fi
 if [ -z "$BASE" ]; then echo "[guard-diff] ✘ 无 base（传参或保证 origin/main 可 merge-base）"; exit 2; fi
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-git diff -U0 "$BASE"...HEAD -- . | grep '^-' | grep -v '^---'   > "$T/del.txt"
-git diff -U0 "$BASE"...HEAD -- . | grep '^+' | grep -v '^+++'   > "$T/add.txt"
+git diff -U0 "$BASE"...HEAD -- . ":(exclude)tests/guard_diff.sh" | grep '^-' | grep -v '^---'   > "$T/del.txt"
+git diff -U0 "$BASE"...HEAD -- . ":(exclude)tests/guard_diff.sh" | grep '^+' | grep -v '^+++'   > "$T/add.txt"
 MARK='(MC-[0-9]+|CC-[0-9]+|F-[0-9]+|OBS-[0-9]+|BUG-[A-Z0-9]+|TD-[0-9]+|fail\("[^"]*"\))'
 grep -oE "$MARK" "$T/del.txt" | sort | uniq -c | sed 's/^ *//' > "$T/delids"
 grep -oE "$MARK" "$T/add.txt" | sort -u > "$T/addids"
-awk 'NR==FNR{a[$0]=1;next}{id=$2; if(!(id in a)) print $1" "id}' "$T/addids" "$T/delids" > "$T/netgone"
+awk 'NR==FNR{a[$0]=1;next}{id=substr($0,index($0," ")+1); if(!(id in a)) print id}' "$T/addids" "$T/delids" | sort > "$T/netgone"
 if [ ! -s "$T/netgone" ]; then echo "[guard-diff] ✔ 无守卫身份串净消失"; exit 0; fi
 DECL="${GUARD_DECL:-}"
 HIT=0; EXEMPT=0
 if printf '%s' "$DECL" | grep -q 'GUARD-CHANGE'; then
-  while read -r n id; do
-    if printf '%s' "$DECL" | grep -q 'GUARD-CHANGE: *all' || printf '%s' "$DECL" | grep -qF -- "${id#fail(}"; then
+  while IFS= read -r id; do
+    core=${id#fail(\"}          # fail("msg") → msg")
+    core=${core%\"\)}            # 再去尾部 ) → msg；非 fail( 串则原样
+    if printf '%s' "$DECL" | grep -qF -- "GUARD-CHANGE: all" || printf '%s' "$DECL" | grep -qF -- "$core"; then
       EXEMPT=$((EXEMPT+1)); continue
     fi
-    printf '  ⚠ 守卫消失 %sx %s —— 未声明\n' "$n" "$id"; HIT=1
+    printf '  ⚠ 守卫消失 %s —— 未声明（补 "GUARD-CHANGE: %s ..."）\n' "$id" "$core"; HIT=1
   done < "$T/netgone"
 else
-  while read -r n id; do printf '  ⚠ 守卫消失 %sx %s —— PR 描述需 "GUARD-CHANGE: <原因>" 声明\n' "$n" "$id"; done < "$T/netgone"; HIT=1
+  while IFS= read -r id; do printf '  ⚠ 守卫消失 %s —— PR 描述需 "GUARD-CHANGE: <原因>" 声明\n' "$id"; done < "$T/netgone"; HIT=1
 fi
 if [ $HIT = 1 ]; then echo "[guard-diff] ✘ 未声明的守卫消失（回退，或按改钉协议声明）"; exit 2; fi
 echo "[guard-diff] ✔ 守卫消失 ${EXEMPT} 项均已按改钉协议声明"
