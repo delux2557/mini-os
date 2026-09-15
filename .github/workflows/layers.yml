@@ -3,12 +3,14 @@ name: Layers
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
 jobs:
   # 读取唯一事实源：v2-c-kernel/Makefile 的 TEST_LAYERS_HEAVY（经 test-layers-heavy 逐行输出）→ JSON 数组供矩阵展开。
   # 层清单只维护在 Makefile，勿在本 workflow 手抄（曾漏加 test-stack）；加层/轻-重划分见 docs/README.md 维护规则。
-  # 秒级层（host/stack）由下方 fast job 顺序跑，不占并行矩阵的 runner。
+  # 秒级层（= Makefile TEST_LAYERS_FAST，勿在此手抄成员名）由下方 fast job 顺序跑，不占并行矩阵 runner。
   load-layers:
     runs-on: ubuntu-24.04
     outputs:
@@ -21,7 +23,7 @@ jobs:
           echo "layers=$(printf '%s' "$L" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read().splitlines()))')" >> "$GITHUB_OUTPUT"
 
   # 工具链包集合单源：消费 Makefile ci-pkgs（含 qemu-user，见 CI_RUNNER_PKGS）。
-  # 秒级层同一 runner 顺序跑（host→stack），避免为它们各开一个 runner 现装一次工具链。
+  # 秒级层同一 runner 顺序跑，避免为它们各开一个 runner 现装一次工具链。
   fast:
     runs-on: ubuntu-24.04
     steps:
@@ -30,14 +32,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
-      # P0-2 守卫消失审查（advisory：提示不阻断，退出码语义见 tests/guard_diff.sh 头注释）。
-      # PR 正文含 "GUARD-CHANGE:" 声明即豁免——改钉协议的可执行化。
+      # P0-2 守卫消失审查（advisory 起步；退出码语义见 tests/guard_diff.sh 头注释）。
+      # dev 复核修正：sha 走 env 注入；浅克隆/base 不可达时脚本 exit 2 不再假绿；push-to-main
+      # 同覆盖（c6c9272 型态恰恰发生在合并后）。升级路径：advisory 两周零误报后摘 continue-on-error。
       - name: guard-lint（守卫消失审查，advisory）
         if: github.event_name == 'pull_request'
         continue-on-error: true
         env:
           GUARD_DECL: ${{ github.event.pull_request.body }}
-        run: bash tests/guard_diff.sh "${{ github.event.pull_request.base.sha }}"
+          GUARD_BASE: ${{ github.event.pull_request.base.sha }}
+        run: bash tests/guard_diff.sh "$GUARD_BASE"
+        working-directory: v2-c-kernel
+      - name: guard-lint（main 直推，advisory）
+        if: github.event_name == 'push'
+        continue-on-error: true
+        env:
+          GUARD_BASE: ${{ github.event.before }}
+        run: bash tests/guard_diff.sh "$GUARD_BASE"
         working-directory: v2-c-kernel
       - name: make test-fast（host stack audit golden 顺序跑）
         run: make test-fast
