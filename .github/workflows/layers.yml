@@ -8,7 +8,7 @@ on:
 jobs:
   # 读取唯一事实源：v2-c-kernel/Makefile 的 TEST_LAYERS_HEAVY（经 test-layers-heavy 逐行输出）→ JSON 数组供矩阵展开。
   # 层清单只维护在 Makefile，勿在本 workflow 手抄（曾漏加 test-stack）；加层/轻-重划分见 docs/README.md 维护规则。
-  # 秒级层（host/stack）由下方 fast job 顺序跑，不占并行矩阵的 runner。
+  # 秒级层（= Makefile TEST_LAYERS_FAST，勿在此手抄成员名）由下方 fast job 顺序跑，不占并行矩阵 runner。
   load-layers:
     runs-on: ubuntu-24.04
     outputs:
@@ -21,7 +21,7 @@ jobs:
           echo "layers=$(printf '%s' "$L" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read().splitlines()))')" >> "$GITHUB_OUTPUT"
 
   # 工具链包集合单源：消费 Makefile ci-pkgs（含 qemu-user，见 CI_RUNNER_PKGS）。
-  # 秒级层同一 runner 顺序跑（host→stack），避免为它们各开一个 runner 现装一次工具链。
+  # 秒级层同一 runner 顺序跑，避免为它们各开一个 runner 现装一次工具链。
   fast:
     runs-on: ubuntu-24.04
     steps:
@@ -30,7 +30,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y $(make -s -C v2-c-kernel ci-pkgs)
-      - name: make test-fast（host stack 顺序跑）
+      - name: make test-fast（host stack audit golden 顺序跑）
         run: make test-fast
         working-directory: v2-c-kernel
       - name: 失败上传日志
