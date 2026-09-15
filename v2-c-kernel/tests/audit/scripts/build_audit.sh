@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_audit.sh — 构建审计环境（hostcc500 + cc500run）：仅需 gcc 支持 -m32 编译，无需 QEMU/32 位 libc
+# build_audit.sh — 构建审计环境：gcc -m32 freestanding（构建需 gcc-multilib 头〔与 test-cc500 同源〕，无需 32 位 libc：自带 crt/start；运行需 ia32 exec 或 qemu-i386，二者具备其一即可）
 # 用法: CC500_SRC=<repo>/v2-c-kernel/tools/cc500 bash build_audit.sh [输出目录]
 set -u
 cd "$(dirname "$0")/.." || exit 1
