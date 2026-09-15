@@ -414,9 +414,24 @@ test-repro:
 	bash tests/repro_bugs.sh
 
 # P0-1 外部审计锁（四轮审计交付固化；只 gate 已修守卫，开放项 XFAIL 告警）。
-# 入 FAST：纯宿主 freestanding，无 QEMU/无 32 位 libc 要求；layers.yml fast job 经 TEST_LAYERS_FAST 单源自动消费。
+# 入 FAST：纯宿主 freestanding（构建需 gcc-multilib，运行 ia32 exec 或 qemu-i386 二选一，与 test-cc500 同源）；
+# layers.yml fast job 经 TEST_LAYERS_FAST 单源自动消费。
 test-audit:
 	bash tests/test_audit.sh
+
+# P0-3 产物基线（audit-gates）：双编译器 corpus 产物 sha256 清单比对；变更须 make golden-update
+# 并在 PR 描述声明（改钉协议）。秒级、纯宿主 → FAST。
+test-golden:
+	bash tests/golden.sh
+
+golden-update:
+	bash tests/golden.sh --update
+
+# P0-2 守卫消失审查（advisory）：diff 中净消失的 MC-/CC-/F-/fail("...") 标记需"GUARD-CHANGE:"声明；
+# CI fast job 以 continue-on-error 步消费（提示不阻断），本地/严格场景用退出码 2。
+GUARD_BASE ?=
+guard-diff:
+	bash tests/guard_diff.sh $(GUARD_BASE)
 
 # 虚拟 TCP 压力/攻击回归（F3 处理项落点）：脏注入 + 合法业务完整交付。
 # 起服务前端口占用检测，命中即 exit 2（环境病），不误杀他人进程。
@@ -455,8 +470,8 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host audit qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp stack
-TEST_LAYERS_FAST  = host stack audit
+TEST_LAYERS       = host audit golden qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp stack
+TEST_LAYERS_FAST  = host stack audit golden
 TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp
 
 test: $(addprefix test-,$(TEST_LAYERS))
@@ -514,4 +529,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-audit test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-audit test-golden golden-update guard-diff test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
