@@ -1568,6 +1568,10 @@ void statement()
   cc_depth = cc_depth + 1;
   if (cc_depth > 512)
     error();               /* OBS-CC-1：块 / if / while 深重入在耗尽栈前被拒绝 */
+  cc_depth = cc_depth - 1;   /* 本分支不递归，先归位（M9f：空语句快速通道） */
+  if (accept(";"))
+    return;                  /* M9f：C 空语句（对齐 minicc；while(x); 等体位可用） */
+  cc_depth = cc_depth + 1;
   if (accept("{")) {
     int n = table_pos;
     int s = stack_pos;
@@ -1578,14 +1582,22 @@ void statement()
     stack_pos = s;
   }
   else if (peek("char") | peek("int")) {
+    /* M9f：局部声明子句表 `int a,b=2;`（对齐 minicc；栈槽逐子句 push） */
+    int dmore;
     type_name();
-    sym_declare(token, 'L', stack_pos);
-    get_token();
-    if (accept("="))
-      promote(expression());
-    expect(";");
-    be_push();
-    stack_pos = stack_pos + 1;
+    dmore = 1;
+    while (dmore) {
+      sym_declare(token, 'L', stack_pos);
+      get_token();
+      if (accept("="))
+	    promote(expression());
+      be_push();
+      stack_pos = stack_pos + 1;
+      if (accept(",") == 0) {
+	expect(";");
+	dmore = 0;
+      }
+    }
   }
   else if (accept("if")) {
     expect("(");
@@ -1894,9 +1906,25 @@ int program()
       error();           /* v0.27b: 缺名字处遇 EOF（畸形输入）直接报错而非死循环 */
     current_symbol = sym_declare_global(token);
     get_token();
-    if (accept(";")) {
-      sym_define_global(current_symbol);
-      emit(4, "\x00\x00\x00\x00");
+    if ((token[0] == 59) | (token[0] == ',') ) {
+      /* M9f：全局声明子句表 `int a,b;`——分隔符驱动（注意本文件被 cc500 自编译，
+       * `|` 非短路，两个 accept 不能连用，先 peek 判形）。无初值纪律不变：逐子句 4 字节零槽。 */
+      int gv;
+      int gmore;
+      gv = current_symbol;
+      gmore = 1;
+      while (gmore) {
+	if (accept(",") == 0) {
+	  expect(";");
+	  gmore = 0;
+	}
+	sym_define_global(gv);
+	emit(4, "\x00\x00\x00\x00");
+	if (gmore) {
+	  gv = sym_declare_global(token);
+	  get_token();
+	}
+      }
     }
     else if (accept("(")) {
       int n = table_pos;
