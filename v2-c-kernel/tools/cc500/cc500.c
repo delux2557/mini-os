@@ -1464,17 +1464,24 @@ void stmt_goto()
   expect(";");
 }
 
-/* 函数体收尾：未定义且被 goto 前向引用过的标签须报错；随后清表（函数级作用域） */
+/* 函数体收尾：未定义且被 goto 前向引用过的标签须报错；随后清表（函数级作用域）。
+ * BUG-076（#161）：记录布局是「名字…NUL | 1B flag | 4B 目标」，锚点 = 名字 NUL 位置；
+ * 本函数旧码从记录**起点**直接读 t+1，读到的是名字第二字符，'u' 判定恒假 → goto 未定义
+ * 标签从不被拒（锚点语义只在 lbl_find/lbl_declare/lbl_def_anchor 里成立，本函数漏了
+ * “先跳到 NUL”这一步）。此处先扫到 NUL（e）再查 flag/target，与其余锚点用法对齐。 */
 void lbl_end()
 {
   int t = 0;
+  int e;
   while (t <= lbl_pos - 1) {
-    if (lbl_tab[t + 1] == 'u') {
-      if (load_int(lbl_tab + t + 2) != 0)
+    e = t;
+    while (lbl_tab[e] != 0)
+      e = e + 1;                     /* e = 名字 NUL：flag 在 e+1、目标在 e+2、下条记录 e+6 */
+    if (lbl_tab[e + 1] == 'u') {
+      if (load_int(lbl_tab + e + 2) != 0)
         error();                     /* 有 goto 指向它却从未定义 */
     }
-    while (lbl_tab[t] != 0) t = t + 1;
-    t = t + 6;
+    t = e + 6;
   }
   lbl_pos = 0;
 }
@@ -1896,15 +1903,21 @@ int stmt_switch()
 int program()
 {
   int current_symbol;
-  /* 首个函数定义时把入口 stub 的 call 重定位到该函数（见上方 M4 说明），
+  /* 入口 stub 的 call 回填：首个函数体一处 + 名为 main 的函数体一处（BUG-077/#162）。
    * 且 program() 结束不放回 0 以告知 main1「至少定义了一个函数」。纯局部即可。 */
   int entry_call_done;
+  int is_main;
   entry_call_done = 0;
+  is_main = 0;
   while (token[0]) {
     type_name();
     if (token[0] == 0)
       error();           /* v0.27b: 缺名字处遇 EOF（畸形输入）直接报错而非死循环 */
     current_symbol = sym_declare_global(token);
+    is_main = 0;
+    if ((token[0] == 'm') & (token[1] == 'a') & (token[2] == 'i'))
+      if ((token[3] == 'n') & (token[4] == 0))
+        is_main = 1;
     get_token();
     if ((token[0] == 59) | (token[0] == ',') ) {
       /* M9f：全局声明子句表 `int a,b;`——分隔符驱动（注意本文件被 cc500 自编译，
@@ -1941,11 +1954,16 @@ int program()
 	accept(","); /* ignore trailing comma */
       }
       if (accept(";") == 0) {
-	if (entry_call_done == 0) {
+	/* BUG-077（#162）：入口 stub 的 call rel32 旧码只在「首个函数体」处回填一次。
+	 * 源里 main 之前的辅助函数体一旦存在，入口就跑那个函数、main 成死代码——
+	 * 实测 `int f(){return 1;}int main(){return f()-1;}` 直接 exit 1，看着像
+	 * 「调用结果进算术即毁」，实为入口选错。此处对名为 main 的函数体**再**回填一次
+	 * （main 在首时与旧码同值），使入口对齐 minicc/gcc 语义（入口=main）；
+	 * 无 main 时保持旧契约（首函数体=入口）——cc500.c 自举正依赖它（首函数 cc500_main）。 */
+	if ((entry_call_done == 0) | (is_main != 0)) {
 	  entry_call_done = 1;
-	  /* 首个函数：把入口 stub 的 call rel32 重定位到该函数起点。codepos-off_entry_next
-	   * 同 be_start 公式（文件偏移 codepos → 目标 vaddr=0x800A0000+codepos，
-	   * call 下一条 0x63=off_entry_next，rel32=codepos-off_entry_next）。 */
+	  /* codepos-off_entry_next 同 be_start 公式（文件偏移 codepos → 目标
+	   * vaddr=0x800A0000+codepos，call 下一条 0x63=off_entry_next）。 */
 	  save_int(code + off_entry_rel32, codepos - off_entry_next);
 	}
 	sym_define_global(current_symbol);
