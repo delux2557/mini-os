@@ -3,6 +3,41 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - cc500 盲区修补：标签终检失效 + 入口选错（#161/#162）
+
+**Fixed**
+
+* **cc500 `lbl_end` 标签终检从未生效（BUG-076/#161）**：标签记录锚点=名字 NUL 位置，而
+  终检从记录**起点**读 flag（读到的是名字第二字符）→ `'u'` 判定恒假，`goto` 未定义标签
+  一路静默放行、产出跳向未知地址的产物。修法：先扫到 NUL 再查 flag/target。
+  旧测试 `t_gundef` 的"应拒"长期由 `done:;` 空体分号走 expression 错路**意外绿**，
+  #160 合法化空语句后伪装脱落、CI 如实报案（本轮审计锁反向价值的第二个实证）。
+* **cc500 入口选错：main 之前的函数体夺走入口（BUG-077/#162）**：入口 stub 的 call rel32
+  只回填「首个函数体」（自举需要：cc500.c 首函数是 `cc500_main` 且无 main），故
+  `int f(){...}int main(){...}` 实际执行 f、main 成死代码——`f()-1` 类程序一律 exit 1，
+  一度被误诊为"函数调用结果进算术就算错"。修法：对名为 `main` 的函数体**再**回填一次
+  入口（无 main 时保留旧契约），入口=main 对齐 minicc/gcc 语义。
+
+**Changed**
+
+* `test_cc500` 新增 T 系列六钉（`t_gosemi`/`t_godef` goto 两侧症状对立、`t_entry1..3`
+  票面三形态）；`t_gundef` 期望回正 rc=1（**这次真由 lbl_end 拦**，非体分号错路）。
+* `mc_matrix` 新增 G4 组钉：编译 rc×2（goto 未定义拒/定义在后不误伤）+ 运行值×4
+  （票面三形态 + 入口判别钉 `int f(){return 7;}int main(){return 0;}`，旧码必红）。
+* `golden` 清单**声明后重生成**：唯一变更 = `g03_call`——全库唯一"函数体在 main 之前"的
+  语料，由**静默错编译**转为可运行正确例（rc=0）；minicc 及其余 6 例零漂移。
+* `docs/reference/bugs.md` 补 BUG-076/BUG-077 条目。
+
+**Engineering**
+
+* 五闸实测：`make test-fast`（host/stack/audit/golden）✔ · cc500 层宿主 92/0 全绿 ·
+  minicc 层 107/0 全绿 · diffsynth（含 cc500 目标）✔ · 启动不动点 P1==P2（48804B）·
+  guard-diff ✔。
+* 教训沉淀：产物哈希基线只锁"字节一致"、**不锁"语义正确"**——`g03_call` 以错编译的产物
+  入了两个大版本的基线而无人察觉；凡"能编译但入口/语义可疑"的语料须另有运行值钉兜底。
+
+---
+
 ## [Unreleased] - 测试基建：外部审计锁与产物基线（PR #155/#156）
 
 **Added**
