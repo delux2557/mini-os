@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 # golden.sh — P0-3++ 产物基线：双编译器对固定语料的 产物 sha256 + 运行 exit 值 双列入库。
-# v2（#163 教训固化）：sha 锁字节、exit 锁语义——"能编但跑错"的语料从此过不了 check；
+# v2（#163 教训固化）：sha 锁字节、exit 列锁语义**变化**（#163 的 g03_call 曾以"静默错编译
+#   但哈希稳定"的产物入基线两个版本）；语义**正确性**的对照仍由 E 套件/diffsynth 的 gcc 列负责。
 #   #160 起语料含 M9c/M9f 形态（g08 子句表/g09 空语句）。
 # 用途：任何重构/修复 PR 的"产物面变化"必须显式——golden-check 红了要么回退，
 #       要么 `make golden-update` 重生成清单并在 PR 描述声明（改钉协议，与 test-audit 同族）。
 # 用法：tests/golden.sh            # 比对（默认）
 #       tests/golden.sh --update   # 重生成清单（输出写到 tests/golden/*.sha256）
 # 依赖：tests/audit 工具链（build_audit.sh 产物，缺失则自动构建）；
-#       运行编译器二进制需 ia32 exec 或 qemu-i386（探测方式与 test_audit.sh 一致，零产物依赖）。
+#       编译与**运行**编译器二进制均需 ia32 exec 或 qemu-i386（探测方式与 test_audit.sh 一致）；
+#       v2 起逐例实跑产物，故运行步统一 `timeout $RUN_TIMEOUT`——语料里出现死循环/长跑
+#       即判红而非挂死 FAST 层（与 verify_findings 的 timeout 10 惯例对齐）。
 set -u
 K=$(cd "$(dirname "$0")/.." && pwd)             # v2-c-kernel
 A=$K/tests/audit; B=$A/bin; G=$K/tests/golden
+RUN_TIMEOUT=10
 export CC500_SRC=$K/tools/cc500 MINICC_SRC=$K/tools/minicc
 [ -x "$B/hostcc500" ] && [ -x "$B/hostminicc32" ] || { bash "$A/scripts/build_audit.sh" >/dev/null || { echo "BUILD FAIL"; exit 2; }; }
 
@@ -22,17 +26,23 @@ if [ "$rc" = 126 ] && command -v qemu-i386 >/dev/null 2>&1; then
 fi
 [ "$rc" = 126 ] && [ -z "$RUM" ] && { echo "需要 ia32 exec 或 qemu-i386"; exit 2; }
 RUNX(){ if [ -n "$RUM" ]; then "$RUM" "$@"; else "$@"; fi; }
+# 运行产物（v2）：timeout 必须**包在 RUM 外层**（RUNX 只能把 RUM 放最前，故另立一支），
+# 否则 `qemu-i386 timeout …` 会把宿主 timeout 当 guest 程序去找。
+RUNA(){ if [ -n "$RUM" ]; then timeout "$RUN_TIMEOUT" "$RUM" "$@"; else timeout "$RUN_TIMEOUT" "$@"; fi; }
 
 gen(){ # gen <tag> <compiler> <runner> → "hash  exit  case" 行
-  # #163 教训落地：sha 只锁"字节一致"，运行值列锁"能编≠能对"（g03_call 曾以错编译入基线两版）。
+  # #163 教训落地：sha 锁"字节一致"、exit 列锁"能编≠跑对"的**变化面**（g03_call 曾以错编译入基线两版）。
   local tag=$1 bin=$2 runr=$3 c f ex
   for c in "$G"/cases/*.c; do
     f="g_$tag.elf"
     if ! RUNX "$bin" "$c" "$B/$f" >/dev/null 2>&1; then echo "[$tag] 编译失败: $(basename "$c")"; exit 2; fi
-    ex=-
-    if [ -n "$runr" ]; then
-      ( cd "$B" && RUNX "$runr" "$f" >/dev/null 2>&1 ); ex=$?
-    fi
+    ( cd "$B" && RUNA "$runr" "$f" >/dev/null 2>&1 ); ex=$?
+    # 124/126/127 = "没能跑起来"（超时 / 运行器不可执行），不是真实语义值：
+    # 一律判红而非入基线——否则 --update 会把环境病烘进清单，此后 check 反而恒绿。
+    case $ex in
+      124)     echo "[$tag] 运行超时(${RUN_TIMEOUT}s): $(basename "$c")"; exit 2;;
+      126|127) echo "[$tag] 运行器不可执行(rc=$ex): $(basename "$c")"; exit 2;;
+    esac
     printf '%s  %s  %s\n' "$(sha256sum "$B/$f" | cut -d' ' -f1)" "$ex" "$(basename "$c")"
   done
 }
@@ -62,5 +72,5 @@ for t in cc500 minicc; do
     printf '  %-8s GOLDEN DRIFT ↓（回退，或声明后 make golden-update）\n' "$t"; head -12 "$W/$t.diff" | sed 's/^/    /'; FAIL=1
   fi
 done
-[ $FAIL = 0 ] && echo "[golden] ✔ 双编译器产物与清单逐哈希一致" || echo "[golden] ✘ 见上"
+[ $FAIL = 0 ] && echo "[golden] ✔ 双编译器产物 sha256 + 运行值 与清单逐行一致" || echo "[golden] ✘ 见上"
 exit $FAIL
