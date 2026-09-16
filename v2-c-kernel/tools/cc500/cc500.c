@@ -112,6 +112,7 @@ void get_token()
       nextc = getchar();
     token_len = 0;
     while ((('a' <= nextc) & (nextc <= 'z')) |
+	   (('A' <= nextc) & (nextc <= 'Z')) |   /* M9e：大写标识符/标签（对齐 minicc 子集） */
 	   (('0' <= nextc) & (nextc <= '9')) | (nextc == '_'))
       takechar();
     /* M2：operator 词法精确化——原 while 把 <>=|&! 集合连续吞并，导致 "=!" 被合成
@@ -183,6 +184,14 @@ void get_token()
 	while (str_done == 0) {
 	  if (nextc == 0 - 1) str_done = 1;
 	  else if (nextc == 39) str_done = 1;
+	  else if (nextc == 92) {
+	    /* M9e-fix：反斜杠转义连被转义字符一起吞（含 '\'' 的 '），否则
+	     * '\'' 在第二个 ' 处被误判为定界符，token 残缺致 REJ——与 minicc
+	     * decode_escape 的 \' 支持对齐（#159 复核实测证）。 */
+	    takechar();
+	    if (nextc == 0 - 1) str_done = 1;
+	    else takechar();
+	  }
 	  else takechar();
 	}
 	if (nextc == 39) takechar();
@@ -200,7 +209,13 @@ void get_token()
       }
       else if (nextc == '/') {
 	takechar();
-	if (nextc == '*') {
+	if (nextc == '/') {
+	  /* M9e：// 行注释（对齐 minicc；EOF 守卫同 F-3 形态） */
+	  while ((nextc != 10) & (nextc != 0 - 1))
+	    nextc = getchar();
+	  w = 1;
+	}
+	else if (nextc == '*') {
 	  nextc = getchar();
 	  /* v0.32 BUG-048：块注释未闭合读至 EOF 死循环，加 EOF 守卫（复用 str_done 标志）。 */
 	  str_done = 0;
@@ -526,13 +541,15 @@ int primary_expr()
      * 0x 前缀按下述 hex 循环（0-9 a-f 逐位、左移 4），否则走原十进制路径
      * （含 BUG-049 的逐字符校验）。原十进制路径字节/语义零变化；
      * 非法 hex 串（0x1z、0x-1）由 error() 拒绝，不静默算错。 */
-    if ((token[0] == '0') & (token[1] == 'x')) {
+    if ((token[0] == '0') & ((token[1] == 'x') | (token[1] == 'X'))) {   /* M9e */
       i = 2;
       while (token[i]) {
 	if (('0' <= token[i]) & (token[i] <= '9'))
 	  n = (n << 4) + token[i] - '0';
 	else if (('a' <= token[i]) & (token[i] <= 'f'))
 	  n = (n << 4) + token[i] - 'a' + 10;
+	else if (('A' <= token[i]) & (token[i] <= 'F'))
+	  n = (n << 4) + token[i] - 'A' + 10;   /* M9e */
 	else
 	  error();
 	i = i + 1;
@@ -554,7 +571,8 @@ int primary_expr()
     save_int(code + codepos - 4, n);
     type = 3;
   }
-  else if (('a' <= token[0]) & (token[0] <= 'z')) {
+  else if ((('a' <= token[0]) & (token[0] <= 'z')) |
+	   (('A' <= token[0]) & (token[0] <= 'Z'))) {   /* M9e 大写 ident/标签 */
     sym_get_value(token);
     type = 2;
   }
@@ -563,10 +581,49 @@ int primary_expr()
     if (peek(")") == 0)
       error();
   }
-  else if ((token[0] == 39) & (token[1] != 0) &
-	   (token[2] == 39) & (token[3] == 0)) {
+  else if ((token[0] == 39) & (token[1] != 0)) {
+    /* M9e：字符字面量转义——集与 minicc decode_escape 对齐：\n(10) \t(9) \0 \\ " '
+     * 透传同 minicc；\x 贪心 hex 按 char 宽截断；未闭合/非法位拒（宁拒不坑）。 */
+    int cv;
+    int j;
+    if ((token[2] == 39) & (token[3] == 0))
+      cv = token[1];
+    else if ((token[1] == 92) & (token[3] == 39) & (token[4] == 0)) {
+      cv = token[2];
+      if (cv == 'n') cv = 10;
+      else if (cv == 't') cv = 9;
+      else if (cv == '0') cv = 0;
+      else if (cv == 92) cv = 92;   /* \\ 自身即值 */
+      else if (cv == 34) cv = 34;   /* \" 自身即值 */
+      else if (cv == 39) cv = 39;   /* \' 自身即值 */
+      else if (cv == 'x') error();
+      /* M9e-fix：未知转义（如 \z）不再透传——minicc decode_escape 一律
+       * fail("bad escape")，cc500 同拒（宁拒不坑；#159 复核实测 minicc 拒而
+       * cc500 透传=静默分歧，方向过宽）。 */
+      else error();
+    }
+    else if ((token[1] == 92) & (token[2] == 'x') & (token[3] != 0)) {
+      cv = 0;
+      j = 3;
+      while (((token[j] != 39) | (token[j+1] != 0)) & (j < 40)) {
+	if ((token[j] >= '0') & (token[j] <= '9'))
+	  cv = (cv << 4) + token[j] - '0';
+	else if ((token[j] >= 'a') & (token[j] <= 'f'))
+	  cv = (cv << 4) + token[j] - 'a' + 10;
+	else if ((token[j] >= 'A') & (token[j] <= 'F'))
+	  cv = (cv << 4) + token[j] - 'A' + 10;
+	else
+	  error();
+	j = j + 1;
+      }
+      if ((token[j] != 39) | (token[j+1] != 0))
+	error();
+      cv = cv & 255;
+    }
+    else
+      error();
     emit(5, "\xb8...."); /* mov $x,%eax */
-    save_int(code + codepos - 4, token[1]);
+    save_int(code + codepos - 4, cv);
     type = 3;
   }
   else if (token[0] == '"') {
@@ -1471,13 +1528,15 @@ int sw_const()
   if (('0' <= token[0]) & (token[0] <= '9')) {
     n = 0;
     j = 0;
-    if ((token[0] == '0') & (token[1] == 'x')) {
+    if ((token[0] == '0') & ((token[1] == 'x') | (token[1] == 'X'))) {   /* M9e */
       j = 2;
       while (token[j]) {
         if (('0' <= token[j]) & (token[j] <= '9'))
           n = (n << 4) + token[j] - '0';
         else if (('a' <= token[j]) & (token[j] <= 'f'))
           n = (n << 4) + token[j] - 'a' + 10;
+        else if (('A' <= token[j]) & (token[j] <= 'F'))
+          n = (n << 4) + token[j] - 'A' + 10;   /* M9e */
         else
           error();
         j = j + 1;
@@ -1593,7 +1652,8 @@ void statement()
     /* M11：标签定义 = 标识符紧跟 ':'（不隔空白）。可作前向 goto 目标，定义处
      * 沿挂起链表回填全部前向引用；非标签的标识符或非标识符起头走表达式语句。 */
     if ((token[0] == '_') |
-        (('a' <= token[0]) & (token[0] <= 'z'))) {
+        (((token[0] >= 'a') & (token[0] <= 'z')) |
+         ((token[0] >= 'A') & (token[0] <= 'Z')))) {   /* M9e */
       if (nextc == ':') {
 	lbl_define();
 	get_token();               /* 吃掉标签名 */
