@@ -64,6 +64,20 @@ M MC-08-函数重定义拒      1 'int f(){return 1;}int f(){return 2;}int main(
 M 冲突钉·变量先行同名函数 1 'int a;int a(){return 1;}int main(){int x;x=2;return x;}'
 M 冲突钉·函数先行同名变量 1 'int a(){return 1;}int a;int main(){int x;x=2;return x;}'
 M 冲突钉·原型先行同名变量 1 'int a();int a;int main(){int x;x=2;return x;}'
+# ── G2：cc500 词法族（M9e 大写标识符/hex/标签、字符转义、// 注释；全走 RUNX）。
+#     值探针编译+运行双验（与 verify_findings 的展示级断言互补，此处分身 fast 硬门）──
+GG2(){ # GG2 <名> <期望exit> <源码>
+  printf '%s\n' "$3" > "$W/g2.c"
+  if ! RUNX "$B/hostcc500" "$W/g2.c" "$W/g2.elf" >/dev/null 2>&1; then bad "$1" "cc500 拒编"; return; fi
+  ( cd "$W" && RUNX "$B/cc500run" g2.elf >/dev/null 2>&1 ); local rc=$?
+  if [ "$rc" = "$2" ]; then ok "$1"; else bad "$1" "exit=$rc 期望=$2"; fi; }
+GG2 G2-大写ident值         0 'int main(){int Counter;Counter=5;return Counter-5;}'
+GG2 G2-大写hex值          0 'int main(){int a;a=0x1F;return a-31;}'
+GG2 G2-大写标签循环        0 'int main(){int i;i=0;L:i=i+1;if(i<3)goto L;return i-3;}'
+GG2 G2-char-换行值        0 "int main(){char c;c='\n';return c-10;}"
+GG2 G2-x转义值            0 "int main(){char c;c='\x41';return c-65;}"
+GG2 G2-行注释在尾          0 'int main(){int x;x=1;return x-1;} //trailing'
+# 反例由 GG1(编译rc) 覆盖，此处不重复
 # ── 守卫行 census（第二道保险：整段消失型；阈值=实测留 ~4 行余量）──
 n=$(grep -oE 'octal literals not supported|NUL byte in source|arg count mismatch|nesting too deep|fail\("redefined"\)' \
     "$(dirname "$0")/../../../tools/minicc/minicc.c" "$(dirname "$0")/../../../tools/minicc/minicc_self.c" 2>/dev/null | wc -l)
