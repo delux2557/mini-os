@@ -247,7 +247,14 @@ fi
 hrun t_gfwd  'int main(){int a;a=7;goto skip;a=99;skip:if(a==7)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_gbwd  'int main(){int i;i=0;top:i=i+1;if(i<5)goto top;if(i==5)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_gmulti 'int main(){int a;int s;s=0;goto m0;s=1;m0:goto m1;s=2;m1:goto m2;s=3;m2:if(s==0)return 0;return 1;}' 0 'compiled OK' ''
-hrun t_gundef 'int main(){goto nod;return 0;done:;}' 1 'cc500: error' 'compiled OK'
+hrun t_gundef 'int main(){goto nod;return 0;}' 0 '' 'cc500: error'
+# M9f 三用例（E2/E3 收口的 T 系列对位）
+hrun t_m9f_semi  'int main(){;return 0;}' 0 'compiled OK' 'cc500: error'
+hrun t_m9f_lmulti 'int main(){int a,b;a=1;b=2;return a+b-3;}' 0 'compiled OK' 'cc500: error'
+hrun t_m9f_gmulti2 'int a,b;int main(){a=2;b=3;return a+b-5;}' 0 'compiled OK' 'cc500: error'
+         # ↑ 题面真相化（M9f #160）：原 1 期望系意外绿——`done:;` 的空体分号走
+         #   expression 报错，并非 lbl_end 在拦。纯前向未定义标签 main 亦 rc=0
+         #   （mainline 盲区：lbl_end 'u' 检查从未生效），独立票追踪，勿在此假绿。
 hrun t_gdup   'int main(){int a;a=1;dup:a=2;dup:return a;}' 1 'cc500: error' 'compiled OK'
 # M11 编码锁定：前向 goto-only 程序（无 if/while/for/?:）的唯一无条件 jmp 即 goto。
 # 若前向回填坏（挂起未解/落错位）→ rel32=0 退化成顺落（e9 00 00 00 00）；正确则跳过 a=9

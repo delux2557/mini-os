@@ -78,6 +78,12 @@ GG2 G2-char-换行值        0 "int main(){char c;c='\n';return c-10;}"
 GG2 G2-x转义值            0 "int main(){char c;c='\x41';return c-65;}"
 GG2 G2-行注释在尾          0 'int main(){int x;x=1;return x-1;} //trailing'
 # 反例由 GG1(编译rc) 覆盖，此处不重复
+# ── G3：cc500 空语句/声明子句表（M9f；含运行值）──
+GG2 G3-空语句体            0 'int main(){;return 0;}'
+GG2 G3-局部子句表值        0 'int main(){int a,b;a=1;b=2;return a+b-3;}'
+GG2 G3-局部初值依赖前子句  0 "int main(){int a=1,b=a+1;return b-2;}"
+GG2 G3-全局子句表          0 'int a,b;int main(){a=2;b=3;return a+b-5;}'
+GG2 G3-块内空语句          0 'int main(){int a=1;{;};return a-1;}'
 # ── 守卫行 census（第二道保险：整段消失型；阈值=实测留 ~4 行余量）──
 n=$(grep -oE 'octal literals not supported|NUL byte in source|arg count mismatch|nesting too deep|fail\("redefined"\)' \
     "$(dirname "$0")/../../../tools/minicc/minicc.c" "$(dirname "$0")/../../../tools/minicc/minicc_self.c" 2>/dev/null | wc -l)
