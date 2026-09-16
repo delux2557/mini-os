@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# golden.sh — P0-3 产物基线清单（audit-gates）：双编译器对固定语料的产物 sha256 入库。
+# golden.sh — P0-3++ 产物基线：双编译器对固定语料的 产物 sha256 + 运行 exit 值 双列入库。
+# v2（#163 教训固化）：sha 锁字节、exit 锁语义——"能编但跑错"的语料从此过不了 check；
+#   #160 起语料含 M9c/M9f 形态（g08 子句表/g09 空语句）。
 # 用途：任何重构/修复 PR 的"产物面变化"必须显式——golden-check 红了要么回退，
 #       要么 `make golden-update` 重生成清单并在 PR 描述声明（改钉协议，与 test-audit 同族）。
 # 用法：tests/golden.sh            # 比对（默认）
@@ -21,12 +23,17 @@ fi
 [ "$rc" = 126 ] && [ -z "$RUM" ] && { echo "需要 ia32 exec 或 qemu-i386"; exit 2; }
 RUNX(){ if [ -n "$RUM" ]; then "$RUM" "$@"; else "$@"; fi; }
 
-gen(){ # gen <tag> <compiler> → "hash  case" 行
-  local tag=$1 bin=$2 c f
+gen(){ # gen <tag> <compiler> <runner> → "hash  exit  case" 行
+  # #163 教训落地：sha 只锁"字节一致"，运行值列锁"能编≠能对"（g03_call 曾以错编译入基线两版）。
+  local tag=$1 bin=$2 runr=$3 c f ex
   for c in "$G"/cases/*.c; do
-    f=$B/g_$tag.elf
-    if ! RUNX "$bin" "$c" "$f" >/dev/null 2>&1; then echo "[$tag] 编译失败: $(basename "$c")"; exit 2; fi
-    printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$(basename "$c")"
+    f="g_$tag.elf"
+    if ! RUNX "$bin" "$c" "$B/$f" >/dev/null 2>&1; then echo "[$tag] 编译失败: $(basename "$c")"; exit 2; fi
+    ex=-
+    if [ -n "$runr" ]; then
+      ( cd "$B" && RUNX "$runr" "$f" >/dev/null 2>&1 ); ex=$?
+    fi
+    printf '%s  %s  %s\n' "$(sha256sum "$B/$f" | cut -d' ' -f1)" "$ex" "$(basename "$c")"
   done
 }
 A1=${1:-}; MODE=${A1#--}; MODE=${MODE:-check}
@@ -34,8 +41,9 @@ N=$(ls "$G"/cases/*.c 2>/dev/null | wc -l)
 [ "$N" = 0 ] && { echo "[golden] ✘ 语料目录为空：$G/cases/"; exit 2; }
 W=$(mktemp -d); trap 'rm -rf "$W" "$B"/g_*.elf' EXIT
 for t in cc500 minicc; do
-  case $t in cc500) bin="$B/hostcc500";; *) bin="$B/hostminicc32";; esac
-  if ! ( gen "$t" "$bin" > "$W/gold_$t" ); then   # 子壳隔离：gen 内部 exit 2 不再静默终结主脚本（dev 复核 P2-F）
+  case $t in cc500) bin="$B/hostcc500"; runr="$B/cc500run";; *) bin="$B/hostminicc32"; runr="$B/runmin32";; esac
+  # 三参 gen（编译器+runner）；子壳隔离：gen 内 exit 2 不静默杀主脚本（P2-F 修复保持）
+  if ! ( gen "$t" "$bin" "$runr" > "$W/gold_$t" ); then
     { echo "[$t] gen 失败——语料越界/编译不通过（见上；stdout 捕获：)"; cat "$W/gold_$t"; } >&2; exit 2
   fi
   [ "$(wc -l < "$W/gold_$t")" = "$N" ] || { echo "[$t] 产物行数 $ ≠ 语料 $N —— 有例编译失败"; cat "$W/gold_$t"; exit 2; }
