@@ -203,6 +203,12 @@ void get_token()
 	while (str_done == 0) {
 	  if (nextc == 0 - 1) str_done = 1;
 	  else if (nextc == '"') str_done = 1;
+	  else if (nextc == 92) {
+	    /* M9g：反斜杠连吞（char 环 92 分支的对偶）——否则 \\\" 的转义引号被误判闭合 */
+	    takechar();
+	    if (nextc != 0 - 1)
+	      takechar();
+	  }
 	  else takechar();
 	}
 	if (nextc == '"') takechar();
@@ -630,37 +636,62 @@ int primary_expr()
     int i = 0;
     int j = 1;
     int k;
+    int nb;
     /* v0.32 F-3：解码时对 token 加 NUL 守卫——原 `while(token[j]!='"')` 无终点保护，
      * 越过 token 尾部 NUL 越界读直到堆里偶遇 '"'，且 token[i]= 写越界砸 brk arena。
      * 命中 NUL（EOF 前未闭合）→ 干净报错而非自噬。 */
+    /* M9g：字符串转义与 minicc decode_escape 全集合对齐——\n \t \0 \\ " ' 与
+     * \x 贪心 hex（≤7 位、&0xFF char 截断，MC-08#5 同法）；未知转义不再存原文，拒。
+     * 红线：既有 \xNN/\n/\t 解码产物逐字节不变（golden 9→13 例时旧例哈希必须不动）。 */
     while ((token[j] != '"') & (token[j] != 0)) {
-      if ((token[j] == 92) & (token[j + 1] == 'x')) {
-	if (token[j + 2] <= '9')
-	  k = token[j + 2] - '0';
-	else
-	  k = token[j + 2] - 'a' + 10;
-	k = k << 4;
-	if (token[j + 3] <= '9')
-	  k = k + token[j + 3] - '0';
-	else
-	  k = k + token[j + 3] - 'a' + 10;
-	token[i] = k;
-	j = j + 4;
-      }
-      /* v0.32 F-1：\n / \t 常规转义解码（此前只解 \xNN，故源码一律写 \x0a） */
-      else if ((token[j] == 92) & (token[j + 1] == 'n')) {
-	token[i] = 10;
-	j = j + 2;
-      }
-      else if ((token[j] == 92) & (token[j + 1] == 't')) {
-	token[i] = 9;
-	j = j + 2;
-      }
-      else {
+      if (token[j] != 92) {
 	token[i] = token[j];
+	i = i + 1;
 	j = j + 1;
       }
-      i = i + 1;
+      else if (token[j + 1] == 'n') {
+	token[i] = 10;
+	i = i + 1;
+	j = j + 2;
+      }
+      else if (token[j + 1] == 't') {
+	token[i] = 9;
+	i = i + 1;
+	j = j + 2;
+      }
+      else if (token[j + 1] == '0') {
+	token[i] = 0;
+	i = i + 1;
+	j = j + 2;
+      }
+      else if ((token[j + 1] == 92) | (token[j + 1] == 34) | (token[j + 1] == 39)) {
+	token[i] = token[j + 1];
+	i = i + 1;
+	j = j + 2;
+      }
+      else if (token[j + 1] == 'x') {
+	j = j + 2;
+	k = 0;
+	nb = 0;
+	while (((token[j] >= '0') & (token[j] <= '9')) | ((token[j] >= 'a') & (token[j] <= 'f')) | ((token[j] >= 'A') & (token[j] <= 'F'))) {
+	  if ((token[j] >= '0') & (token[j] <= '9'))
+	    k = (k << 4) + token[j] - '0';
+	  else if ((token[j] >= 'a') & (token[j] <= 'f'))
+	    k = (k << 4) + token[j] - 'a' + 10;
+	  else
+	    k = (k << 4) + token[j] - 'A' + 10;
+	  nb = nb + 1;
+	  if (nb > 7)
+	    error();
+	  j = j + 1;
+	}
+	if (nb == 0)
+	  error();
+	token[i] = k & 255;
+	i = i + 1;
+      }
+      else
+	error();
     }
     if (token[j] != '"') {
       sys_print("cc500: bad string\x0a");
