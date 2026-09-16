@@ -309,7 +309,7 @@ else echo "[FAIL] int g[0x10] 产物 p_filesz=${FSZ:-?}（十进制环未修）(
 
 echo "== [3/4] guest：micc 编译并运行（return code 语义） =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
-    if ! make BUILD="$BUILD" >/dev/null 2>&1; then echo "[FAIL] 内核构建失败"; exit 1; fi
+    if ! make BUILD="$BUILD" >"$BUILD/build.log" 2>&1; then echo "[FAIL] 内核构建失败"; exit 1; fi
     LOG="$BUILD/minicc_guest.log"; TIN="$BUILD/minicc_in.fifo"; TOUT="$BUILD/minicc_out.fifo"
     QPID=""; CAT_PID=""; GFAIL=0
     cleanup() { exec 9>&- 2>/dev/null || true; [ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true; [ -n "$CAT_PID" ] && kill "$CAT_PID" 2>/dev/null || true; rm -f "$TIN" "$TOUT"; }
