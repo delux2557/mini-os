@@ -46,6 +46,10 @@ M  M7b-指针子句接受        0 'int main(){int* p,q;p=0;q=3;return q-3;}'
 M  M7b-空语句接受          0 'int main(){int a; ;return a;}'
 M  M7b-全局子句表接受      0 'int a[3],b=7;int main(){return b-7;}'
 M  M7b-子句内函数声明拒    1 'int f(int a){return a;}int g(),x;'
+# ── 自举输入纪律钉：minicc_self.c 必须落在 minicc 自己的可编译子集内（P1 构建=
+#    hostminicc 编它；#157 CI 实锤 ternary 越界后补，本地无法执行 P1 时这是唯一早警）──
+S1SRC="$(cd "$(dirname "$0")/../../.." && pwd)/tools/minicc/minicc_self.c"
+"$H" "$S1SRC" "$(mktemp -d)/s1.elf" >/dev/null 2>&1 && ok "S1-self源在minicc子集内(P1可构建)" || bad "S1-self源越出minicc子集" "P1 构建将失败——查 minicc_self.c 是否引入 host-only 语法(?:) 等"
 # ── MC-08 末角已随上游收口（794a49b：parse 期 defined 标记）→ 原 XFAIL 翻 PASS 钉 ──
 # 说明：heavy 层 test_minicc.sh:224-226 已有同形断言（QEMU 路径）；此处为 FAST 宿主层等价钉，
 # 两层运行时不同（freestanding 构建 vs in-guest），双保险属 repo 既有分层风格。
