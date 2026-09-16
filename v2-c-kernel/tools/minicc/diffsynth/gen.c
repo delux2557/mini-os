@@ -23,7 +23,8 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
        F_LOGIC=1<<4, F_IF=1<<5, F_WHILE=1<<6, F_FOR=1<<7, F_BIT=1<<8,
        F_GLOBAL=1<<9, F_ARRAY=1<<10, F_PTR=1<<11, F_FUNC=1<<12,
        F_MOD=1<<13, F_NEG=1<<14, F_CHAR=1<<15, F_SUGAR=1<<16,
-       F_DO=1<<17, F_BRK=1<<18, F_CNT=1<<19 };   /* 循环控制：do/break/continue（仅 minicc） */
+       F_DO=1<<17, F_BRK=1<<18, F_CNT=1<<19,
+       F_LEX=1<<20 };   /* 词法族(M9c/e/f/g)：大写名/子句表/空语句/大小写混hex/转义串；仅 minicc+cc500 双收时入网 */
 /* 评审 P1：F_MOD（% idiv+取余发射路径）、F_NEG（一元负号）显式入网；
  * `<<` 有意排除——有符号左移溢出是 UB，与无 UB 三纪律冲突（评审亦认可刻意排除）。
  * F_CHAR（评审 §5 类型面盲区）：char 变量/char 数组/字符串定点读取入网——
@@ -33,12 +34,15 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
  * 累乘会让值域逃逸有符号溢出）。值被丢弃的语句态 ++/-- 也够覆盖 emit 路径。
  * F_DO/F_BRK/F_CNT（循环控制）：do-while + break/continue 模板，_d/d0 限幅保终止；minicc 与
  * cc500（M1/M5 已支持）双入网。循环计数器一律非下划线名（cc500 词法不认下划线开头标识符）。 */
-#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC|F_MOD|F_NEG|F_CHAR|F_SUGAR|F_DO|F_BRK|F_CNT)
+#define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC|F_MOD|F_NEG|F_CHAR|F_SUGAR|F_DO|F_BRK|F_CNT|F_LEX)
 /* cc500 能力集（2026-09-06 M1-M6 实测校准：hostcc 探测 rc——for / do-while / break / continue、
- * 位运算 & | ^ >> ~、一元 - ! ~、% 现均支持；仍缺数组声明 / 一元 * 与 & / 词法不认大写标识符
- * （global 名被生成器用大写 G，cc500 拒）/ ++ -- 与 /= 复合 / char 数组与 deref 形态。
- * 故 cc500 不开 F_GLOBAL/F_ARRAY/F_PTR/F_CHAR/F_SUGAR；见 docs/design/minicc-v3-后续任务.md 任务4. */
-#define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT)
+ * 位运算 & | ^ >> ~、一元 - ! ~、% 现均支持；M9c/e/f/g 之后大写标识符/混排 hex/子句表/
+ * 转义串已闭合 → F_GLOBAL(G%d 命名)随 F_LEX 入网 cc500；仍缺 数组声明 / 一元 * 与 & /
+ * 指针下标(#165) / ++-- 与复合赋值 / char 数组——故 F_ARRAY/F_PTR/F_CHAR/F_SUGAR 维持关。
+ * 见 docs/design/minicc-v3-后续任务.md 任务4。 */
+/* P0-6 更新：M9e 已补大写标识符词法，cc500 的 F_GLOBAL(G%d 命名)与全局子句表解禁；
+ * 仍缺 deref/数组下标写/char 数组(#165)——F_ARRAY/F_PTR/F_CHAR/F_SUGAR 维持关。 */
+#define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT|F_GLOBAL|F_LEX)
 
 static int g_caps;
 static int has(int f){ return g_caps & f; }
@@ -56,8 +60,20 @@ static unsigned used_flags;
 #define ASZ  5          /* 数组容量（下标 0..ASZ-1，指针解引用不越界） */
 /* 字符串池覆盖：定点下标 `*("lit"+k)`（k 为编译期常量 < len 必有界无 UB）。
  * 实测 minicc 接受 `*("lit"+k)`，但**不支持** char* 指针下标语法 `s[i]` → 用 deref 形式。 */
-static const char *STRS[] = {"ab","xy","qwerty","hello","zap","mnpo"};
+/* P0-6：转义字面量入池（M9g 域）——src=进源码的转义形，dlen=解码后字节数；
+ * 新 3 条专测 \n 缩位、\" 透传、\\ 连吞后的池偏移与 k 界正确性。 */
+static const struct { const char *src; int dlen; } STRS[] = {
+  {"ab",2},{"xy",2},{"qwerty",6},{"hello",5},{"zap",3},{"mnpo",4},
+  {"ab",2},{"xy",2},{"qwerty",6},{"hello",5},{"zap",3},{"mnpo",4},
+  {"a\\nb",3},{"q\\\"z",3},{"\\x41z",2}};
 #define NSTRS ((int)(sizeof STRS/sizeof STRS[0]))
+/* P0-6+（复核补正）：转义**全家族**的 deref-free 采样池——每例程序无条件发射一次
+ * "char *E%d; E%d=<转义串>;"。动机（复核实测）：E_STR 只读形需 deref(k)，而 cc500 无 deref
+ * 且 F_CHAR 对 cc500 关闭 ⇒ 旧网在 cc500 目标上 96/96 样本**零字符串字面量**，恰好漏掉
+ * M9g（cc500 侧 \" 曾致拒编）这一类 acceptance 级缺陷。四条分别对应 M9g 四类转义：
+ * \n 缩位 / \" 连吞（曾拒编）/ \x 贪心 / \\ 连吞。双编译器均可解析此形态（无 deref）。 */
+static const char *ESCS[] = {"a\\nb","q\\\"z","\\x41z","a\\\\b"};
+#define NESCS ((int)(sizeof ESCS/sizeof ESCS[0]))
 static char varnames[MAXV][4];
 static int nvars, ng, na, npa, nf, nc, nca;
 
@@ -86,7 +102,7 @@ static const char *pick_lval(void){ return lvals[rndi(0,nlv-1)]; }
 static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
     enum { E_CON,E_VAR,E_GVAR,E_IDX,E_DREF,E_CALL,
            E_ADD,E_SUB,E_MUL,E_DIV,E_MOD,E_NEG,E_CMP,E_LOG,E_AND,E_OR,E_XOR,E_SHR,E_NOT,
-           E_CVAR,E_CIDX,E_STR };
+           E_CVAR,E_CIDX,E_STR, E_HEXU };   /* P0-6：E_HEXU=大小写混排 hex（M9c/e） */
     enum { MAXDEPTH=4 };
     if(depth>=MAXDEPTH){
         int c=rndi(1,100); sprintf(dst,"%d",c); *lo=*hi=c; return;
@@ -98,6 +114,7 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
     if(has(F_ARRAY)&&na>0)      picks[np++]=E_IDX;
     if(has(F_PTR)  && npa>0)    picks[np++]=E_DREF;
     if(has(F_FUNC) && nf>0)     picks[np++]=E_CALL;
+    if(has(F_LEX))              picks[np++]=E_HEXU;
     if(has(F_CHAR)){            /* 只读 char 源（见 emit_program，不作文写目标） */
         if(nc>0)  picks[np++]=E_CVAR;
         if(nca>0) picks[np++]=E_CIDX;
@@ -126,8 +143,13 @@ static void expr_gen(char *dst,int depth,long *lo,long *hi,int suppress_div){
      * 实际运行时值域由初值限定——ca 初值 rndi(0,127)、STRS 全 ASCII<128（emit_program），
      * 故 char 恒 0..127，与 gcc signed char 参考一致（无符号扩展假差异）。新加 char 源
      * 必须同样限幅，否则 L4 差分会把 minicc 无符号 char 与 gcc signed char 的差异当回归。 */
-    case E_STR:{ int si=rndi(0,NSTRS-1); const char *s=STRS[si];
-        int k=rndi(0,(int)strlen(s)-1); sprintf(dst,"*(\"%s\"+%d)",s,k); *lo=0;*hi=255; used_flags|=F_CHAR; return; }
+    case E_HEXU:{ /* 值域 0..255 无溢出；前缀/位大小写混排全谱（M9c/M9e 收口形态） */
+        static const char *hx[]={"0x0A","0x1F","0xFF","0xA5","0X1b","0X00"};
+        int v[]={10,31,255,165,27,0}; int t=rndi(0,5);
+        sprintf(dst,"%s",hx[t]); *lo=v[t]; *hi=v[t]; used_flags|=F_LEX; return; }
+    case E_STR:{ int si=rndi(0,NSTRS-1); const char *s=STRS[si].src;
+        int k=rndi(0,STRS[si].dlen-1);   /* P0-6：界按解码长度（转义串源码形更长，防越池） */
+        sprintf(dst,"*(\"%s\"+%d)",s,k); *lo=0;*hi=255; used_flags|=F_CHAR; return; }
     case E_CALL:{ int i=rndi(0,nf-1); char a[128]; long l0,h0v;
         /* 递归参数 = 任意窄值表达式，再按位掩码限幅到非负窄区间 (e & m)：
          * e 由生成器保证无 UB；m ∈ {3,7} ⇒ 结果 ∈ [0,3]/[0,7]，深度/值域有界（sum≤28/fib≤21），
@@ -191,12 +213,13 @@ static void stmt_gen(int depth){
     /* 能力集门控的语句 pick 列表（for/do/break/continue 现 cc500 亦入网，见 CAPS_CC500）。
      * 循环计数器用 i0/d0/g0（非下划线）——cc500 词法/符号表不认下划线开头标识符（实测），
      * 命名避开用户变量 v%d、全局 G%d、数组 a%d、指针 p%d、函数 h0/h1、char c%d/ca%d。 */
-    int kinds[6], nk=0;
+    int kinds[7], nk=0;   /* P0-6：+kind5 词法族组合模板 */
     kinds[nk++]=0;                                       /* 赋值 */
     if(has(F_IF))    kinds[nk++]=1;
     if(has(F_WHILE)) kinds[nk++]=2;
     if(has(F_FOR))   kinds[nk++]=3;
     if(has(F_DO))    kinds[nk++]=4;                      /* do-while + break/continue */
+    if(has(F_LEX))   kinds[nk++]=5;                      /* M9c/e/f 词法族组合 */
     int kind=kinds[rndi(0,nk-1)];
     if(kind==0){ expr_gen(b,depth+1,&lo,&hi,0); printf("  %s=(%s);\n",lv,b); }
     else if(kind==1){ used_flags|=F_IF; expr_gen(b,depth+1,&lo,&hi,1);
@@ -204,6 +227,11 @@ static void stmt_gen(int depth){
     else if(kind==2){ used_flags|=F_WHILE; expr_gen(b,depth+1,&lo,&hi,1);
         printf("  {int g0; g0=0; while((%s)&&g0<20){ g0=g0+1; %s=%s+1; }}\n",b,lv,lv); }
     else if(kind==3){ used_flags|=F_FOR; printf("  {int i0; for(i0=0;i0<8;i0=i0+1){ %s=%s+1; }}\n",lv,lv); }
+    else if(kind==5){ /* M9e/M9c 组合：局部子句表+大写名+空语句；常量界内无 UB */
+        used_flags|=F_LEX; int a0=rndi(1,9), b0=rndi(1,5);
+        printf("  {int Zz1,Zz2; Zz1=%d;;Zz2=Zz1+%d; %s=Zz2;}\n", a0, b0, lv);
+        return;
+    }
     else /*kind==4*/{ /* do-while + break/continue：d0 限幅保终止；break/continue 各以随机条件触发 */
         char b1[128],b2[128]; long l,h;
         expr_gen(b1,depth+1,&l,&h,1); expr_gen(b2,depth+1,&l,&h,1);
@@ -265,6 +293,12 @@ static void emit_program(int nv,int nstmts){
     printf("int main(){\n");
     for(int i=0;i<nvars;i++) printf("  int %s;\n",varnames[i]);
     for(int i=0;i<nvars;i++) printf("  %s=%d;\n",varnames[i],rndi(1,9)); /* 声明即初始化 */
+    /* P0-6+：转义全家族每例必采样（acceptance 级；无 deref ⇒ cc500/minicc 双方可编）。
+     * 说明：本形态只验"能编"，字节正确性由 golden g10/g11 锁——两者互补（见 ESCS 注释）。 */
+    if(has(F_LEX)){
+      for(int i=0;i<NESCS;i++) printf("  char *E%d; E%d=\"%s\";\n", i, i, ESCS[i]);
+      used_flags|=F_LEX;
+    }
     for(int i=0;i<nc;i++){ printf("  char c%d;\n",i); }
     for(int i=0;i<nc;i++) printf("  c%d=%d;\n",i,rndi(0,127));          /* char 只读源：窄值 0..127 */
     for(int i=0;i<na;i++){ printf("  int a%d[%d];\n",i,ASZ);
