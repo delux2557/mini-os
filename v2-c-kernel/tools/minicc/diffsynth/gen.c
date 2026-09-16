@@ -67,6 +67,13 @@ static const struct { const char *src; int dlen; } STRS[] = {
   {"ab",2},{"xy",2},{"qwerty",6},{"hello",5},{"zap",3},{"mnpo",4},
   {"a\\nb",3},{"q\\\"z",3},{"\\x41z",2}};
 #define NSTRS ((int)(sizeof STRS/sizeof STRS[0]))
+/* P0-6+（复核补正）：转义**全家族**的 deref-free 采样池——每例程序无条件发射一次
+ * "char *E%d; E%d=<转义串>;"。动机（复核实测）：E_STR 只读形需 deref(k)，而 cc500 无 deref
+ * 且 F_CHAR 对 cc500 关闭 ⇒ 旧网在 cc500 目标上 96/96 样本**零字符串字面量**，恰好漏掉
+ * M9g（cc500 侧 \" 曾致拒编）这一类 acceptance 级缺陷。四条分别对应 M9g 四刀：
+ * \n 缩位 / \" 连吞（曾拒编）/ \x 贪心 / \\ 连吞。双编译器均可解析此形态（无 deref）。 */
+static const char *ESCS[] = {"a\\nb","q\\\"z","\\x41z","a\\\\b"};
+#define NESCS ((int)(sizeof ESCS/sizeof ESCS[0]))
 static char varnames[MAXV][4];
 static int nvars, ng, na, npa, nf, nc, nca;
 
@@ -286,6 +293,12 @@ static void emit_program(int nv,int nstmts){
     printf("int main(){\n");
     for(int i=0;i<nvars;i++) printf("  int %s;\n",varnames[i]);
     for(int i=0;i<nvars;i++) printf("  %s=%d;\n",varnames[i],rndi(1,9)); /* 声明即初始化 */
+    /* P0-6+：转义全家族每例必采样（acceptance 级；无 deref ⇒ cc500/minicc 双方可编）。
+     * 说明：本形态只验"能编"，字节正确性由 golden g10/g11 锁——两者互补（见 ESCS 注释）。 */
+    if(has(F_LEX)){
+      for(int i=0;i<NESCS;i++) printf("  char *E%d; E%d=\"%s\";\n", i, i, ESCS[i]);
+      used_flags|=F_LEX;
+    }
     for(int i=0;i<nc;i++){ printf("  char c%d;\n",i); }
     for(int i=0;i<nc;i++) printf("  c%d=%d;\n",i,rndi(0,127));          /* char 只读源：窄值 0..127 */
     for(int i=0;i<na;i++){ printf("  int a%d[%d];\n",i,ASZ);
