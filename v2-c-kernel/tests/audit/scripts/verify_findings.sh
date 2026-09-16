@@ -32,8 +32,8 @@ chk() { # chk <E编号> <标签> <期望> <源码>
 }
 echo "== 旧发现复核（期望=当前状态如实快照；修复后应变 FAIL=行为变了，即修复生效）=="
 chk E1  "CC-02 大写标识符(M9e修)" "OK(cc500=0 gcc=0)"   'int main(){int Counter;Counter=3;return Counter-3;}'
-chk E2  "CC-03 空语句"          "REJ" 'int main(){;return 0;}'
-chk E3  "CC-04 多声明子句"      "REJ" 'int main(){int a,b;return 0;}'
+chk E2  "CC-03 空语(M9f修)"   "OK(cc500=0 gcc=0)"   'int main(){;return 0;}'
+chk E3  "CC-04 多声明(M9f修)" "OK(cc500=0 gcc=0)"   'int main(){int a,b;return 0;}'
 chk E4  "CC-06 字符转义(M9e修)" "OK(cc500=0 gcc=0)"   "int main(){char c;c='\\n';return c-10;}"
 chk E5  "CC-07 八进制(随#158已拒)" "REJ"                      'int main(){int a;a=010;return a;}'
 echo "== 新能力正常面（这些应保持 PASS；若变 FAIL=新里程碑回归破坏）=="
