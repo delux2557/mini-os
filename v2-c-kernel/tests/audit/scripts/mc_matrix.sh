@@ -7,6 +7,9 @@ R=$(cd "$(dirname "$0")/.." && pwd)            # = tests/audit
 B=$R/bin; H=$B/hostminicc32; U=$B/runmin32
 RUM="${AUDIT_RUM:-}"
 [ -x "$H" ] && [ -x "$U" ] || { echo "mc_matrix: 先跑 scripts/build_audit.sh（需 MINICC_SRC）"; exit 2; }
+
+GG1(){ printf '%s\n' "$4" > "$W/gg.c"; local rc; RUNX "$3" "$W/gg.c" "$W/gg.elf" >/dev/null 2>&1; rc=$?
+  if [ "$rc" = "$2" ]; then ok "$1"; else bad "$1" "rc=$rc 期望=$2"; fi; }
 W=$(mktemp -d); FAIL=0
 RUNX(){ if [ -n "$RUM" ]; then "$RUM" "$@"; else "$@"; fi; }
 ok(){  printf '  %-40s PASS\n' "$1"; }
@@ -39,6 +42,10 @@ M MC-09-嵌套5层通过       0 'int main(){int a;a=((((1))));return a;}'
 printf 'int main(){return 0;}\000JUNK' > "$W/nul.c"
 out=$(RUNX "$H" "$W/nul.c" "$W/nul.elf" 2>&1); rc=$?
 if [ "$rc" = 1 ]; then ok "MC-06-NUL源拒"; else bad "MC-06-NUL源拒" "rc=$rc 期望=1｜$out"; fi
+# ── G1：cc500×minicc 数值字面量口径对齐（E5 收口，宿主侧行为钉）────────────
+GG1 G1-cc500-010拒       1 "$B/hostcc500" 'int main(){int a;a=010;return a;}'
+GG1 G1-cc500-单0不误伤   0 "$B/hostcc500" 'int main(){int a;a=0;return a;}'
+GG1 G1-cc500-hex不误伤   0 "$B/hostcc500" 'int main(){int a;a=0x10;return a-16;}'
 # ── M7b 声明子句表/空语句（"误拒合法 C"收口；host+self 双实现等值由 heavy 2b4 断言）──
 M  M7b-局部子句表接受      0 'int main(){int a,b;a=1;b=2;return a+b-3;}'
 R__ M7b-子句初值链行为      0 'int main(){int x=1,y=x+2,z=y+x-4;return z;}'

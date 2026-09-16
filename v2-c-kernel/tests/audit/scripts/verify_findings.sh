@@ -35,7 +35,7 @@ chk E1  "CC-02 大写标识符"      "REJ" 'int main(){int Counter;Counter=3;ret
 chk E2  "CC-03 空语句"          "REJ" 'int main(){;return 0;}'
 chk E3  "CC-04 多声明子句"      "REJ" 'int main(){int a,b;return 0;}'
 chk E4  "CC-06 字符转义"        "REJ" "int main(){char c;c='\\n';return c-10;}"
-chk E5  "CC-07 八进制分歧"      "OK(cc500=10 gcc=8)"        'int main(){int a;a=010;return a;}'
+chk E5  "CC-07 八进制(随#159已拒)" "REJ"                      'int main(){int a;a=010;return a;}'
 echo "== 新能力正常面（这些应保持 PASS；若变 FAIL=新里程碑回归破坏）=="
 chk E6  "M7 三目"               "OK(cc500=0 gcc=0)"         'int main(){int a;a=1;return (a?7:9)-7;}'
 chk E7  "M9 hex 小写"           "OK(cc500=0 gcc=0)"         'int main(){int a;a=0x1f;return a-31;}'
