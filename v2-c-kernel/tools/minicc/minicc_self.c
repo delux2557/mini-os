@@ -959,7 +959,7 @@ int stmt() {
         /* 局部声明子句表（`int a,b,*c[3];`——与 host 严格同构，§7.3 双编译器契约） */
         int dty, dbty, dspec, dcnt, dhead, dtail2, dmore, dnoff, dsize;
         dty = decl_type(&dbty);
-        dspec = (dty == TY_PTR ? dbty : dty);
+        if (dty == TY_PTR) dspec = dbty; else dspec = dty;   /* 自举语料禁 ternary（minicc 子集无 ?:） */
         dcnt = 0; dhead = 0; dtail2 = 0;
         while (1) {
             dcnt = dcnt + 1;
@@ -1089,7 +1089,8 @@ int parse_program() {
         int noff = stradd(&tok[0]);
         next_tok();
         len_top = 0;
-        int spec_ty = (ty == TY_PTR ? bty_top : ty);   /* 子句表共享基底（host 同构；防 array_suffix 突变污染） */
+        int spec_ty;
+        if (ty == TY_PTR) spec_ty = bty_top; else spec_ty = ty;   /* 子句表共享基底；禁 ternary 同因 */
         if (array_suffix(ty, &len_top)) { bty_top = ty; ty = TY_ARRAY; }
         if (accept_s("(")) {
             int si = sym_find(noff);
