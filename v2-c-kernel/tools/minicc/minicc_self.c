@@ -949,25 +949,48 @@ int stmt() {
         next_tok();
         return block_stmt();
     }
+    if (accept_s(";")) {
+        /* C 空语句：合成空 ND_BLOCK（与 host 同构；作用域纯 parse 期，无副作用） */
+        n = node_new(ND_BLOCK);
+        na[n] = 0;
+        return n;
+    }
     if (peek_s("int") || peek_s("char")) {
-        n = node_new(ND_DECL);
-        nty[n] = decl_type(&nbty[n]);
-        if (tok_is_word == 0) fail("expected identifier");
-        int noff = stradd(&tok[0]);
-        next_tok();
-        if (array_suffix(nty[n], &nlen[n])) { nbty[n] = nty[n]; nty[n] = TY_ARRAY; }
-        if (nty[n] == TY_ARRAY && peek_s("=")) fail("array init not supported");
-        int size = bytes_of(nty[n], nbty[n], nlen[n], LOCAL_BYTES_MAX);  /* FIX-B */
-        cur_frame = cur_frame + size;
-        if (cur_frame > 4096) fail("frame too big");
-        nval[n] = cur_frame;
-        sym_add(noff, K_LOCAL, nty[n], nbty[n], nlen[n], nval[n]);
-        if (accept_s("=")) {
-            nl[n] = expr();
-            if (type_eq(nty[n], nbty[n], nty[nl[n]], nbty[nl[n]]) == 0)
-                fail("type mismatch in initialization");
+        /* 局部声明子句表（`int a,b,*c[3];`——与 host 严格同构，§7.3 双编译器契约） */
+        int dty, dbty, dspec, dcnt, dhead, dtail2, dmore, dnoff, dsize;
+        dty = decl_type(&dbty);
+        if (dty == TY_PTR) dspec = dbty; else dspec = dty;   /* 自举语料禁 ternary（minicc 子集无 ?:） */
+        dcnt = 0; dhead = 0; dtail2 = 0;
+        while (1) {
+            dcnt = dcnt + 1;
+            n = node_new(ND_DECL);
+            nlen[n] = 0;
+            if (dcnt == 1) { nty[n] = dty; nbty[n] = dbty; }
+            else if (accept_s("*") != 0) { nty[n] = TY_PTR; nbty[n] = dspec; }
+            else { nty[n] = dspec; nbty[n] = 0; }
+            if (tok_is_word == 0) fail("expected identifier");
+            dnoff = stradd(&tok[0]);
+            next_tok();
+            if (array_suffix(nty[n], &nlen[n])) { nbty[n] = nty[n]; nty[n] = TY_ARRAY; }
+            if (nty[n] == TY_ARRAY && peek_s("=")) fail("array init not supported");
+            dsize = bytes_of(nty[n], nbty[n], nlen[n], LOCAL_BYTES_MAX);  /* FIX-B */
+            cur_frame = cur_frame + dsize;
+            if (cur_frame > 4096) fail("frame too big");
+            nval[n] = cur_frame;
+            sym_add(dnoff, K_LOCAL, nty[n], nbty[n], nlen[n], nval[n]);
+            if (accept_s("=")) {
+                nl[n] = expr();
+                if (type_eq(nty[n], nbty[n], nty[nl[n]], nbty[nl[n]]) == 0)
+                    fail("type mismatch in initialization");
+            }
+            if (dhead == 0) dhead = n; else nnext[dtail2] = n;
+            dtail2 = n;
+            dmore = (accept_s(",") != 0);
+            if (dmore == 0) { expect_s(";"); break; }
         }
-        expect_s(";");
+        if (dcnt == 1) return dhead;
+        n = node_new(ND_BLOCK);          /* 多子句：子链包进合成块（消费方语义不变） */
+        na[n] = dhead;
         return n;
     }
     if (accept_s("if")) {
@@ -1066,6 +1089,8 @@ int parse_program() {
         int noff = stradd(&tok[0]);
         next_tok();
         len_top = 0;
+        int spec_ty;
+        if (ty == TY_PTR) spec_ty = bty_top; else spec_ty = ty;   /* 子句表共享基底；禁 ternary 同因 */
         if (array_suffix(ty, &len_top)) { bty_top = ty; ty = TY_ARRAY; }
         if (accept_s("(")) {
             int si = sym_find(noff);
@@ -1128,14 +1153,20 @@ int parse_program() {
             if (funcs == 0) funcs = fn; else nnext[funcs_tail] = fn;
             funcs_tail = fn;
         } else {
-            if (sym_find(noff) >= 0) fail("redefined");
-            int g = node_new(ND_GVAR);
-            nival[g] = noff;
-            nty[g] = ty; nbty[g] = bty_top; nlen[g] = len_top;
-            int si = sym_add(noff, K_GLOBAL, ty, bty_top, len_top, 0);
-            nval[g] = si;
+            /* 全局声明子句表（`int a,b=2,*c;`——host 同构；C89 顶部预声明，guest 编得动） */
+            int gty, gbty, glen, gcurr, gspec, gsic, gcont;
+            gty = ty; gbty = bty_top; glen = len_top; gcurr = noff;
+            gspec = spec_ty; gcont = 1;
+            while (gcont) {
+            int g; int si;
+            if (sym_find(gcurr) >= 0) fail("redefined");
+            g = node_new(ND_GVAR);
+            nival[g] = gcurr;
+            nty[g] = gty; nbty[g] = gbty; nlen[g] = glen;
+            si = sym_add(gcurr, K_GLOBAL, gty, gbty, glen, 0);
+            nval[g] = si; gsic = si;
             if (accept_s("=")) {
-                if (ty == TY_ARRAY) fail("array init not supported");
+                if (gty == TY_ARRAY) fail("array init not supported");
                 /* 标量初值存 nlen[g]（数组长度与初值互斥：标量 len_top=0）。
                  * 支持十六进制（CODE_BASE = 0x800a0000）；十进制环原样——BUG-039：
                  * 旧十进制环把 'x'/'a' 当数字位算，0x800a0000 变垃圾，P1 运行时
@@ -1165,9 +1196,22 @@ int parse_program() {
                     fail("global init must be a constant");
                 }
             }
-            expect_s(";");
             if (gvars == 0) gvars = g; else nnext[gvars_tail] = g;
             gvars_tail = g;
+            if (accept_s(",") != 0) {
+                if (accept_s("*") != 0) { gty = TY_PTR; gbty = gspec; }
+                else                    { gty = gspec;  gbty = 0;    }
+                if (accept_s("(")) fail("unsupported: function declarator in list");
+                if (tok_is_word == 0) fail("expected identifier");
+                gcurr = stradd(&tok[0]);
+                next_tok();
+                glen = 0;
+                if (array_suffix(gty, &glen)) { gbty = gty; gty = TY_ARRAY; }
+            } else {
+                expect_s(";");
+                gcont = 0;
+            }
+            }
         }
     }
 }
