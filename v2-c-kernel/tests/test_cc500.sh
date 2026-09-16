@@ -247,14 +247,23 @@ fi
 hrun t_gfwd  'int main(){int a;a=7;goto skip;a=99;skip:if(a==7)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_gbwd  'int main(){int i;i=0;top:i=i+1;if(i<5)goto top;if(i==5)return 0;return 1;}' 0 'compiled OK' ''
 hrun t_gmulti 'int main(){int a;int s;s=0;goto m0;s=1;m0:goto m1;s=2;m1:goto m2;s=3;m2:if(s==0)return 0;return 1;}' 0 'compiled OK' ''
-hrun t_gundef 'int main(){goto nod;return 0;}' 0 '' 'cc500: error'
+hrun t_gundef 'int main(){goto nod;return 0;}' 1 'cc500: error' 'compiled OK'
+         # ↑ 期望回正为 1（BUG-076/#161 修复）：未定义标签**真由 lbl_end 终检拦下**。
+         #   旧码锚点读错位（从记录起点读 t+1，读到的是名字第二字符）→ 'u' 判定恒假，
+         #   该检查从未生效；旧期望 1 长期靠 `done:;` 空体分号走 expression 错路"意外绿"，
+         #   #160 合法化空语句后伪装脱落、CI 如实报案。以下两钉锁住两侧症状对立。
+hrun t_gosemi 'int main(){goto nod;return 0;done:;}' 1 'cc500: error' 'compiled OK'
+hrun t_godef  'int main(){goto nod;nod:return 0;}' 0 'compiled OK' 'cc500: error'
 # M9f 三用例（E2/E3 收口的 T 系列对位）
 hrun t_m9f_semi  'int main(){;return 0;}' 0 'compiled OK' 'cc500: error'
 hrun t_m9f_lmulti 'int main(){int a,b;a=1;b=2;return a+b-3;}' 0 'compiled OK' 'cc500: error'
 hrun t_m9f_gmulti2 'int a,b;int main(){a=2;b=3;return a+b-5;}' 0 'compiled OK' 'cc500: error'
-         # ↑ 题面真相化（M9f #160）：原 1 期望系意外绿——`done:;` 的空体分号走
-         #   expression 报错，并非 lbl_end 在拦。纯前向未定义标签 main 亦 rc=0
-         #   （mainline 盲区：lbl_end 'u' 检查从未生效），独立票追踪，勿在此假绿。
+# ---- M13（BUG-077/#162）：入口=main——main 之前的辅助函数体不再夺走入口 ----
+# 旧码入口 stub 的 call rel32 只回填「首个函数体」→ main 成死代码（跑的程序与预期完全不同，
+# 一度被误诊为"调用结果进算术算错"）。编译面三形态须 OK；运值面由 mc_matrix G4 直跑钉住。
+hrun t_entry1 'int f(){return 1;}int main(){return f()-1;}' 0 'compiled OK' 'cc500: error'
+hrun t_entry2 'int f(){return 1;}int g(){return 2;}int main(){return f()+g()-3;}' 0 'compiled OK' 'cc500: error'
+hrun t_entry3 'int f(){return 1;}int main(){int x;x=f();return x-1;}' 0 'compiled OK' 'cc500: error'
 hrun t_gdup   'int main(){int a;a=1;dup:a=2;dup:return a;}' 1 'cc500: error' 'compiled OK'
 # M11 编码锁定：前向 goto-only 程序（无 if/while/for/?:）的唯一无条件 jmp 即 goto。
 # 若前向回填坏（挂起未解/落错位）→ rel32=0 退化成顺落（e9 00 00 00 00）；正确则跳过 a=9
@@ -418,7 +427,9 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gsend "rm /tnest.c"; gsend "rm /tnest.elf"
     # M6：短路运行语义（症状对立——右操作数必须被跳过，否则 return 1 FAIL）。
     # 0&&f()：&& 短路 → f() 不执行 → g 保持 0 → return 0。若贪心按位 &(0&1) 则 f() 被调 g==1 → FAIL。
-    # 注意：cc500 需对后定义函数先写原型 `int f();`；且 main 须为第一个函数体（cc500 契约「入口=首个函数」）。
+    # 注意：cc500 需对后定义函数先写原型 `int f();`（无原型则报错，同 minicc 的先定义后用口径）。
+    # 入口自 BUG-077（#162）修复起按名字认 main（main 不是首函数体也照样是入口）；
+    # 无 main 时才退回旧契约「首个函数体=入口」（cc500.c 自举即靠它）。
     gsend "writefile <<M /tand.c"
     gsend "int f();int g;int main(){int x;x=0&&f();if(g==0)return 0;return 1;}int f(){g=g+1;return 1;}"
     gsend "M"
