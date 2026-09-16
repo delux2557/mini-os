@@ -8,7 +8,7 @@ B=$R/bin; H=$B/hostminicc32; U=$B/runmin32
 RUM="${AUDIT_RUM:-}"
 [ -x "$H" ] && [ -x "$U" ] || { echo "mc_matrix: 先跑 scripts/build_audit.sh（需 MINICC_SRC）"; exit 2; }
 
-GG1(){ printf '%s\n' "$4" > "$W/gg.c"; local rc; "$3" "$W/gg.c" "$W/gg.elf" >/dev/null 2>&1; rc=$?
+GG1(){ printf '%s\n' "$4" > "$W/gg.c"; local rc; RUNX "$3" "$W/gg.c" "$W/gg.elf" >/dev/null 2>&1; rc=$?
   if [ "$rc" = "$2" ]; then ok "$1"; else bad "$1" "rc=$rc 期望=$2"; fi; }
 W=$(mktemp -d); FAIL=0
 RUNX(){ if [ -n "$RUM" ]; then "$RUM" "$@"; else "$@"; fi; }
