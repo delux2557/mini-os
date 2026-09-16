@@ -184,6 +184,14 @@ void get_token()
 	while (str_done == 0) {
 	  if (nextc == 0 - 1) str_done = 1;
 	  else if (nextc == 39) str_done = 1;
+	  else if (nextc == 92) {
+	    /* M9e-fix：反斜杠转义连被转义字符一起吞（含 '\'' 的 '），否则
+	     * '\'' 在第二个 ' 处被误判为定界符，token 残缺致 REJ——与 minicc
+	     * decode_escape 的 \' 支持对齐（#159 复核实测证）。 */
+	    takechar();
+	    if (nextc == 0 - 1) str_done = 1;
+	    else takechar();
+	  }
 	  else takechar();
 	}
 	if (nextc == 39) takechar();
@@ -585,8 +593,14 @@ int primary_expr()
       if (cv == 'n') cv = 10;
       else if (cv == 't') cv = 9;
       else if (cv == '0') cv = 0;
+      else if (cv == 92) cv = 92;   /* \\ 自身即值 */
+      else if (cv == 34) cv = 34;   /* \" 自身即值 */
+      else if (cv == 39) cv = 39;   /* \' 自身即值 */
       else if (cv == 'x') error();
-      /* \\ 34 39 自身即值 */
+      /* M9e-fix：未知转义（如 \z）不再透传——minicc decode_escape 一律
+       * fail("bad escape")，cc500 同拒（宁拒不坑；#159 复核实测 minicc 拒而
+       * cc500 透传=静默分歧，方向过宽）。 */
+      else error();
     }
     else if ((token[1] == 92) & (token[2] == 'x') & (token[3] != 0)) {
       cv = 0;
