@@ -539,6 +539,10 @@ int primary_expr()
       }
     }
     else {
+      /* M9c：八进制字面量不入子集——`010` 静默按十进制读是与宿主/gcc 分歧的教学陷阱
+       * （外部审计 E5）。0 后紧跟数字一律显式报错，与 minicc 的拒口径对齐。 */
+      if ((token[0] == '0') & (token[1] != 0))
+	error();
       while (token[i]) {
 	if ((token[i] < '0') | ('9' < token[i]))
 	  error();
