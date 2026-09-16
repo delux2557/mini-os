@@ -31,21 +31,21 @@ chk() { # chk <E编号> <标签> <期望> <源码>
   printf "%-4s|%-22s|%-34s|期望 %-14s|%s\n" "$id" "$tag" "$got" "$want" "$r"
 }
 echo "== 旧发现复核（期望=当前状态如实快照；修复后应变 FAIL=行为变了，即修复生效）=="
-chk E1  "CC-02 大写标识符"      "REJ" 'int main(){int Counter;Counter=3;return Counter-3;}'
+chk E1  "CC-02 大写标识符(M9e修)" "OK(cc500=0 gcc=0)"   'int main(){int Counter;Counter=3;return Counter-3;}'
 chk E2  "CC-03 空语句"          "REJ" 'int main(){;return 0;}'
 chk E3  "CC-04 多声明子句"      "REJ" 'int main(){int a,b;return 0;}'
-chk E4  "CC-06 字符转义"        "REJ" "int main(){char c;c='\\n';return c-10;}"
-chk E5  "CC-07 八进制(随#159已拒)" "REJ"                      'int main(){int a;a=010;return a;}'
+chk E4  "CC-06 字符转义(M9e修)" "OK(cc500=0 gcc=0)"   "int main(){char c;c='\\n';return c-10;}"
+chk E5  "CC-07 八进制(随#158已拒)" "REJ"                      'int main(){int a;a=010;return a;}'
 echo "== 新能力正常面（这些应保持 PASS；若变 FAIL=新里程碑回归破坏）=="
 chk E6  "M7 三目"               "OK(cc500=0 gcc=0)"         'int main(){int a;a=1;return (a?7:9)-7;}'
 chk E7  "M9 hex 小写"           "OK(cc500=0 gcc=0)"         'int main(){int a;a=0x1f;return a-31;}'
-chk E8  "M9 hex 大写★缺口"      "REJ"                        'int main(){int a;a=0x1F;return a-31;}'
+chk E8  "M9 hex 大写(M9e修)"  "OK(cc500=0 gcc=0)"         'int main(){int a;a=0x1F;return a-31;}'
 chk E9  "M9b 复合 /="           "OK(cc500=0 gcc=0)"         'int main(){int a;a=100;a/=5;a+=1;return a-21;}'
 chk E10 "M9b <<="               "OK(cc500=0 gcc=0)"         'int main(){int a;a=1;a<<=4;return a-16;}'
 chk E11 "M6 短路 &&"            "OK(cc500=0 gcc=0)"         'int main(){int t;t=0;if(0&&(t=1))return 5;return t;}'
 chk E12 "M11 goto 后向(小写)"   "OK(cc500=0 gcc=0)"         'int main(){int i;i=0;lp:i=i+1;if(i<3)goto lp;return i-3;}'
 chk E13 "M11 goto 前向(小写)"   "OK(cc500=4 gcc=4)"         'int main(){goto ep;return 9;ep:return 4;}'
-chk E14 "M11 大写标签★缺口"     "REJ"                       'int main(){int i;i=0;L:i=i+1;if(i<3)goto L;return i-3;}'
+chk E14 "M11 大写标签(M9e修)" "OK(cc500=0 gcc=0)"         'int main(){int i;i=0;L:i=i+1;if(i<3)goto L;return i-3;}'
 echo "== F-01（新发现：M8 前缀 ++/-- 栈记账错位）——期望崩溃即复现 = 当前 bug 存在 =="
 chk E15 "M8 前缀语句(已修)"           "OK(cc500=2 gcc=2)"          'int main(){int a;a=1;++a;return a;}'
 chk E16 "M8 前缀表达式(已修)"   "OK(cc500=6 gcc=6)"          'int main(){int i;int j;i=5;j=++i;return j;}'
