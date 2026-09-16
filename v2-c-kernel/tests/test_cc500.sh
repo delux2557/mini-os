@@ -258,6 +258,9 @@ hrun t_godef  'int main(){goto nod;nod:return 0;}' 0 'compiled OK' 'cc500: error
 hrun t_m9f_semi  'int main(){;return 0;}' 0 'compiled OK' 'cc500: error'
 hrun t_m9f_lmulti 'int main(){int a,b;a=1;b=2;return a+b-3;}' 0 'compiled OK' 'cc500: error'
 hrun t_m9f_gmulti2 'int a,b;int main(){a=2;b=3;return a+b-5;}' 0 'compiled OK' 'cc500: error'
+# M9g 字符串转义两钉（收口面；字节/值语义=golden g10_esc + E20/E21）
+hrun t_m9g_dq  'int main(){char *s;s="a\"b";return 0;}' 0 'compiled OK' 'cc500: error'
+hrun t_m9g_unk 'int main(){char *s;s="a\qb";return 0;}' 1 'cc500: error' 'compiled OK'
 # ---- M13（BUG-077/#162）：入口=main——main 之前的辅助函数体不再夺走入口 ----
 # 旧码入口 stub 的 call rel32 只回填「首个函数体」→ main 成死代码（跑的程序与预期完全不同，
 # 一度被误诊为"调用结果进算术算错"）。编译面三形态须 OK；运值面由 mc_matrix G4 直跑钉住。
