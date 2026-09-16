@@ -84,6 +84,16 @@ GG2 G3-局部子句表值        0 'int main(){int a,b;a=1;b=2;return a+b-3;}'
 GG2 G3-局部初值依赖前子句  0 "int main(){int a=1,b=a+1;return b-2;}"
 GG2 G3-全局子句表          0 'int a,b;int main(){a=2;b=3;return a+b-5;}'
 GG2 G3-块内空语句          0 'int main(){int a=1;{;};return a-1;}'
+# ── G4：cc500 标签终检 + 入口=main（BUG-076/#161、BUG-077/#162；编译 rc 与运行值双钉）──
+# #161：未定义标签必须编译期拒（旧码 lbl_end 锚点读错位 → 终检恒假、静默产出跳飞产物）。
+GG1 G4-goto未定义拒        1 "$B/hostcc500" 'int main(){goto nod;return 0;}'
+GG1 G4-goto定义在后不误伤   0 "$B/hostcc500" 'int main(){goto nod;nod:return 0;}'
+# #162：入口=main——main 之前的辅助函数体不得夺走入口（旧码 → main 成死代码，跑出的
+# 程序与预期完全不同，曾被误诊为"调用结果进算术算错"）。运值钉=票面三形态 + 入口判别钉。
+GG2 G4-调用减-main非首     0 'int f(){return 1;}int main(){return f()-1;}'
+GG2 G4-双调用和-main非首   0 'int f(){return 1;}int g(){return 2;}int main(){return f()+g()-3;}'
+GG2 G4-调用存取-main非首   0 'int f(){return 1;}int main(){int x;x=f();return x-1;}'
+GG2 G4-入口判别-main非首   0 'int f(){return 7;}int main(){return 0;}'
 # ── 守卫行 census（第二道保险：整段消失型；阈值=实测留 ~4 行余量）──
 n=$(grep -oE 'octal literals not supported|NUL byte in source|arg count mismatch|nesting too deep|fail\("redefined"\)' \
     "$(dirname "$0")/../../../tools/minicc/minicc.c" "$(dirname "$0")/../../../tools/minicc/minicc_self.c" 2>/dev/null | wc -l)
