@@ -1100,15 +1100,30 @@ static Node *stmt(void) {
         next_tok();
         return block_stmt();
     }
+    if (accept(";")) {
+        /* C 空语句：合成空 ND_BLOCK（codegen 走子链天然无操作；作用域纯 parse 期不受影响） */
+        n = node_new(ND_BLOCK);
+        n->a = NULL;
+        return n;
+    }
     if (peek("int") || peek("char")) {
-        /* 局部声明（`int x;` / `char c;` / `int* p;` / `int a[3];` / `char s[8];`） */
-        n = node_new(ND_DECL);
-        n->ty = decl_type(&n->bty);
-        if (!tok_is_word) fail("expected identifier");
-        char name[32];
-        s_cpy(name, tok);
-        next_tok();
-        if (array_suffix(n->ty, &n->len)) { n->bty = n->ty; n->ty = TY_ARRAY; }
+        /* 局部声明（`int x;` / `char c;` / `int* p;` / `int a[3];` / `int a,b,*c;` 多声明子句） */
+        int base_ty0, base_bty0;
+        base_ty0 = decl_type(&base_bty0);
+        Node *dhead = NULL, **dtail = &dhead;
+        int dcnt = 0;
+        for (;;) {
+            dcnt++;
+            n = node_new(ND_DECL);
+            /* 后续子句的前导 *（C：`int a, *b;` 中 b 才是指针；首子句的 * 已由 decl_type 吃掉） */
+            if (dcnt > 1 && accept("*")) { n->ty = TY_PTR; n->bty = base_ty0 == TY_PTR ? base_bty0 : base_ty0; }
+            else if (dcnt > 1)         { n->ty = base_ty0 == TY_PTR ? base_bty0 : base_ty0; n->bty = 0; }
+            else                        { n->ty = base_ty0; n->bty = base_bty0; }
+            if (!tok_is_word) fail("expected identifier");
+            char name[32];
+            s_cpy(name, tok);
+            next_tok();
+            if (array_suffix(n->ty, &n->len)) { n->bty = n->ty; n->ty = TY_ARRAY; }
         if (n->ty == TY_ARRAY && peek("=")) fail("array init not supported");
         /* V2d：帧按纯字节偏移分配（数组紧凑 len×元素尺寸，标量不保证 4 对齐）；
          * FIX-B：走 bytes_of 唯一入口做溢出/上限校验（局部帧上限=4096） */
@@ -1122,7 +1137,14 @@ static Node *stmt(void) {
             if (!type_eq(n->ty, n->bty, n->l->ty, n->l->bty))
                 fail("type mismatch in initialization");
         }
-        expect(";");
+            *dtail = n; dtail = &n->next;
+            if (accept(",")) continue;
+            expect(";");
+            break;
+        }
+        if (dcnt == 1) return dhead;
+        n = node_new(ND_BLOCK);          /* 多子句：子链包进合成块（消费方语义不变） */
+        n->a = dhead;
         return n;
     }
     if (accept("if")) {
@@ -1222,6 +1244,7 @@ static void parse_program(void) {
         s_cpy(name, tok);
         next_tok();
         len_top = 0;
+        int spec_ty = (ty == TY_PTR ? bty_top : ty);   /* 声明符共享的类型说明符基底（后续子句由它出发） */
         if (array_suffix(ty, &len_top)) { bty_top = ty; ty = TY_ARRAY; }
         if (accept("(")) {
             /* ---- 函数定义 ---- */
@@ -1284,17 +1307,22 @@ static void parse_program(void) {
             nsym = func_scope;
             *funcs_tail = fn; funcs_tail = &fn->next;
         } else {
-            /* ---- 全局变量（数组仅 0 填充；标量常量初始化：数字或字符字面量） ---- */
-            if (sym_find(name) >= 0) fail("redefined");
+            /* ---- 全局变量（声明子句表 `int a,b[2],*c;`；数组仅 0 填；标量常量初值） ---- */
+            int elem_ty = spec_ty;
+            char gname[32];
+            int gty = ty, gbty = bty_top, glen = len_top;
+            s_cpy(gname, name);
+            for (;;) {
+            if (sym_find(gname) >= 0) fail("redefined");
             Node *g = node_new(ND_GVAR);
-            s_cpy(g->name, name);
-            g->ty = ty;
-            g->bty = bty_top;
-            g->len = len_top;
-            int si = sym_add(name, K_GLOBAL, ty, bty_top, len_top, 0);
+            s_cpy(g->name, gname);
+            g->ty = gty;
+            g->bty = gbty;
+            g->len = glen;
+            int si = sym_add(gname, K_GLOBAL, gty, gbty, glen, 0);
             g->val = si;
             if (accept("=")) {
-                if (ty == TY_ARRAY) fail("array init not supported");
+                if (gty == TY_ARRAY) fail("array init not supported");
                 if (tok_is_num) {
                     g->ival = 0;
                     /* BUG-039：初值支持十六进制（CODE_BASE=0x800a0000），与 minicc_self.c 的
@@ -1319,8 +1347,20 @@ static void parse_program(void) {
                     fail("global init must be a constant");
                 }
             }
-            expect(";");
             *gvars_tail = g; gvars_tail = &g->next;
+            if (accept(",")) {
+                if (accept("*")) { gty = TY_PTR; gbty = elem_ty; }
+                else              { gty = elem_ty;    gbty = 0;    }
+                if (accept("(")) fail("unsupported: function declarator in list");
+                if (!tok_is_word) fail("expected identifier");
+                s_cpy(gname, tok); next_tok();
+                glen = 0;
+                if (array_suffix(gty, &glen)) { gbty = gty; gty = TY_ARRAY; }
+                continue;
+            }
+            expect(";");
+            break;
+            }
         }
     }
 }

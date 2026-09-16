@@ -282,7 +282,7 @@ fi
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
-    if ! make BUILD="$BUILD" >/dev/null 2>&1; then echo "[FAIL] 内核构建失败"; exit 1; fi
+    if ! make BUILD="$BUILD" >"$BUILD/build.log" 2>&1; then echo "[FAIL] 内核构建失败"; exit 1; fi
     export DH_CC500_GUEST=1
     LOG="$BUILD/cc500_guest.log"; TIN="$BUILD/cc500_in.fifo"; TOUT="$BUILD/cc500_out.fifo"
     QPID=""; CAT_PID=""; GFAIL=0
