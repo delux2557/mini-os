@@ -53,9 +53,14 @@ M  M7b-指针子句接受        0 'int main(){int* p,q;p=0;q=3;return q-3;}'
 M  M7b-空语句接受          0 'int main(){int a; ;return a;}'
 M  M7b-全局子句表接受      0 'int a[3],b=7;int main(){return b-7;}'
 M  M7b-子句内函数声明拒    1 'int f(int a){return a;}int g(),x;'
-# ── G5：cc500 字符串转义 M9g（收口面钉；字节/值语义=golden g10_esc 哈希 + verify E20/E21）──
-M G5-双反斜串接受      0 'int main(){char *s;s="a\\b";return 0;}'
-M G5-未知转义拒        1 'int main(){char *s;s="a\qb";return 0;}'
+# ── G5：cc500 字符串转义 M9g（收口面钉；字节语义=golden g10/g11 哈希 + verify E20/E21）──
+# ⚠ 本组必须走 GG1/GG2（hostcc500/cc500run）：M9g 改的是 **cc500** 侧，而 `M()` 跑的是
+#   hostminicc32（minicc 未动）——原版误挂在 M() 上，修复前后结果相同=零判别力（复核实测）。
+#   minicc 侧的转义契约另有 test_minicc.sh 覆盖（t_badesc 拒未知转义 / t_xesc \x 贪心），不在此重复。
+# 钉②用字节探针而非"能否编译"：`s="a\\b"` 新旧都编得过，仅**解码字节**不同（旧留两个反斜杠），
+#   故查 p[2]=='b' 才对得上——纯编译 rc 钉对这条形态无判别力（复核实测）。
+GG1 G5-cc500-未知转义拒    1 "$B/hostcc500" 'int main(){char *s;s="a\qb";return 0;}'
+GG2 G5-cc500-双反斜字宽   0 'int main(){char *p;p="a\\b";if(p[2]==98)return 0;return 1;}'
 
 # ── 自举输入纪律钉：minicc_self.c 必须落在 minicc 自己的可编译子集内（P1 构建=
 #    hostminicc 编它；#157 CI 实锤 ternary 越界后补，本地无法执行 P1 时这是唯一早警）──
