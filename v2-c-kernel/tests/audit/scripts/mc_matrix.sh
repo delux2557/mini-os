@@ -53,6 +53,10 @@ M  M7b-指针子句接受        0 'int main(){int* p,q;p=0;q=3;return q-3;}'
 M  M7b-空语句接受          0 'int main(){int a; ;return a;}'
 M  M7b-全局子句表接受      0 'int a[3],b=7;int main(){return b-7;}'
 M  M7b-子句内函数声明拒    1 'int f(int a){return a;}int g(),x;'
+# ── G5：cc500 字符串转义 M9g（收口面钉；字节/值语义=golden g10_esc 哈希 + verify E20/E21）──
+M G5-双反斜串接受      0 'int main(){char *s;s="a\\b";return 0;}'
+M G5-未知转义拒        1 'int main(){char *s;s="a\qb";return 0;}'
+
 # ── 自举输入纪律钉：minicc_self.c 必须落在 minicc 自己的可编译子集内（P1 构建=
 #    hostminicc 编它；#157 CI 实锤 ternary 越界后补，本地无法执行 P1 时这是唯一早警）──
 S1SRC="$(cd "$(dirname "$0")/../../.." && pwd)/tools/minicc/minicc_self.c"
