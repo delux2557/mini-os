@@ -340,6 +340,22 @@ int table_size;
 int table_pos;
 int stack_pos;
 
+/* ---- P1-1 栈槽记账封装（单遍直发下 F-01 族"opcode 内嵌弹栈与账本脱钩"的收口）----
+ * 三条纪律：①压栈一律 sp_push；②显式弹栈一律 sp_popn/sp_pop_to；③弹栈内嵌于
+ * store/运算 opcode 串的，账本递减走 sp_book —— 三入口都带**下溢断言**：
+ * 账本减到负即 error() 拒编（编译器内部失配绝不带病产码）。
+ * ⚠ 断言只拦"负向失配"（n/目标 > stack_pos）；**正向过记**（n 小于实际弹槽数）会
+ * 静默穿过断言并产坏码——入口不知道"本该记几"，此为本封装的固有边界（复核白盒实测：
+ * sp_book(2) 于 sp_push 后 stack_pos≥2 处编译 rc=0、产物运行段错误）。故入口本身
+ * 写错仍会带病，勿因断言存在而放松对新入口的审查。 */
+void sp_push(void){ be_push(); stack_pos = stack_pos + 1; }
+void sp_popn(int n){ if (n < 0 || n > stack_pos) error(); be_pop(n); stack_pos = stack_pos - n; }
+void sp_pop_to(int s){ if (s < 0 || s > stack_pos) error(); be_pop(stack_pos - s); stack_pos = s; }
+void sp_book(int n){ if (n < 0 || n > stack_pos) error(); stack_pos = stack_pos - n; }
+/* return 的长跳丢弃：弹出全部在途槽但**不动账本**——外层块/复合语句稍后按旧
+ * 坐标对齐死代码尾（原 be_pop(stack_pos) 裸形为等价行为，此处命名显式化）。 */
+void sp_discard(void){ be_pop(stack_pos); }
+
 int sym_lookup(char *s)
 {
   int t = 0;
@@ -714,15 +730,14 @@ int primary_expr()
 void binary1(int type)
 {
   promote(type);
-  be_push();
-  stack_pos = stack_pos + 1;
+  sp_push();
 }
 
 int binary2(int type, int n, char *s)
 {
   promote(type);
   emit(n, s);
-  stack_pos = stack_pos - 1;
+  sp_book(1);
   return 3;
 }
 
@@ -738,8 +753,7 @@ int compound_assign(int type, int n, char *s)
 {
   if ((type != 1) & (type != 2))
     error();
-  be_push();                   /* push %eax —— 保存 lv 地址（store 时复用） */
-  stack_pos = stack_pos + 1;
+  sp_push();  /* push %eax —— 保存 lv 地址（store 时复用） */
   emit(3, "\x5b\x8b\x03");     /* pop %ebx ; mov (%ebx),%eax —— lv 当前值 -> %eax */
   emit(1, "\x53");             /* push %ebx —— 地址放回栈顶 */
   binary1(3);                  /* push %eax —— lv 值入栈（type 3 为值，promote 空操作） */
@@ -748,7 +762,7 @@ int compound_assign(int type, int n, char *s)
     emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) —— 与 '=' 同款 store */
   else
     emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
-  stack_pos = stack_pos - 1;
+  sp_book(1);
   return 3;
 }
 
@@ -765,8 +779,7 @@ int pre_incdec(int type, int op)
 {
   if ((type != 1) & (type != 2))
     error();
-  be_push();                   /* push %eax —— 保存 lv 地址 */
-  stack_pos = stack_pos + 1;
+  sp_push();  /* push %eax —— 保存 lv 地址 */
   emit(3, "\x5b\x8b\x03");     /* pop %ebx ; mov (%ebx),%eax —— lv 旧值 */
   emit(1, "\x53");             /* push %ebx —— 地址放回栈顶 */
   binary1(3);                  /* push %eax —— 旧值入栈 */
@@ -779,7 +792,7 @@ int pre_incdec(int type, int op)
     emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) */
   else
     emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
-  stack_pos = stack_pos - 1;
+  sp_book(1);
   return 3;                    /* 值 = 新值，留在 eax */
 }
 
@@ -787,8 +800,7 @@ int post_incdec(int type, int op)
 {
   if ((type != 1) & (type != 2))
     error();
-  be_push();                   /* push %eax —— 保存 lv 地址 */
-  stack_pos = stack_pos + 1;
+  sp_push();  /* push %eax —— 保存 lv 地址 */
   emit(3, "\x5b\x8b\x03");     /* pop %ebx ; mov (%ebx),%eax —— lv 旧值 */
   emit(2, "\x89\xc1");         /* mov %eax,%ecx —— 暂存旧值（后缀返回值） */
   emit(1, "\x53");             /* push %ebx —— 地址放回栈顶 */
@@ -801,7 +813,7 @@ int post_incdec(int type, int op)
   else
     emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
   emit(2, "\x89\xc8");         /* mov %ecx,%eax —— 恢复旧值（后缀值=旧） */
-  stack_pos = stack_pos - 1;
+  sp_book(1);
   return 3;
 }
 
@@ -824,24 +836,20 @@ int postfix_expr()
   }
   else if (accept("(")) {
     int s = stack_pos;
-    be_push();
-    stack_pos = stack_pos + 1;
+    sp_push();
     if (accept(")") == 0) {
       promote(expression());
-      be_push();
-      stack_pos = stack_pos + 1;
+      sp_push();
       while (accept(",")) {
 	promote(expression());
-	be_push();
-	stack_pos = stack_pos + 1;
+	sp_push();
       }
       expect(")");
     }
     emit(7, "\x8b\x84\x24...."); /* mov (n * 4)(%esp),%eax */
     save_int(code + codepos - 4, (stack_pos - s - 1) << 2);
     emit(2, "\xff\xd0"); /* call *%eax */
-    be_pop(stack_pos - s);
-    stack_pos = s;
+    sp_pop_to(s);
     type = 3;
   }
   else if (accept("++")) {           /* 后缀 lv++：值=旧值 */
@@ -1181,14 +1189,13 @@ int expression()
     type = 3;
   }
   if (accept("=")) {
-    be_push();
-    stack_pos = stack_pos + 1;
+    sp_push();
     promote(expression());
     if (type == 2)
       emit(3, "\x5b\x89\x03"); /* pop %ebx ; mov %eax,(%ebx) */
     else
       emit(3, "\x5b\x88\x03"); /* pop %ebx ; mov %al,(%ebx) */
-    stack_pos = stack_pos - 1;
+    sp_book(1);
     type = 3;
   }
   /* ---- 教学里程碑 M4：+= -= *= %= 复合赋值 ----
@@ -1616,8 +1623,7 @@ void statement()
     while (accept("}") == 0)
       statement();
     table_pos = n;
-    be_pop(stack_pos - s);
-    stack_pos = s;
+    sp_pop_to(s);
   }
   else if (peek("char") | peek("int")) {
     /* M9f：局部声明子句表 `int a,b=2;`（对齐 minicc；栈槽逐子句 push） */
@@ -1629,8 +1635,7 @@ void statement()
       get_token();
       if (accept("="))
 	    promote(expression());
-      be_push();
-      stack_pos = stack_pos + 1;
+      sp_push();
       if (accept(",") == 0) {
 	expect(";");
 	dmore = 0;
@@ -1695,7 +1700,7 @@ void statement()
     if (peek(";") == 0)
       promote(expression());
     expect(";");
-    be_pop(stack_pos);
+    sp_discard();
     emit(1, "\xc3"); /* ret */
   }
   else {
@@ -1858,8 +1863,7 @@ int stmt_switch()
   expect("(");
   promote(expression());
   expect(")");
-  be_push();                         /* 值入栈槽（%eax 即值）；派发区紧随其后读栈顶 */
-  stack_pos = stack_pos + 1;
+  sp_push();  /* 值入栈槽（%eax 即值）；派发区紧随其后读栈顶 */
   sw_mkname('d');
   d = lbl_declare(nm_buf);
   lbl_seq = lbl_seq + 1;
@@ -1909,8 +1913,7 @@ int stmt_switch()
     emit_goto_anchor(e);             /* 未中且无 default → .exit（前向） */
   lbl_def_anchor(e);                 /* .exit 定义于链尾：break/body-end/未中 前向回填至此 */
   sw_case_cnt = n0;                  /* 还原 case 表（嵌套用） */
-  be_pop(1);                         /* 弹出值临时槽 */
-  stack_pos = stack_pos - 1;
+  sp_popn(1);/* 弹出值临时槽 */
   return 0;
 }
 
