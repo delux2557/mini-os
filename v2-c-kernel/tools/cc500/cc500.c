@@ -772,7 +772,7 @@ int compound_assign(int type, int n, char *s)
   emit(1, "\x53");             /* push %ebx —— 地址放回栈顶 */
   binary1(3);                  /* push %eax —— lv 值入栈（type 3 为值，promote 空操作） */
   binary2(expression(), n, s); /* %eax = lv值 op rhs（rhs 独立求值一次） */
-    emit_store(type);
+  emit_store(type);
   sp_book(1);
   return 3;
 }
@@ -799,7 +799,7 @@ int pre_incdec(int type, int op)
     binary2(3, 3, "\x5b\x01\xd8");           /* pop %ebx ; add %ebx,%eax -> 新值（值弹栈记账含于 binary2） */
   else
     binary2(3, 5, "\x5b\x29\xc3\x89\xd8");   /* pop %ebx ; sub %eax,%ebx ; mov %ebx,%eax -> 新值 */
-    emit_store(type);
+  emit_store(type);
   sp_book(1);
   return 3;                    /* 值 = 新值，留在 eax */
 }
@@ -816,7 +816,7 @@ int post_incdec(int type, int op)
     emit(3, "\x83\xc0\x01");   /* add $1,%eax -> 新值 */
   else
     emit(3, "\x83\xe8\x01");   /* sub $1,%eax -> 新值 */
-    emit_store(type);
+  emit_store(type);
   emit(2, "\x89\xc8");         /* mov %ecx,%eax —— 恢复旧值（后缀值=旧） */
   sp_book(1);
   return 3;
