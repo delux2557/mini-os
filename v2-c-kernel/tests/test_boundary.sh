@@ -4,7 +4,8 @@
 # minicc 补齐能力时，"翻正哪些行"完全依赖前缀检索，错标会直接污染那条通道：
 #   （无前缀）全拒族：三方都必须 REJ（子集纪律；gcc 列如为真实值则另见 SPLIT-G）；
 #   SPLIT-G：gcc 更宽（gcc 接受/有值，cc500 与 minicc 均拒 = 有意子集边界）；
-#   SPLIT-M：minicc 能力缺口（goto/switch 家族 —— minicc 待补，见 #170/#171 台账）；
+#   SPLIT-M：minicc 能力/容量缺口（switch 家族待补；另含容量上限行）。**翻正通道的首次使用**：
+#       #165 的 goto 半边已由 M14goto 补齐 ⇒ `SPLIT-M-goto` 已翻正为全接受族的 `goto-fwd`。
 #   SPLIT-C：cc500 接受面缺口（arity 不校验、`*3` 不阻编译 ⇒ 编得过但运行期自成后果）；
 #   DIV：**显式登记的已知分歧**（cc500 无类型面 ⇒ deref 恒 char 宽；#171 契约）——期望仍逐位
 #       锁死，"分歧变大/变小/消失"都要红（消失也许意味着该修本台账了，那也是红给你看）。
@@ -74,12 +75,24 @@ chk str-deref-k      0   0   0   'int main(){char *s;s="abc";return *(s+1)-98;}'
 chk mul-chain        0   0   0   'int main(){int a,b;a=3;b=4;return a*b-12;}'
 chk loop-logic       0   0   0   'int main(){int i,s;i=0;s=0;while(i<5){if(i%2){i=i+1;continue;}s=s+i;i=i+1;}return s-6;}'
 chk call-rec         0   0   0   'int f(int n){if(n<=0){return 0;}return n+f(n-1);}int main(){return f(4)-10;}'
+# M14goto（#165 goto 半边）：前向/后向/出环三形态逐位同值（原 SPLIT-M-goto 翻正，见头注释）
+chk goto-fwd         0   0   0   'int main(){goto e;return 9;e:return 0;}'
+chk goto-back        5   5   5   'int main(){int i;i=0;L:i=i+1;if(i<5)goto L;return i;}'
+chk goto-out-loop    3   3   3   'int main(){int i;i=0;while(i<10){i=i+1;if(i==3)goto out;}return 1;out:return i;}'
 # ── 显式登记分歧：cc500 无类型面，`*p` 恒 char 宽（#171 契约的镜像钉；值 crafted 分离）──
 chk DIV-int-deref-w  34   32  34   'int main(){int v;int *p;v=0x0102;p=&v;return (*p*67+3)%35;}'
-# ── 能力缺口台账（非分歧，是"minicc 待补 goto/switch 家族"的形状快照，见 #165/#171 后续）──
-chk SPLIT-M-goto     0   0   REJ 'int main(){goto e;return 9;e:return 0;}'
+# ── 能力/容量缺口台账（"minicc 待补 / 上限"的**形状快照**；翻正通道见头注释）──
 chk SPLIT-M-switch   1   1   REJ 'int main(){int v;v=1;switch(v){case 1:return 1;}return 0;}'
 chk SPLIT-M-fall     0   0   REJ 'int main(){int v,r;r=0;v=1;switch(v){case 1:r=r+1;case 2:r=r+10;break;default:r=9;}return r-11;}'
+# 容量类（M14goto 引入，实测钉出）：cc500 的 lbl_tab 是动态 `char*`（近无上限）、gcc 无上限，
+#   而 minicc 是固定表 ⇒ 具名标签上限 24、同标签 pending goto 上限 32。
+#   恰在上限内（24 标签 / 32 goto）实测 minicc 通过 ⇒ 本两行钉的是**越界侧**。
+#   注：两张表共用 "too many labels" 串（另一张是匿名控制流表 LAB_MAX=4096），报错分不清是哪张满。
+#   若将来抬上限或分串，按翻正通道改本两行期望即可（值那侧 cc500/gcc 列不动）。
+SL25="int main(){int i;i=0;"; for ((bi=0;bi<25;bi++)); do SL25="$SL25""goto L$bi;L$bi:i=i+1;"; done; SL25="$SL25""return i;}"
+SG33="int main(){int i;i=0;"; for ((bi=0;bi<33;bi++)); do SG33="$SG33""goto T;"; done; SG33="$SG33""T:return 7;}"
+chk SPLIT-M-labelcap 25  25  REJ "$SL25"
+chk SPLIT-M-gotocap  7   7   REJ "$SG33"
 # ── cc500 接受面缺口（arity 不校验 / 不做指针性检查 ⇒ 编得过，运行期自成后果）──
 # ⚠ arity 行的期望值应取自**调用约定**，不该取自"缺失形参槽里恰好是什么"：
 #   cc500 调用方从左到右压参、被调方按「末参 4(%esp) / 首参 8(%esp)」取参 ⇒ 只传一个实参时，

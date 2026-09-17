@@ -95,10 +95,6 @@ int nloop;
 
 int CODE_BASE = 0x800a0000; /* APP_LINK（hex 字面量，int 可载） */
 int cur_nargs; int cur_frame; int frame_patch;
-/* M14goto：具名标签表（g* 前缀避让匿名 jmp 标签 labs/ltarget） */
-char gb1[64];
-char gnm[24][32]; int gdef[24];
-int gpnd[24][32]; int gpc[24]; int ngl;
 int code_cap;
 
 char* code; int code_len;   /* 产物缓冲（brk 分配，char* 字节流） */
@@ -124,8 +120,6 @@ int ND_DECL = 35; int ND_FUNC = 36; int ND_GVAR = 37;
 /* V3b（与 minicc.c 同步）：后缀 ++/--（值为旧值）、do-while、break/continue */
 int ND_POST_INC = 38; int ND_POST_DEC = 39;
 int ND_DO = 40; int ND_BREAK = 41; int ND_CONTINUE = 42;
-/* M14goto（与 minicc.c 同步）：具名 label / goto，函数作用域 */
-int ND_LABEL_ = 43; int ND_GOTO_ = 44;
 
 /* MC-09 递归深度守卫（与 host minicc.c 同步；guest 用户栈仅 28KB，超限受控报错非 SIGSEGV）：
  *   EXPR_DEPTH_MAX 32  表达式/操作数嵌套（expr/unary 入口）
@@ -995,16 +989,6 @@ int block_stmt() {
     return r;
 }
 
-int tk_pos_bak; char tk_bak[256]; int tkw, tkn, tks, tkc, tkl;
-void tk_save2(int *p, char *b, int *w, int *nu, int *st, int *ch, int *tll) {
-    *p = src_pos; { int i = 0; while (tok[i]) { b[i] = tok[i]; i = i + 1; } b[i] = 0; }
-    *w = tok_is_word; *nu = tok_is_num; *st = tok_is_str; *ch = tok_is_char; *tll = toklen;
-}
-void tk_load2(int *p, char *b, int *w, int *nu, int *st, int *ch, int *tll) {
-    src_pos = *p; { int i = 0; while (b[i]) { tok[i] = b[i]; i = i + 1; } tok[i] = 0; }
-    tok_is_word = *w; tok_is_num = *nu; tok_is_str = *st; tok_is_char = *ch; toklen = *tll;
-}
-
 int stmt() {
     int n;
     if (is_sym_s("{")) {
@@ -1016,31 +1000,6 @@ int stmt() {
         n = node_new(ND_BLOCK);
         na[n] = 0;
         return n;
-    }
-    if (accept_s("goto")) {                    /* M14goto（与 host 同构） */
-        if (tok_is_word == 0) fail("expected label name");
-        n = node_new(ND_GOTO_);
-        nival[n] = stradd(tok);
-        next_tok();
-        expect_s(";");
-        return n;
-    }
-    if (tok_is_word != 0 && peek_s("int") == 0 && peek_s("char") == 0) {
-        /* ident ':' 判 label；非 label 完整回退（与 host 同构） */
-        int bp, lno, bw, bn, bs, bc, bl;
-        char bb[256];
-        bw = 0; bn = 0; bs = 0; bc = 0; bl = 0;
-        tk_save2(&bp, bb, &bw, &bn, &bs, &bc, &bl);
-        lno = stradd(tok);
-        next_tok();
-        if (is_sym_s(":")) {
-            next_tok();
-            n = node_new(ND_LABEL_);
-            nival[n] = lno;
-            nl[n] = stmt();
-            return n;
-        }
-        tk_load2(&bp, bb, &bw, &bn, &bs, &bc, &bl);
     }
     if (peek_s("int") || peek_s("char")) {
         /* 局部声明子句表（`int a,b,*c[3];`——与 host 严格同构，§7.3 双编译器契约） */
@@ -1455,28 +1414,6 @@ int gen(int n) {
     return 0;
 }
 
-int gdef_name_eq(int i, char *nm);
-int g_find(char *nm) {           /* 名字→表位；li 返回于 gci */
-    int i = 0;
-    while (i < ngl) { if (gdef_name_eq(i, nm)) return i; i = i + 1; }
-    if (ngl >= 24) fail("too many labels");
-    { int j = 0; while (nm[j]) { gnm[ngl][j] = nm[j]; j = j + 1; } gnm[ngl][j] = 0; }
-    gdef[ngl] = -1; gpnd[ngl][0] = 0; gpc[ngl] = 0;
-    ngl = ngl + 1;
-    return ngl - 1;
-}
-int gdef_name_eq(int i, char *nm) {
-    int j = 0;
-    while (gnm[i][j] != 0 && nm[j] != 0) { if (gnm[i][j] != nm[j]) return 0; j = j + 1; }
-    if (gnm[i][j] != nm[j]) return 0;
-    return 1;
-}
-char *gname_of(int n) {          /* strtab 偏移 → 可比较缓冲 */
-    { int src = nival[n]; int j = 0; gb1[0] = 0;
-      while (src + j < 131072) { gb1[j] = strtab[src + j]; if (strtab[src + j] == 0) break; j = j + 1; }
-      gb1[j + 1] = 0; }
-    return gb1;
-}
 int gen_stmt_inner(int n) {
     if (nkind[n] == ND_EXPR_STMT) { gen(nl[n]); return 0; }
     if (nkind[n] == ND_BLOCK) {
@@ -1546,24 +1483,6 @@ int gen_stmt_inner(int n) {
         loop_leave();
         return 0;                           /* 条件假 → 自然落出循环 */
     }
-    if (nkind[n] == ND_LABEL_ || nkind[n] == ND_GOTO_) {
-        int gi; int p; int j2;
-        gi = g_find(gname_of(n));
-        if (nkind[n] == ND_LABEL_) {
-            if (gdef[gi] != -1) fail("label redefined");
-            gdef[gi] = code_len;
-            j2 = 0;
-            while (j2 < gpc[gi]) { p = gpnd[gi][j2]; save32(p + 1, code_len - (p + 5)); j2 = j2 + 1; }
-            gpc[gi] = 0;
-            gen_stmt(nl[n]);
-            return 0;
-        }
-        if (gdef[gi] != -1) { emit(1, "\xe9"); emit4(gdef[gi] - code_len); return 0; }
-        if (gpc[gi] >= 32) fail("too many gotos to one label");
-        gpnd[gi][gpc[gi]] = code_len; gpc[gi] = gpc[gi] + 1;
-        emit(1, "\xe9"); emit4(0);
-        return 0;
-    }
     if (nkind[n] == ND_BREAK) {
         if (nloop == 0) fail("break outside loop");
         loop_brk_add();
@@ -1607,9 +1526,7 @@ int gen_global(int n) {
 
 int gen_func(int n) {
     int si = nval[n];
-    int lj = 0;
     sval[si] = code_len;
-    ngl = 0;                              /* M14goto：函数作用域 */
     cur_nargs = nnargs[n];
     emit_op("\x55\x89\xe5");
     emit_op("\x81\xec"); emit4(0);
@@ -1617,8 +1534,6 @@ int gen_func(int n) {
     gen_stmt(nb[n]);
     emit_epilogue();
     save32(frame_patch, nnlocals[n]);
-    lj = 0;                               /* M14goto：未定义标签终检（同 host） */
-    while (lj < ngl) { if (gdef[lj] == -1 && gpc[lj] > 0) fail("undefined label"); lj = lj + 1; }
     return 0;
 }
 
