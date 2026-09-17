@@ -234,10 +234,12 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
   - 符号查找从后往前（最近声明优先）：局部变量遮蔽同名全局函数。
   - UTF-8 非 ASCII 注释字节：`peek/peek2` 用 `& 255` 无符号读取，避免有符号 char 负值被误判为 EOF。
   - 类型检查放宽：`type_eq` 允许右值 int 赋给指针，支撑 `xmalloc`（`brk` 系统调用）返回 int 地址赋给 `char*`。
-  - 资源上限（**#172 重标定**，定容依据见 `minicc_self.c` 顶部「自举容量」段）：输入 `IN_CAP=131072`/上限 `IN_LIMIT=126976`（差一个读块余量）、节点池 `NMAX=49152`、`code_cap=500000`。
-    - 节点池 15 个并行数组由静态数组改为**运行时 brk 分配**：minicc 不分离 `.bss`，静态数组的零初始化数据会按字面量全量内联进产物（42 B/节点），抬容量等于给内核加体积，逼得容量只能抠着给。改后自举产物 497KB → **155KB**，容量与产物脱钩。
-    - `PATCH_MAX=4096`、`strtab[20480]`、`strpool[4096]` 维持静态（合计约 26KB，占比已小）。
-    - 三条天花板的门禁：FAST 层 `mc_matrix` 的 S1/S2a/S2b/S2c（可编译子集 / 读块余量 / 源 ≤75% IN_LIMIT / 实测产物 <90% code_cap）+ CI 的 `miccboot` 层真编一次（节点峰值只能实测）。
+  - 资源上限（**#172 重标定 + 后续订正**，定容依据见 `minicc_self.c` 顶部「自举容量」段）：输入 `IN_CAP=131072`/上限 `IN_LIMIT=126976`（差一个读块余量）、节点池 `NMAX=49152`、名字池 `STRTAB_CAP=131072`、`code_cap=500000`。
+    - 节点池 15 个并行数组 + 名字池由静态数组改为**运行时 brk 分配**：minicc 不分离 `.bss`，静态数组的零初始化数据会按字面量全量内联进产物（42 B/节点、名字池 20KB），抬容量等于给内核加体积，逼得容量只能抠着给。改后自举产物 497KB → **135KB**，容量与产物脱钩。
+    - **名字池的越界守卫**：`stradd` 原先 `strtab[nstr] = …` 无任何比较，池满即静默写穿相邻内存（症状是"too many nodes"这类与真因无关的报错——#172 的初始误判正源于此）；现越界受控 `fail("strtab full")`。
+    - `PATCH_MAX=4096`、`strpool[4096]` 维持静态（合计约 8KB，占比已小）。
+    - 四条天花板的门禁：FAST 层 `mc_matrix` 的 S1/S2a~S2e（可编译子集 / 读块余量 / 源 ≤75% IN_LIMIT / 实测产物 <90% code_cap / 节点池未回退 / 名字池 ≥ 源×0.5）+ CI 的 `miccboot` 层真编一次（节点峰值只能实测）。
+    - **实测基线（2026-09-17，源 66121 B）**：AST 节点峰值 8,809（0.133/字节）、名字池用量 18,496（0.28 字节/源字节）。早期记录的"密度 0.269~0.315、宿主只有一半"来自一次**被污染的实验**（批量替换把 strtab 一起放大，报出的"too many nodes"实为名字池溢出），已作废。
   - 递归深度守卫（外部审计 MC-09，P1==P2 两侧同 fence）：guest 用户栈每进程仅 **28KB**（`src/mm/mem.h` `USER_STACK_SLOT=32KB` − 永不映射的 `USER_STACK_GUARD=4KB`），深括号/长链会让解析与 codegen 的递归打爆编译器自身栈（SIGSEGV，无编译期诊断）。故双实现同步加深度计数：表达式/一元链/操作数嵌套 `EXPR_DEPTH_MAX=32`、语句/块嵌套 `STMT_DEPTH_MAX=128`、codegen AST 深度 `GEN_DEPTH_MAX=256`，超限一律 `fail("expression nesting too deep")` / `fail("statement nesting too deep")` 受控报错。限幅按 28KB 预算反推（实测括号≥45 层、加法链≥1000 项即崩）并留出安全余量。
   - 宿主侧逻辑快速验证：gcc 直编 `minicc_self.c + host_crt.c`（`-Dmain` 改名避冲突 + `-include` 声明 syscall3）得宿主版 S，S 编 `minicc_self.c` 得 Q，`Q == P1` 逐字节一致 —— 证明 minicc_self.c 逻辑与 minicc.c 语义完全一致，机器码/运行期差异只可能来自 codegen（已被 guest 内 P1==P2 排除）。
   - **MC-04 FIX-G 宿主 fidx 错位（V3b 同步时暴露，已修）**：host minicc.c 调用点核对的 `fidx = si<0 ? nsym-1 : si` 在**实参解析后**重算 `nsym-1`——当实参含函数调用（如 `pre(g(),2)`，`g()` 的解析会 sym_add 隐式声明使 nsym 增长）时 fidx 会指到最后一个实参符号而非被调函数，误报 `arg count mismatch`。minicc_self.c 一直用已保存的 `nval[n]`（正确）。修法：host 改为 `fidx = n->val` 与 self 对齐。此前 minicc_self.c 无"调用先于定义 + 实参含函数调用"模式故未触发；V3b 同步引入 `prefix_incdec(unary(), ND_ADD)` 后暴露，属既有 bug 而非回归。
