@@ -298,6 +298,17 @@ else
     echo "[SKIP] hostself 或 / 写权限不可用（见 [2b4]）"
 fi
 
+echo "== [2b6] M14goto：host 侧 goto/label（#165 goto 半边收口） =="
+# 与 cc500 M11 对齐：函数作用域具名标签 + goto；`ident ':'` 判形走词法完整回退，非标签语句零扰动。
+# 值类断言不在此块：落尾告警是本块末条（ends_in_ret 须**看穿标签**，否则 `T:return x;` 误报）；
+# goto 的**求值**由 tests/test_boundary.sh（三方逐位）与 golden 的 exit 列（g13_goto.c=5）承担。
+hrun t_goto_fwd   'int main(){goto e;return 9;e:return 0;}' 0 'compiled OK' ''
+hrun t_goto_back  'int main(){int i;i=0;L:i=i+1;if(i<5)goto L;return i;}' 0 'compiled OK' ''
+hrun t_goto_blk   'int main(){int i;i=0;goto L;L:{i=i+7;}return i;}' 0 'compiled OK' ''
+hrun t_goto_undef 'int main(){goto nod;return 0;}' 1 'undefined label' 'compiled OK'
+hrun t_goto_dup   'int main(){L:return 1;L:return 2;}' 1 'label redefined' 'compiled OK'
+hrun t_goto_tail  'int main(){T:return 7;}' 0 'compiled OK' 'control reaches end'
+
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
 # 注意源码含 % 与 ;，printf 须用 '%s' 格式防格式串解析

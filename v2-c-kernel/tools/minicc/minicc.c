@@ -1275,6 +1275,7 @@ static int ends_in_ret(Node *s) {
         while (last->next) last = last->next;
         return ends_in_ret(last);
     }
+    if (s->kind == ND_LABEL) return ends_in_ret(s->l);   /* M14goto：标签体下沉一层（同 ND_BLOCK） */
     if (s->kind == ND_IF)
         return s->b && ends_in_ret(s->r) && ends_in_ret(s->b);
     if (s->kind == ND_WHILE) {
