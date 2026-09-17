@@ -118,6 +118,10 @@ struct Node {
 typedef struct {
     /* 输入 / 词法 */
     const unsigned char *src;  int src_len, src_pos;
+    /* goto/label（对齐 cc500 M11，函数作用域；前向引用 pending 链，节点=rel32 字段位置） */
+    char lnm[24][32]; int ldef[24];
+    int lpnd[24][32]; int lpcnt[24];   /* 前向 goto jmp 字段表（loop_brk 同构） */
+    int nlabs;
     char tok[TOK_MAX]; int tok_is_word, tok_is_num, tok_is_str, tok_is_char, toklen;
     /* 输出码流 */
     unsigned char *code; int code_len, code_cap;
@@ -382,7 +386,8 @@ enum {
     ND_POST_INC, ND_POST_DEC,  /* V3b：后缀 ++/--（需返回旧值，l=左值，见 gen()） */
     ND_EXPR_STMT, ND_BLOCK, ND_IF, ND_WHILE, ND_FOR, ND_RET,
     ND_DECL, ND_FUNC, ND_GVAR,
-    ND_DO, ND_BREAK, ND_CONTINUE   /* 循环语句补齐：do-while / break / continue */
+    ND_DO, ND_BREAK, ND_CONTINUE,
+    ND_LABEL, ND_GOTO   /* 循环语句补齐：do-while / break / continue */
 };
 /* （Node 类型已收进顶部 CC 上下文，见文件头"编译器上下文 CC"） */
 
@@ -460,6 +465,19 @@ static int decode_escape(void) {
     }
     fail("bad escape");
     return 0;
+}
+
+/* stmt 级 `ident ':'` 判形：完整回退（src_pos/tok/五个标志位同复） */
+typedef struct { int pos; char tk[TOK_MAX]; int w, nu, st, ch, tl; } TkMark;
+static void tk_save(TkMark *m) {
+    m->pos = src_pos; s_cpy(m->tk, tok);
+    m->w = tok_is_word; m->nu = tok_is_num; m->st = tok_is_str;
+    m->ch = tok_is_char; m->tl = toklen;
+}
+static void tk_load(TkMark *m) {
+    src_pos = m->pos; s_cpy(tok, m->tk);
+    tok_is_word = m->w; tok_is_num = m->nu; tok_is_str = m->st;
+    tok_is_char = m->ch; toklen = m->tl;
 }
 
 static void next_tok(void) {
@@ -1120,6 +1138,30 @@ static Node *stmt(void) {
         n->a = NULL;
         return n;
     }
+    if (accept("goto")) {                      /* M14goto：`goto ident;`（对齐 cc500 M11） */
+        if (!tok_is_word) fail("expected label name");
+        n = node_new(ND_GOTO);
+        s_cpy(n->name, tok);
+        next_tok();
+        expect(";");
+        return n;
+    }
+    if (tok_is_word && !(s_eq(tok, "int") || s_eq(tok, "char"))) {
+        /* `ident ':'` 判 label；非 label 完整回退（`a?b:c` 的 ':' 不在句首，词表已排 int/char） */
+        TkMark mk;
+        tk_save(&mk);
+        char labname[32];
+        s_cpy(labname, tok);
+        next_tok();
+        if (is_sym(":")) {
+            next_tok();
+            n = node_new(ND_LABEL);
+            s_cpy(n->name, labname);
+            n->l = stmt();                     /* 标签体=单条语句；多条由 `{}` 包裹（同 C） */
+            return n;
+        }
+        tk_load(&mk);
+    }
     if (peek("int") || peek("char")) {
         /* 局部声明（`int x;` / `char c;` / `int* p;` / `int a[3];` / `int a,b,*c;` 多声明子句） */
         int base_ty0, base_bty0;
@@ -1613,6 +1655,41 @@ static void gen_stmt_inner(Node *n) {
         loop_leave();
         return;                             /* 条件假 → 自然落出循环 */
     }
+    case ND_LABEL: case ND_GOTO:
+        { int li, f, tgt, j2; const char *nm = n->name;
+          li = 0;
+          while (li < cc.nlabs && !s_eq(cc.lnm[li], nm)) li++;
+          if (n->kind == ND_LABEL) {
+              if (li < cc.nlabs && cc.ldef[li] >= 0) fail("label redefined");
+              if (li >= cc.nlabs) {
+                  if (cc.nlabs >= 24) fail("too many labels");
+                  s_cpy(cc.lnm[cc.nlabs], nm); cc.ldef[cc.nlabs] = -1; cc.lpcnt[cc.nlabs] = 0;
+                  li = cc.nlabs; cc.nlabs++;
+              }
+              if (cc.ldef[li] >= 0) fail("label redefined");
+              cc.ldef[li] = code_len;
+              for (j2 = 0; j2 < cc.lpcnt[li]; j2++) {
+                  f = cc.lpnd[li][j2]; save32(f + 1, code_len - (f + 5));
+              }
+              cc.lpcnt[li] = 0;
+              gen_stmt(n->l);
+              return;
+          }
+          if (li >= cc.nlabs) {
+              if (cc.nlabs >= 24) fail("too many labels");
+              s_cpy(cc.lnm[cc.nlabs], nm); cc.ldef[cc.nlabs] = -1; cc.lpcnt[cc.nlabs] = 0;
+              li = cc.nlabs; cc.nlabs++;
+          }
+          if (cc.ldef[li] >= 0) {
+              tgt = cc.ldef[li];
+              emit1(0xE9); emit4(0); save32(code_len - 4, tgt - code_len);
+          } else {
+              if (cc.lpcnt[li] >= 32) fail("too many gotos to one label");
+              cc.lpnd[li][cc.lpcnt[li]++] = code_len;
+              emit1(0xE9); emit4(0);
+          }
+          return;
+      }
     case ND_BREAK:
         if (cc.nloop == 0) fail("break outside loop");
         loop_brk_add();
@@ -1651,6 +1728,7 @@ static void gen_global(Node *n) {
 static void gen_func(Node *n) {
     int si = n->val;
     syms[si].val = code_len;
+    cc.nlabs = 0;                            /* M14goto：标签表函数作用域 */
     cur_nargs = n->nargs;
     emit_op("\x55\x89\xe5");                /* push %ebp; mov %esp,%ebp */
     emit_op("\x81\xec"); emit4(0);          /* sub $0,%esp（帧大小收尾回填） */
@@ -1658,6 +1736,8 @@ static void gen_func(Node *n) {
     gen_stmt(n->b);
     emit_epilogue();
     save32(frame_patch, n->nlocals);        /* V2d：nlocals=帧字节数 */
+    { int lj; for (lj = 0; lj < cc.nlabs; lj++)     /* M14goto：未定义标签终检 */
+        if (cc.ldef[lj] < 0 && cc.lpcnt[lj] > 0) fail("undefined label"); }
 }
 
 /* ================= 收尾：回填补丁、校验、写文件 ================= */
