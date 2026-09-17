@@ -742,13 +742,26 @@ int post_incdec(int operand, int kind) {
     return n;
 }
 
-/* V3b：后缀表达式 = primary 后接任意 ++/--（优先级高于一元；函数调用/下标已由 primary 消化） */
+/* V3b：后缀表达式 = primary 后接任意 ++/--（优先级高于一元；函数调用已由 primary 消化） */
 int postfix() {
     int n = primary();
     int more = 1;
     while (more) {
         if (accept_s("++")) n = post_incdec(n, ND_POST_INC);
         else if (accept_s("--")) n = post_incdec(n, ND_POST_DEC);
+        /* #165：指针下标糖 `p[i]` ≡ `*(p+i)`——脱糖复用 bin 的指针缩放与 ND_DEREF 取宽，
+         * 零新增 codegen。数组下标（TY_ARRAY）已由 primary 消化，此处只接指针；非指针拒。
+         * bin 定义在本函数之后 → 隐式声明（返回 int，与定义一致）。 */
+        else if (accept_s("[")) {
+            if (nty[n] != TY_PTR) fail("subscript of non-pointer");
+            int idx = expr();
+            if (nty[idx] == TY_PTR || nty[idx] == TY_ARRAY) fail("index must be integer");
+            expect_s("]");
+            int d = node_new(ND_DEREF);
+            nl[d] = bin(n, idx, ND_ADD);
+            nty[d] = nbty[n];
+            n = d;
+        }
         else more = 0;
     }
     return n;

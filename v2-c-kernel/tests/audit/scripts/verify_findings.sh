@@ -51,8 +51,10 @@ chk E15 "M8 前缀语句(已修)"           "OK(cc500=2 gcc=2)"          'int ma
 chk E16 "M8 前缀表达式(已修)"   "OK(cc500=6 gcc=6)"          'int main(){int i;int j;i=5;j=++i;return j;}'
 chk E17 "M8 前缀 a+b(已修)"      "OK(cc500=4 gcc=4)"          'int main(){int a;int b;a=1;b=2;++a;return a+b;}'
 chk E18 "M8 后缀对照(应正常)"   "OK(cc500=255 gcc=255)"       'int main(){int a;int b;a=1;b=2;a++;return a+b-5;}'
-# E19 跳号预留：#165（cc500 缺 unary `*`/deref）收口后，"串内容直读"断言可从字节哈希通道
-#   升级为值通道（`*s==…`/`s[i]==…`）时占位——现无 deref，串内容只能靠 golden 产物哈希锁。
+# E19（#165 收口后转正）：串内容**直读**断言——旧码 cc500 无 unary `*`，"串内容"只能靠 golden
+#   产物哈希间接锁；收口后升级到值通道。与 E20/E21 的区别：E20/E21 只验**能否编译**，此处验
+#   **读出的字节**（`*s`/`s[1]` 的解引用读出），是 deref 发射路径的唯一值级观测。
+chk E19 "cc500 deref/下标直读" "OK(cc500=0 gcc=0)" 'int main(){char*s;s="abc";if(*s-97)return 9;return s[1]-98;}'
 chk E20 "M9g 串转义收口"   "OK(cc500=0 gcc=0)"         'int main(){char*s;s="a\"b";return 0;}'
 chk E21 "M9g 未知转义拒"   "REJ"                       'int main(){char*s;s="a\q";return 0;}'
-echo "SUMMARY pass=$pass fail=$fail （全 20 条=行为与修复后状态一致（E19 跳号预留，见上注释））"
+echo "SUMMARY pass=$pass fail=$fail （全 21 条=行为与修复后状态一致；E19 已随 #165 收口转正）"

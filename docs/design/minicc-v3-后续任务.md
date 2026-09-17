@@ -107,6 +107,7 @@
 - **cc500 能力集实测校准**：hostcc 探测——cc500 支持 `& | <<` 与 `char`，拒绝 global/array/ptr/`for`/`^`/`~`；据此 `CAPS_CC500` 复认保守正确（不给 `F_GLOBAL/F_ARRAY/F_PTR/F_FOR/F_BIT`）。
 - **P0-6 更新（M9c/e/f/g 后复校准，2026-09-16）**：cc500 已具备 F_GLOBAL（M9e 大写词法闭合后 `G%d` 可入网，实测 run_diff 98 样本收口/值零分歧）与 F_LEX（子句表/空语句/大小写混排 hex 形态入生成网）；`F_ARRAY/F_PTR/F_CHAR/F_SUGAR` 维持关（#165 deref/下标缺口未补，E_STR 只读形虽 cc500 已可跑仍按域保守）。上列为历史校准记录不回改。
 - **P0-6+ 复核补正（2026-09-16）**：上面"cc500 实测零分歧"当时**无门禁承载**——run_diff 全程只编 hostminicc，`--target cc500` 实际只验"minicc 接受 cc500 子集"，cc500 本体从未被调用（实测 96/96 样本零参与）⇒ 任何"解禁"即使 cc500 不支持也不会红。补两件：①`run_diff.sh` 增 `--hostcc500/--cc500run`，cc500 目标**必须**给出本体工具链（缺则 exit 2 拒跑），并对每例做**接受面 + 产物退码面**（经 cc500run，与 gcc 参考同口径）双验；`test_diffsynth.sh` 接审计工具链、cc500 种子 1→3（36 样本）。②转义家族（M9g 四类转义：`\n`/`\"`/`\x`/`\\`）原先经 E_STR 采样、需 deref 且挂 F_CHAR（cc500 关）⇒ cc500 目标零字符串字面量；现改为 **deref-free 形态每例无条件发射**（`char *E0; E0="q\"z";` 等 4 条），双编译器皆可解析。判别力已实测：伪造越界能力集（F_ARRAY）→ 接受面 6/6 红；伪造装载器恒返 0 → 退码面 6/6 红。
+- **#165（M13）收口（2026-09-17）**：指针访问语法的双向缺口关闭——cc500 补一元 `*` 与 `&`（左值表示=地址在 %eax，故 deref 零发射），minicc 补 `p[i] ≡ *(p+i)` 脱糖（复用既有指针缩放 + DEREF 取宽，零新增 codegen），两侧语法面对称。**但仍不等于 `CAPS_CC500` 可加位**：`F_PTR` 由 `npa=has(F_PTR)&&na>0` 依赖 `F_ARRAY`，而 cc500 无数组声明；`F_CHAR` 含 char 数组；`F_SUGAR` 无 ++--/复合赋值。且 cc500 无类型面 ⇒ `int *` 宽度与 minicc 有意分歧（宽度差已钉在 `mc_matrix` G7-有意分歧-int宽）⇒ 差分取样只取 char 宽形态。能力台账注释已在 `gen.c` 就地订正。
 - **薄 ddmin**：`tools/minicc/diffsynth/ddmin.sh` 行级 delta debugging，宿主 acceptance 谓词（gcc 接受 & hostminicc 拒绝 ⇒ 误拒 bug）把失败样例缩到最小触发子集（自检：multi-level pointer 样例 12 行 → 3 行）。
 
 **验收**：原则 6 名实相符（有单测，或文档如实描述现状与计划）。
