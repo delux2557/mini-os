@@ -42,7 +42,10 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
  * 见 docs/design/minicc-v3-后续任务.md 任务4。 */
 /* P0-6 更新：M9e 已补大写标识符词法，cc500 的 F_GLOBAL(G%d 命名)与全局子句表解禁；
  * 仍缺 deref/数组下标写/char 数组(#165)——F_ARRAY/F_PTR/F_CHAR/F_SUGAR 维持关。 */
-#define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT|F_GLOBAL|F_LEX|F_SWITCH)
+#define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT|F_GLOBAL|F_LEX)
+/* F_SWITCH 暂缓入 cc500 网（#170 CI 实证）：run_diff 的 minicc 接受通道建立在
+ * 『cc500 能力 ⊆ minicc 子集』前提上，而 minicc 至今无 switch——kind6 模板代码保留、
+     位保留，待 minicc 获得 switch（或 run_diff 支持按位 skip）后在上一行补 |F_SWITCH 即可。 */
 
 static int g_caps;
 static int has(int f){ return g_caps & f; }
