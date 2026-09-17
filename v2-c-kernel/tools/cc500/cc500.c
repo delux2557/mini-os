@@ -579,6 +579,8 @@ int primary_expr()
      * 非法 hex 串（0x1z、0x-1）由 error() 拒绝，不静默算错。 */
     if ((token[0] == '0') & ((token[1] == 'x') | (token[1] == 'X'))) {   /* M9e */
       i = 2;
+      if (token[2] == 0)   /* MC-07#5 对齐：`0x` 空位静默成 0 是算错不是宽容 */
+		error();
       while (token[i]) {
 	if (('0' <= token[i]) & (token[i] <= '9'))
 	  n = (n << 4) + token[i] - '0';
@@ -1577,6 +1579,8 @@ int sw_const()
     j = 0;
     if ((token[0] == '0') & ((token[1] == 'x') | (token[1] == 'X'))) {   /* M9e */
       j = 2;
+      if (token[2] == 0)   /* MC-07#5 对齐：`0x` 空位静默成 0 是算错不是宽容 */
+		error();
       while (token[j]) {
         if (('0' <= token[j]) & (token[j] <= '9'))
           n = (n << 4) + token[j] - '0';
