@@ -1773,14 +1773,22 @@ static void finish(void) {
 
 /* （in_data / in_len 已收进顶部 CC 上下文，见文件头） */
 
+/* #172：输入容量与可接受源上限——与自举源 minicc_self.c 的 IN_CAP/IN_LIMIT **同构同值**：
+ * 宿主 minicc 是 P1 的构建者，它先撞墙就没人能构建 P1（好在宿主侧是**显式失败**，不像
+ * guest 侧那样表现为"自举静默不过"）。IN_LIMIT = IN_CAP - 4096 是留一个读块的余量，
+ * 否则 in_len 刚过上限时那次 4096 读就会越界写缓冲（旧码 65536/65536 正是缺这个差额）。
+ * 命名加 MINICC_ 前缀：本文件会被 tests/test_minicc_mock.c 以 #include 方式并入。 */
+#define MINICC_IN_CAP   131072
+#define MINICC_IN_LIMIT (MINICC_IN_CAP - 4096)
+
 static int open_input(const char *path) {
     if (syscall3(14, 1, (int)path, 0) != 0) return -1;
-    in_data = (unsigned char *)xmalloc(65536);
+    in_data = (unsigned char *)xmalloc(MINICC_IN_CAP);
     in_len = 0;
     for (;;) {
-        if (in_len >= 65536) {
+        if (in_len >= MINICC_IN_LIMIT) {
             syscall3(17, 1, 0, 0);
-            sys_print("minicc: input too big (>64KB)\n");
+            sys_print("minicc: input too big\n");
             syscall3(0, 1, 0, 0);
         }
         int n = syscall3(16, 1, (int)(in_data + in_len), 4096);

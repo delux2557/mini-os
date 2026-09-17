@@ -369,6 +369,13 @@ test-cc500:
 test-minicc:
 	bash tests/test_minicc.sh
 
+# 自举不动点 P1==P2（guest 内 minicc-self 编译自身，逐字节比对 /minicc-self vs /out.elf）。
+# #172：本检查自 V3 落地起**一直不在任何 CI 层里**，于是"源头涨过自举容量常量 ⇒ 自举静默不过"
+# 无人发现（实测已断）。核心不变量必须有常驻门禁 ⇒ 入 HEAVY 矩阵（需 qemu-system-x86，与
+# cc500/qemu/serial 同族；单个 job 独立 runner，慢但失败可直接定位到本层）。
+test-miccboot:
+	bash tests/test_miccboot.sh
+
 # V4 mini-Csmith 差分对拍（MVP-A）：生成器(特性表+无UB三纪律)+gcc参考+minicc acceptance 差分
 test-diffsynth:
 	bash tests/test_diffsynth.sh
@@ -427,6 +434,12 @@ test-golden:
 golden-update:
 	bash tests/golden.sh --update
 
+# roadmap:193 主动认领：语言契约三方台账（24 形态 × gcc/cc500/minicc 逐位；ALL-REJ/ALL-OK
+# 与 SPLIT-*/DIV 分类的语义见 tests/test_boundary.sh 头注释——分类词表即 minicc 补齐
+# goto/switch 家族与 deref 宽度分歧的台账本体）。秒级纯宿主 → FAST。
+test-boundary:
+	bash tests/test_boundary.sh
+
 # P0-2 守卫消失审查（advisory）：diff 中净消失的 MC-/CC-/F-/fail("...") 标记需"GUARD-CHANGE:"声明；
 # CI fast job 以 continue-on-error 步消费（提示不阻断），本地/严格场景用退出码 2。
 GUARD_BASE ?=
@@ -470,9 +483,9 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host audit golden qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp stack
-TEST_LAYERS_FAST  = host stack audit golden
-TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc diffsynth diffsynth-guest slip tcp det tr rp
+TEST_LAYERS       = host audit golden boundary qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp stack
+TEST_LAYERS_FAST  = host stack audit golden boundary
+TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp
 
 test: $(addprefix test-,$(TEST_LAYERS))
 test-fast: $(addprefix test-,$(TEST_LAYERS_FAST))
@@ -529,4 +542,4 @@ clean:
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
 -include $(BUILD)/*.d
 
-.PHONY: run run-serial test test-host test-audit test-golden golden-update guard-diff test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-audit test-golden guard-diff test-boundary golden-update test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-miccboot test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
