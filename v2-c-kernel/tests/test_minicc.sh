@@ -274,6 +274,30 @@ if [ -x "$VD/hostself" ]; then
     fi
 fi
 
+echo "== [2b5] #165 指针访问双实现一致性（p[i] / *p / &x） =="
+# minicc.c 与 minicc_self.c 是同一语言的两份实现；#165 在两侧各加一支（下标脱糖 vs 下标糖）。
+# 必须证明两份实现对**新语法**产物逐字节一致——否则 P1==P2 自举不动点必破。
+# 注：该不动点本由 tests/test_miccboot.sh 承载，但当前因 minicc_self.c 自身已超其内置
+# 60000 字节输入上限而不可用（pre-existing，见 changelog）⇒ 本块是当下的**替代证据**。
+if [ -x "$VD/hostself" ] && [ -w / ]; then
+    P165_OK=1
+    printf '%s' 'int main(){char*s;int x;s="abc";x=s[1];if(x==98)return 0;return 1;}' >"$VD/p165_i.c"
+    printf '%s' 'int main(){char*s;s="abc";s[1]=66;return s[1]-66;}' >"$VD/p165_w.c"
+    printf '%s' 'int main(){int a;int*p;a=7;p=&a;return *p-7;}' >"$VD/p165_a.c"
+    printf '%s' 'int main(){char*s;int i;int x;s="abc";x=0;i=0;while(i<3){x=x+s[i];i=i+1;}return x-294;}' >"$VD/p165_loop.c"
+    for t in p165_i p165_w p165_a p165_loop; do
+        qemu-i386 "$VD/hostminicc" "$VD/$t.c" "$VD/${t}_h.elf" >/dev/null 2>&1
+        ln -sf "$PWD/$VD/$t.c" /minicc.c
+        qemu-i386 "$VD/hostself" >/dev/null 2>&1; cp /out.elf "$VD/${t}_s.elf"
+        rm -f /minicc.c
+        ha=$(sha256sum "$VD/${t}_h.elf" | cut -d' ' -f1); sa=$(sha256sum "$VD/${t}_s.elf" | cut -d' ' -f1)
+        if [ "$ha" = "$sa" ]; then echo "[ok]   $t 双实现产物一致"; else echo "[FAIL] $t 产物不一致"; P165_OK=0; fi
+    done
+    [ "$P165_OK" -eq 1 ] && echo "      #165 双实现一致性通过" || HOST_FAIL=$((HOST_FAIL+1))
+else
+    echo "[SKIP] hostself 或 / 写权限不可用（见 [2b4]）"
+fi
+
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
 # 注意源码含 % 与 ;，printf 须用 '%s' 格式防格式串解析
