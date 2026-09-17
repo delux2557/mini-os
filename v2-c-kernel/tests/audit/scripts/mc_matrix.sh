@@ -146,6 +146,14 @@ if [ -s "$S1ELF" ] && [ -n "$S_CCAP" ]; then
 else bad "S2c-无法测量自举产物" "S1 未产出产物，或读不到 code_cap=$S_CCAP"; fi
 if [ -n "$S_NMAX" ] && [ "$S_NMAX" -gt 8192 ]; then ok "S2d-节点池未被回退($S_NMAX>8192)"
 else bad "S2d-节点池过小" "NMAX=$S_NMAX（#172 前值 8192 已不够）"; fi
+# S2e：名字池容量 ≥ 源体积 × 0.5（实测用量 ≈ 源 × 0.28 ⇒ 该式保底 ≥1.8× 余量）。名字池曾是
+#      **无守卫的静态池**且已用到 90%（18.5KB/20.5KB）：溢出会静默写穿相邻内存、报出与真因无关
+#      的错——#172 里那个"too many nodes"的真身就是它（见 minicc_self.c 「自举容量」④与订正段）。
+#      现容量动态、越界由 stradd 受控报错；本钉防的正是"容量又被改小/源涨过头"这类静默回归。
+S_STRCAP=$(sget STRTAB_CAP)
+if [ -n "$S_STRCAP" ] && [ "$S_STRCAP" -ge $((S_SRC / 2)) ]; then
+  ok "S2e-名字池余量($S_STRCAP≥$((S_SRC / 2)))"
+else bad "S2e-名字池容量不足" "STRTAB_CAP=$S_STRCAP vs 源 $S_SRC（须 ≥ 源/2）"; fi
 # ── MC-08 末角已随上游收口（794a49b：parse 期 defined 标记）→ 原 XFAIL 翻 PASS 钉 ──
 # 说明：heavy 层 test_minicc.sh:224-226 已有同形断言（QEMU 路径）；此处为 FAST 宿主层等价钉，
 # 两层运行时不同（freestanding 构建 vs in-guest），双保险属 repo 既有分层风格。
