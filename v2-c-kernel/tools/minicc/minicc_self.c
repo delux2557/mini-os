@@ -39,24 +39,29 @@ int sys_print(char* s) { syscall3(1, s, 0, 0); return 0; }
  * 否则症状是自举静默失败：P1 读不下自己的源（input too big）、勉强读下却在解析末尾撞节点池
  * （too many nodes）、或产物超 code_cap（output too big）。2026-09 已这样断过一次，见 issue #172。
  *
- * 三条天花板的**代价**（决定了余量怎么给）：
+ * 四条天花板的**代价**（决定了余量怎么给）：
  *   ① 输入 IN_CAP/IN_LIMIT：in 走 xmalloc ⇒ 对产物零代价；
  *   ② 节点池 NMAX：走 xmalloc ⇒ 对产物零代价（#172 前是静态数组，42 B/节点全进产物）；
- *   ③ 产物 code_cap：emit1 **不扩容** ⇒ 它是产物硬上限（缓冲容量本身不计入产物）。
- *   ⇒ 如今只有 ③ 与产物挂钩，①② 只吃运行时内存，故可以给足。
+ *   ③ 产物 code_cap：emit1 **不扩容** ⇒ 它是产物硬上限（缓冲容量本身不计入产物）；
+ *   ④ 名字池 STRTAB_CAP：走 xmalloc ⇒ 对产物零代价（#172 前是静态 20 KB，也进产物）。
+ *   ⇒ 四条里只有 ③ 与产物挂钩，其余只吃运行时内存，故可以给足。
  *
- * 定容依据（2026-09-17 实测）：
- *   AST 节点峰值**必须用 minicc_self 自己测**（宿主 minicc 的密度只有一半左右——两份实现各建
- *   各的 AST，"宿主数据"不能给自举源定容，这正是本段初稿踩的坑）：源 65052 B 时 16384 不足、
- *   20480 够 ⇒ 密度 ≈ 0.269～0.315 节点/字节；
- *   产物基线：节点池动态化后约 154 KB（此前 497 KB 里约 344 KB 是节点数组的零填充）。
- * 取值：IN_LIMIT = 126976（源上限）⇒ 按密度上界 0.315 × 126976 ≈ 40000 节点；
- *   NMAX = 49152（对**全量** IN_LIMIT 仍留 23% 余量，且不再有产物体积代价）；
- *   code_cap = 500000（≈154 KB 产物的 3 倍余量）。
+ * 定容依据（2026-09-17 实测，源 66121 B）：
+ *   AST 节点峰值 = **8,809**（用 minicc_self 自己打点；宿主 minicc 同源 8,317 ⇒ 两份实现只差
+ *     约 5%，**不是**初稿所称的"差一倍"）⇒ 密度 ≈ 0.133 节点/字节；
+ *   名字池 nstr = **18,496**（≈ 源字节 × 0.28）——当时 strtab[20480] 的 **90%**，见下 ④；
+ *   产物基线：节点池/名字池动态化后约 155 KB（此前 497 KB 里约 344 KB 是节点数组的零填充）。
+ * ⚠ 初稿错在哪（留档以免重犯）：为测 NMAX 用了 `sed s/13312/N/g` 批量放大，而同一轮里 strtab
+ *   已被误改成 13312 ⇒ **名字池被一起放大**，于是"16384 失败"其实是 **strtab 溢出写穿相邻全局**
+ *   造成的"too many nodes"（一个与真因无关的报错）；据此推出的 0.269~0.315 高密度作废。
+ * 取值：IN_LIMIT = 126976（源上限；密度 0.133 ⇒ 满源约需 17k 节点）；
+ *   NMAX = 49152（≈5× 当前需求，动态分配故只吃运行时内存）；
+ *   STRTAB_CAP = 131072（满源按 0.28 需 ≈36 KB ⇒ 3.6× 余量）；
+ *   code_cap = 500000（≈155 KB 产物的 3 倍余量）。
  *
  * 门禁分工（改本段后必须同步核对）：
- *   ① mc_matrix 的 S1/S2a/S2b/S2c 钉：可编译子集、读块余量关系、源 ≤75% IN_LIMIT、
- *      **实测产物** < 0.9×code_cap；
+ *   ① mc_matrix 的 S1/S2a~S2e 钉：可编译子集、读块余量关系、源 ≤75% IN_LIMIT、
+ *      **实测产物** < 0.9×code_cap、节点池未回退、名字池 ≥ 源 × 0.5（按 0.28 实测留足余量）；
  *   ② CI 的 miccboot 层：整链真编一次（**节点峰值只能实测**，两份实现的 AST 规模不可互推，
  *      故这一层不可省）。 */
 int IN_CAP = 131072;        /* 输入缓冲容量（main 里 in 的 xmalloc 大小） */
@@ -68,7 +73,8 @@ int* nval; char* nvkind; int* nvslot; int* nival;
 char* nnargs; char* nnlocals;
 int nn;                     /* 当前节点数（0 保留为 NULL） */
 
-char strtab[20480];         /* 名字池（str_add 追加，NUL 终止） */
+int STRTAB_CAP = 131072;    /* 名字池容量（运行时分配，见上 ④） */
+char* strtab;               /* 名字池（stradd 追加，NUL 终止；越界由守卫受控报错） */
 int nstr;
 
 char strpool[4096];         /* 字符串字面量池（只读数据段） */
@@ -182,13 +188,25 @@ int seq(int off, char* s) {     /* strtab[off] 与字面量相等 */
 
 int stradd(char* s) {           /* 拷贝入名字池，返回偏移 */
     /* 有意架构差异（勿当 FIX-D 遗漏）：与 host 完整版 minicc.c 的 `char name[32]`（每符号定长大数组，
-     * MC-02 要求词法拒绝 >31 字符标识符）不同，本自举版把名字统一拷入共享 strtab[20480] 名字池，无
+     * MC-02 要求词法拒绝 >31 字符标识符）不同，本自举版把名字统一拷入共享 strtab 名字池，无
      * 每符号固定大小数组，故 MC-02（写穿 name[32]）在结构上不适用、无需 identifier too long 检查。
      * host/guest 因此对 >31 字符标识符的接受性不同，属预期的行为分叉而非回归。 */
+    /* #172 补正：**必须有越界守卫**。旧码 `strtab[nstr] = …` 没有任何比较——池子满时会静默
+     * 写穿相邻全局（nstr/strpool/tok…，此处已是堆分配则写穿相邻堆块），把词法状态毁掉，报出来
+     * 的却是"too many nodes"这种与真因无关的错。实测：镜像分支的 label 探测对每条以单词开头的
+     * 语句都多入池一份名字（strtab 用量 18.5 KB/20.5 KB 已是 90%），撑爆后解析空转狂分配节点，
+     * 排查全程被"too many nodes"带偏。容量可以小，静默写穿不可接受。 */
     int off = nstr;
     int i = 0;
-    while (*(s+i)) { strtab[nstr] = *(s+i); nstr = nstr + 1; i = i + 1; }
-    strtab[nstr] = 0; nstr = nstr + 1;
+    for (;;) {
+        if (nstr >= STRTAB_CAP - 1) fail("strtab full");
+        if (*(s + i) == 0) break;
+        strtab[nstr] = *(s + i);
+        nstr = nstr + 1;
+        i = i + 1;
+    }
+    strtab[nstr] = 0;
+    nstr = nstr + 1;
     return off;
 }
 
@@ -1619,6 +1637,7 @@ int main() {
     nlen = xmalloc(NMAX * 4);     nl = xmalloc(NMAX * 4);   nr = xmalloc(NMAX * 4);
     na = xmalloc(NMAX * 4);       nb = xmalloc(NMAX * 4);   nnext = xmalloc(NMAX * 4);
     nval = xmalloc(NMAX * 4);     nvslot = xmalloc(NMAX * 4); nival = xmalloc(NMAX * 4);
+    strtab = xmalloc(STRTAB_CAP);   /* 名字池（④；同样必须在解析前就位） */
     code_len = 0;
     nsym = 0; npatch = 0; nlab = 0; nstr = 0; nn = 0; nstrpool = 0;
     funcs = 0; funcs_tail = 0; gvars = 0; gvars_tail = 0;
