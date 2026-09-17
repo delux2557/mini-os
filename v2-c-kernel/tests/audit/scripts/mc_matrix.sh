@@ -54,8 +54,9 @@ M  M7b-空语句接受          0 'int main(){int a; ;return a;}'
 M  M7b-全局子句表接受      0 'int a[3],b=7;int main(){return b-7;}'
 M  M7b-子句内函数声明拒    1 'int f(int a){return a;}int g(),x;'
 # ── G6：双编译器同理由必拒负例（P0-6 收尾）。含 cc500 空 hex 修复钉——`0x;` 曾静默算 0
-#    （MC-07#5 对齐时的 cc500 侧漏项，本 PR 修 primary/global-init 两触点）──
+#    （MC-07#5 对齐时的 cc500 侧漏项，本 PR 修 primary_expr 与 sw_const 两处解析点）──
 GG1 G6-cc空hex拒        1 "$B/hostcc500" 'int main(){int a;a=0x;return a;}'
+GG1 G6-cc空hex-case拒   1 "$B/hostcc500" 'int main(){int v;v=1;switch(v){case 0x:return 1;}return 0;}'
 GG1 G6-cc重定义拒       1 "$B/hostcc500" 'int f(){return 1;}int f(){return 2;}int main(){return 0;}'
 GG1 G6-cc未知转义拒     1 "$B/hostcc500" 'int main(){char *s;s="a\qb";return 0;}'
 GG1 G6-cc未闭合串拒     1 "$B/hostcc500" 'int main(){char*s;s="abc;return 0;}'

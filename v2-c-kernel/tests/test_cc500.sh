@@ -78,7 +78,10 @@ hrun t_hex_bad  'int main(){return 0x1z;}' 1 '0x1z' 'compiled OK'
 # 旧期望 0 建立在 cc500『空位静默算 0』缺陷上（将错就错的登记正例），本 PR 修复后归正。
 hrun t_hex_sign 'int main(){int x;x=0x-1;return x;}' 1 'cc500: error' 'compiled OK'
 hrun t_hex_eol  'int main(){int x;x=0x;return x;}'    1 'cc500: error' 'compiled OK'
-hrun t_ginit_hexe 'int g=0x;int main(){return 0;}'    1 'cc500: error' 'compiled OK'
+# case 常量的空 hex 走**另一处**解析点 sw_const()——与 primary_expr 同漏同修，故单列一钉。
+# （本行原为 `int g=0x;`：cc500 无全局初始化语法，该形在修复前后都于 '=' 处报错=意外绿假钉，
+#   实测 base `int g=3;` 亦 rc=1 'error at ='。见 #170 复核。）
+hrun t_hex_case 'int main(){int v;v=1;switch(v){case 0x:return 1;}return 0;}' 1 'cc500: error' 'compiled OK'
 hrun t_switch3  'int main(){int v;v=2;switch(v){case 1:v=10;break;case 2:v=20;break;default:v=30;}return v-20;}' 0 'compiled OK' 'cc500: error'
 hrun t_switchd  'int main(){int i;i=0;int r;r=0;for(i=0;i<3;i=i+1){switch(i){case 0:r=r+1;break;default:r=r+10;}}return r-21;}' 0 'compiled OK' 'cc500: error'
 hrun t_mixalpha 'int main(){return 123abc;}' \
