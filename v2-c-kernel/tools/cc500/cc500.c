@@ -324,6 +324,7 @@ void emit(int n, char *s)
   }
 }
 
+void bp4(int v);
 void be_push()
 {
   emit(1, "\x50"); /* push %eax */
@@ -332,7 +333,7 @@ void be_push()
 void be_pop(int n)
 {
   emit(6, "\x81\xc4...."); /* add $(n * 4),%esp */
-  save_int(code + codepos - 4, n << 2);
+  bp4(n << 2);
 }
 
 char *table;
@@ -355,6 +356,19 @@ void sp_book(int n){ if (n < 0 || n > stack_pos) error(); stack_pos = stack_pos 
 /* return 的长跳丢弃：弹出全部在途槽但**不动账本**——外层块/复合语句稍后按旧
  * 坐标对齐死代码尾（原 be_pop(stack_pos) 裸形为等价行为，此处命名显式化）。 */
 void sp_discard(void){ be_pop(stack_pos); }
+
+/* ---- P1-1 续：store/回填原语（同类复制点收口，均字节等价包装）----
+ * emit_store(2)=写 eax / 非2=写 al（type 语义同全局约定）。**不做账**——
+ *   调用点随后各自的 sp_book(1) 保留在现场（op embedding 纪律不动）。
+ * bp4：上一条指令尾部 4 字节立即数回填（je/jmp/call/lea/mov 共享 -4 契约）。 */
+void emit_store(int type)
+{
+  if (type == 2)
+    emit(3, "\x5b\x89\x03"); /* pop %ebx ; mov %eax,(%ebx) —— int/指针宽 */
+  else
+    emit(3, "\x5b\x88\x03"); /* pop %ebx ; mov %al,(%ebx) —— char 宽 */
+}
+void bp4(int v){ save_int(code + codepos - 4, v); }
 
 int sym_lookup(char *s)
 {
@@ -433,7 +447,7 @@ void sym_get_value(char *s)
   if ((t = sym_lookup(s)) == 0)
     error();
   emit(5, "\xb8...."); /* mov $n,%eax */
-  save_int(code + codepos - 4, load_int(table + t + 2));
+  bp4(load_int(table + t + 2));
   if (table[t + 1] == 'D') { /* defined global */
   }
   else if (table[t + 1] == 'U') /* undefined global */
@@ -441,12 +455,12 @@ void sym_get_value(char *s)
   else if (table[t + 1] == 'L') { /* local variable */
     int k = (stack_pos - table[t + 2] - 1) << 2;
     emit(7, "\x8d\x84\x24...."); /* lea (n * 4)(%esp),%eax */
-    save_int(code + codepos - 4, k);
+    bp4(k);
   }
   else if (table[t + 1] == 'A') { /* argument */
     int k = (stack_pos + number_of_args - table[t + 2] + 1) << 2;
     emit(7, "\x8d\x84\x24...."); /* lea (n * 4)(%esp),%eax */
-    save_int(code + codepos - 4, k);
+    bp4(k);
   }
   else
     error();
@@ -590,7 +604,7 @@ int primary_expr()
       }
     }
     emit(5, "\xb8...."); /* mov $x,%eax */
-    save_int(code + codepos - 4, n);
+    bp4(n);
     type = 3;
   }
   else if ((('a' <= token[0]) & (token[0] <= 'z')) |
@@ -645,7 +659,7 @@ int primary_expr()
     else
       error();
     emit(5, "\xb8...."); /* mov $x,%eax */
-    save_int(code + codepos - 4, cv);
+    bp4(cv);
     type = 3;
   }
   else if (token[0] == '"') {
@@ -716,7 +730,7 @@ int primary_expr()
     token[i] = 0;
     /* call ... ; the string ; pop %eax */
     emit(5, "\xe8....");
-    save_int(code + codepos - 4, i + 1);
+    bp4(i + 1);
     emit(i + 1, token);
     emit(1, "\x58");
     type = 3;
@@ -758,10 +772,7 @@ int compound_assign(int type, int n, char *s)
   emit(1, "\x53");             /* push %ebx —— 地址放回栈顶 */
   binary1(3);                  /* push %eax —— lv 值入栈（type 3 为值，promote 空操作） */
   binary2(expression(), n, s); /* %eax = lv值 op rhs（rhs 独立求值一次） */
-  if (type == 2)
-    emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) —— 与 '=' 同款 store */
-  else
-    emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
+  emit_store(type);
   sp_book(1);
   return 3;
 }
@@ -788,10 +799,7 @@ int pre_incdec(int type, int op)
     binary2(3, 3, "\x5b\x01\xd8");           /* pop %ebx ; add %ebx,%eax -> 新值（值弹栈记账含于 binary2） */
   else
     binary2(3, 5, "\x5b\x29\xc3\x89\xd8");   /* pop %ebx ; sub %eax,%ebx ; mov %ebx,%eax -> 新值 */
-  if (type == 2)
-    emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) */
-  else
-    emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
+  emit_store(type);
   sp_book(1);
   return 3;                    /* 值 = 新值，留在 eax */
 }
@@ -808,10 +816,7 @@ int post_incdec(int type, int op)
     emit(3, "\x83\xc0\x01");   /* add $1,%eax -> 新值 */
   else
     emit(3, "\x83\xe8\x01");   /* sub $1,%eax -> 新值 */
-  if (type == 2)
-    emit(3, "\x5b\x89\x03");   /* pop %ebx ; mov %eax,(%ebx) —— 存回新值 */
-  else
-    emit(3, "\x5b\x88\x03");   /* pop %ebx ; mov %al,(%ebx) */
+  emit_store(type);
   emit(2, "\x89\xc8");         /* mov %ecx,%eax —— 恢复旧值（后缀值=旧） */
   sp_book(1);
   return 3;
@@ -847,7 +852,7 @@ int postfix_expr()
       expect(")");
     }
     emit(7, "\x8b\x84\x24...."); /* mov (n * 4)(%esp),%eax */
-    save_int(code + codepos - 4, (stack_pos - s - 1) << 2);
+    bp4((stack_pos - s - 1) << 2);
     emit(2, "\xff\xd0"); /* call *%eax */
     sp_pop_to(s);
     type = 3;
@@ -1191,10 +1196,7 @@ int expression()
   if (accept("=")) {
     sp_push();
     promote(expression());
-    if (type == 2)
-      emit(3, "\x5b\x89\x03"); /* pop %ebx ; mov %eax,(%ebx) */
-    else
-      emit(3, "\x5b\x88\x03"); /* pop %ebx ; mov %al,(%ebx) */
+    emit_store(type);
     sp_book(1);
     type = 3;
   }
@@ -1481,9 +1483,9 @@ void emit_goto_anchor(int t)
   emit(5, "\xe9....");               /* jmp rel32 */
   v = load_int(lbl_tab + t + 2);
   if (lbl_tab[t + 1] == 'd')
-    save_int(code + codepos - 4, v - codepos);   /* 已定义：直接回填（含后向） */
+    bp4(v - codepos);   /* 已定义：直接回填（含后向） */
   else {
-    save_int(code + codepos - 4, v);             /* 前向挂起：旧头作本字段的链 */
+    bp4(v);             /* 前向挂起：旧头作本字段的链 */
     save_int(lbl_tab + t + 2, codepos - 4);      /* 本 rel32 字段位置成新头 */
   }
 }
@@ -1666,7 +1668,7 @@ void statement()
     loop_push();                   /* M5：压 while 帧 */
     statement();
     emit(5, "\xe9...."); /* jmp 回 cond 顶 */
-    save_int(code + codepos - 4, p1 - codepos);
+    bp4(p1 - codepos);
     loop_patch_continue(p1);       /* continue → cond 顶 */
     loop_patch_break();            /* break → 当前 codepos（退出点） */
     loop_pop();
@@ -1770,12 +1772,12 @@ int stmt_for()
     expression();                    /* step（可选，物理在 body 前） */
   expect(")");
   emit(5, "\xe9....");               /* jmp L_top */
-  save_int(code + codepos - 4, p_top - codepos);
+  bp4(p_top - codepos);
   p_body = codepos;                  /* L_body */
   loop_push();                       /* M5：压 for 帧 */
   statement();                       /* body */
   emit(5, "\xe9....");               /* jmp L_step（回 step 区） */
-  save_int(code + codepos - 4, p_step - codepos);
+  bp4(p_step - codepos);
   loop_patch_continue(p_step);       /* M5：continue → step */
   loop_patch_break();                /* M5：break → 当前 codepos（退出点） */
   loop_pop();                        /* M5：退 for 帧 */
@@ -1900,14 +1902,14 @@ int stmt_switch()
     int c = bget4(sw_cases, k * 8);
     int cp = bget4(sw_cases, k * 8 + 4);
     emit(5, "\x3d....");             /* cmp $c,%eax */
-    save_int(code + codepos - 4, c);
+    bp4(c);
     emit(6, "\x0f\x84....");         /* je 体 */
-    save_int(code + codepos - 4, cp - codepos);
+    bp4(cp - codepos);
     k = k + 1;
   }
   if (dv != -1) {
     emit(5, "\xe9....");             /* jmp default 体 */
-    save_int(code + codepos - 4, dv - codepos);
+    bp4(dv - codepos);
   }
   else
     emit_goto_anchor(e);             /* 未中且无 default → .exit（前向） */
