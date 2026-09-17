@@ -37,11 +37,14 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
 #define CAPS_MINIC (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_BIT|F_GLOBAL|F_ARRAY|F_PTR|F_FUNC|F_MOD|F_NEG|F_CHAR|F_SUGAR|F_DO|F_BRK|F_CNT|F_LEX)
 /* cc500 能力集（2026-09-06 M1-M6 实测校准：hostcc 探测 rc——for / do-while / break / continue、
  * 位运算 & | ^ >> ~、一元 - ! ~、% 现均支持；M9c/e/f/g 之后大写标识符/混排 hex/子句表/
- * 转义串已闭合 → F_GLOBAL(G%d 命名)随 F_LEX 入网 cc500；仍缺 数组声明 / 一元 * 与 & /
- * 指针下标(#165) / ++-- 与复合赋值 / char 数组——故 F_ARRAY/F_PTR/F_CHAR/F_SUGAR 维持关。
- * 见 docs/design/minicc-v3-后续任务.md 任务4。 */
-/* P0-6 更新：M9e 已补大写标识符词法，cc500 的 F_GLOBAL(G%d 命名)与全局子句表解禁；
- * 仍缺 deref/数组下标写/char 数组(#165)——F_ARRAY/F_PTR/F_CHAR/F_SUGAR 维持关。 */
+ * 转义串已闭合 → F_GLOBAL(G%d 命名)随 F_LEX 入网 cc500。 */
+/* P0-6 更新：M9e 已补大写标识符词法，cc500 的 F_GLOBAL(G%d 命名)与全局子句表解禁。 */
+/* #165（M13）更新：cc500 已补一元 `*` 与 `&`、minicc 已补 `p[i]` 脱糖（双向对称）。但
+ * F_ARRAY/F_PTR/F_CHAR/F_SUGAR **仍维持关**——各有独立门槛，与 deref 无关：
+ *   F_ARRAY：cc500 无数组声明；且 `npa = has(F_PTR)&&na>0` ⇒ F_PTR 依赖 F_ARRAY 同关；
+ *   F_CHAR ：含 char 数组（F_CHAR 才开 na 之外的 char 池）⇒ 同上；
+ *   F_SUGAR：cc500 无 ++/-- 与复合赋值。
+ * 即本轮解禁的是**语法接受面**，不是这一族的生成网——故注释在此只作能力台账订正。 */
 #define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT|F_GLOBAL|F_LEX)
 /* F_SWITCH 暂缓入 cc500 网（#170 CI 实证）：run_diff 的 minicc 接受通道建立在
  * 『cc500 能力 ⊆ minicc 子集』前提上，而 minicc 至今无 switch——kind6 模板代码保留、
@@ -62,7 +65,8 @@ static unsigned used_flags;
 #define MAXCA 2         /* char 数组数 */
 #define ASZ  5          /* 数组容量（下标 0..ASZ-1，指针解引用不越界） */
 /* 字符串池覆盖：定点下标 `*("lit"+k)`（k 为编译期常量 < len 必有界无 UB）。
- * 实测 minicc 接受 `*("lit"+k)`，但**不支持** char* 指针下标语法 `s[i]` → 用 deref 形式。 */
+ * #165 收口前 minicc 不支持 char* 指针下标语法 `s[i]`，故一律用 deref 形式；收口后两形
+ * 两侧均可（`p[i]` 在 minicc 侧脱糖为 `*(p+i)`，字节等价），此处不切换——形态稳定优先。 */
 /* P0-6：转义字面量入池（M9g 域）——src=进源码的转义形，dlen=解码后字节数；
  * 新 3 条专测 \n 缩位、\" 透传、\\ 连吞后的池偏移与 k 界正确性。 */
 static const struct { const char *src; int dlen; } STRS[] = {
@@ -71,10 +75,12 @@ static const struct { const char *src; int dlen; } STRS[] = {
   {"a\\nb",3},{"q\\\"z",3},{"\\x41z",2}};
 #define NSTRS ((int)(sizeof STRS/sizeof STRS[0]))
 /* P0-6+（复核补正）：转义**全家族**的 deref-free 采样池——每例程序无条件发射一次
- * "char *E%d; E%d=<转义串>;"。动机（复核实测）：E_STR 只读形需 deref(k)，而 cc500 无 deref
+ * "char *E%d; E%d=<转义串>;"。动机（复核实测）：E_STR 只读形需 deref(k)，而当时 cc500 无 deref
  * 且 F_CHAR 对 cc500 关闭 ⇒ 旧网在 cc500 目标上 96/96 样本**零字符串字面量**，恰好漏掉
- * M9g（cc500 侧 \" 曾致拒编）这一类 acceptance 级缺陷。四条分别对应 M9g 四刀：
- * \n 缩位 / \" 连吞（曾拒编）/ \x 贪心 / \\ 连吞。双编译器均可解析此形态（无 deref）。 */
+ * M9g（cc500 侧 \" 曾致拒编）这一类 acceptance 级缺陷。
+ * #165 之后 cc500 已有 deref，但 E_STR 仍受 F_CHAR 门控（含 char 数组，cc500 无）⇒ 本池
+ * 维持 deref-free：它是两者**无条件共同接受**的最稳采样面，不必随能力台账漂移。
+ * 四条分别对应 M9g 四刀：\n 缩位 / \" 连吞（曾拒编）/ \x 贪心 / \\ 连吞。 */
 static const char *ESCS[] = {"a\\nb","q\\\"z","\\x41z","a\\\\b"};
 #define NESCS ((int)(sizeof ESCS/sizeof ESCS[0]))
 static char varnames[MAXV][4];

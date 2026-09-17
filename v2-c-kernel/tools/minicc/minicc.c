@@ -894,12 +894,26 @@ static Node *post_incdec(Node *operand, int kind) {
     return n;
 }
 
-/* V3b：后缀表达式 = primary 后接任意 ++/--（优先级高于一元；函数调用/下标已由 primary 消化） */
+/* V3b：后缀表达式 = primary 后接任意 ++/--（优先级高于一元；函数调用已由 primary 消化） */
+static Node *bin(Node *l, Node *r, int kind);        /* #165：指针下标糖复用二元指针算术 */
 static Node *postfix(void) {
     Node *n = primary();
     for (;;) {
         if (accept("++"))      n = post_incdec(n, ND_POST_INC);
         else if (accept("--")) n = post_incdec(n, ND_POST_DEC);
+        /* #165：指针下标糖 `p[i]` ≡ `*(p+i)`——脱糖复用既有 ND_ADD 指针缩放 + ND_DEREF
+         * 取宽路径，零新增 codegen。数组下标（TY_ARRAY）已由 primary 消化，此处只接指针；
+         * 非指针带下标拒（宁拒不坑）。 */
+        else if (accept("[")) {
+            if (n->ty != TY_PTR) fail("subscript of non-pointer");
+            Node *idx = expr();
+            if (idx->ty == TY_PTR || idx->ty == TY_ARRAY) fail("index must be integer");
+            expect("]");
+            Node *d = node_new(ND_DEREF);
+            d->l = bin(n, idx, ND_ADD);
+            d->ty = n->bty;
+            n = d;
+        }
         else return n;
     }
 }
