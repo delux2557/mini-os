@@ -454,15 +454,27 @@ static int file_copy(const char *src, const char *dst) {
 
 /* 逐字节比对两个文件（长度 + 内容）；1=相同 0=不同 */
 static int file_equal(const char *a, const char *b) {
-    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)a, 0) != 0) return 0;
-    if (syscall3(SYS_FS_OPEN, 2, (uint32_t)b, 0) != 0) { syscall3(SYS_FS_CLOSE, 1, 0, 0); return 0; }
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)a, 0) != 0) {
+        nl_reset(); nl_s("[diff] open-fail "); nl_s(a); nl_end();
+        return 0;
+    }
+    if (syscall3(SYS_FS_OPEN, 2, (uint32_t)b, 0) != 0) {
+        syscall3(SYS_FS_CLOSE, 1, 0, 0);
+        nl_reset(); nl_s("[diff] open-fail "); nl_s(b); nl_end();
+        return 0;
+    }
     int eq = 1;
     uint32_t off = 0;
     for (;;) {
         char ba[64], bb[64];
         int na = (int)syscall3(SYS_FS_READ, 1, (uint32_t)ba, 64);
         int nb = (int)syscall3(SYS_FS_READ, 2, (uint32_t)bb, 64);
-        if (na != nb) { eq = 0; break; }
+        if (na != nb) {
+            eq = 0;
+            nl_reset(); nl_s("[diff] EOF off="); nl_u(off);
+            nl_s(" a="); nl_u(na); nl_s(" b="); nl_u(nb); nl_end();
+            break;
+        }
         if (na <= 0) break;                 /* 两文件同时到 EOF */
         for (int i = 0; i < na; i++)
             if (ba[i] != bb[i]) {
