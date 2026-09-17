@@ -394,10 +394,6 @@ static void cmd_netping(char *args) {
 
     int s = sys_net_socket(0);
     if (s < 0) { sys_print("[netping] socket() FAIL\n"); return; }
-    nl_reset();
-    nl_s("[netping] "); nl_u((ip >> 24) & 0xFF); nl_s(".");
-    nl_u((ip >> 16) & 0xFF); nl_s("."); nl_u((ip >> 8) & 0xFF); nl_s(".");
-    nl_u(ip & 0xFF); nl_s(":"); nl_u(port); nl_s(" ");
 
     uint32_t t0 = sys_getticks();
     int ok = 0, got = 0;
@@ -419,6 +415,17 @@ static void cmd_netping(char *args) {
         }
     }
     uint32_t rtt = sys_getticks() - t0;
+    /* 单行原子输出：整行只能**在无出让点之后**一次成行（nl_reset -> 拼装 -> nl_end）。
+     * nl_buf/nl_len 是全局行缓冲，而上面的等待循环里有 sys_sleep（让出 CPU）：若把
+     * "[netping] ip:port " 前缀提前写入、跨出让点未 flush，并发的启动回归套件（netsock/
+     * msg 等，用的是同一个 nl_buf）就会把它冲掉，nl_end() 刷出的是别人的内容 —— 症状是
+     * 串口出现被截断/穿插的 "[netping] 10…" 行，test_net/test_socket 的单行 grep 随即判红。
+     * 实测：宿主布局稍变（如 #176 给 file_equal 加诊断行）即从"偶发"变为稳定复现（应答未在
+     * 首次 recvfrom 前到达 => 必然走到 sys_sleep => 必然踩到）。 */
+    nl_reset();
+    nl_s("[netping] "); nl_u((ip >> 24) & 0xFF); nl_s(".");
+    nl_u((ip >> 16) & 0xFF); nl_s("."); nl_u((ip >> 8) & 0xFF); nl_s(".");
+    nl_u(ip & 0xFF); nl_s(":"); nl_u(port); nl_s(" ");
     if (ok) {
         nl_s("PONG +"); nl_u((uint32_t)got); nl_s("B rtt="); nl_u(rtt); nl_s(" ticks");
     } else {
@@ -454,15 +461,27 @@ static int file_copy(const char *src, const char *dst) {
 
 /* 逐字节比对两个文件（长度 + 内容）；1=相同 0=不同 */
 static int file_equal(const char *a, const char *b) {
-    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)a, 0) != 0) return 0;
-    if (syscall3(SYS_FS_OPEN, 2, (uint32_t)b, 0) != 0) { syscall3(SYS_FS_CLOSE, 1, 0, 0); return 0; }
+    if (syscall3(SYS_FS_OPEN, 1, (uint32_t)a, 0) != 0) {
+        nl_reset(); nl_s("[diff] open-fail "); nl_s(a); nl_end();
+        return 0;
+    }
+    if (syscall3(SYS_FS_OPEN, 2, (uint32_t)b, 0) != 0) {
+        syscall3(SYS_FS_CLOSE, 1, 0, 0);
+        nl_reset(); nl_s("[diff] open-fail "); nl_s(b); nl_end();
+        return 0;
+    }
     int eq = 1;
     uint32_t off = 0;
     for (;;) {
         char ba[64], bb[64];
         int na = (int)syscall3(SYS_FS_READ, 1, (uint32_t)ba, 64);
         int nb = (int)syscall3(SYS_FS_READ, 2, (uint32_t)bb, 64);
-        if (na != nb) { eq = 0; break; }
+        if (na != nb) {
+            eq = 0;
+            nl_reset(); nl_s("[diff] EOF off="); nl_u(off);
+            nl_s(" a="); nl_u(na); nl_s(" b="); nl_u(nb); nl_end();
+            break;
+        }
         if (na <= 0) break;                 /* 两文件同时到 EOF */
         for (int i = 0; i < na; i++)
             if (ba[i] != bb[i]) {
