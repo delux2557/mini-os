@@ -116,7 +116,36 @@ BOTH G7-有意分歧-int宽    8 'int main(){int a;int*p;a=200;p=&a;if(*p<0)retu
 # ── 自举输入纪律钉：minicc_self.c 必须落在 minicc 自己的可编译子集内（P1 构建=
 #    hostminicc 编它；#157 CI 实锤 ternary 越界后补，本地无法执行 P1 时这是唯一早警）──
 S1SRC="$(cd "$(dirname "$0")/../../.." && pwd)/tools/minicc/minicc_self.c"
-RUNX "$H" "$S1SRC" "$(mktemp -d)/s1.elf" >/dev/null 2>&1 && ok "S1-self源在minicc子集内(P1可构建)" || bad "S1-self源越出minicc子集" "P1 构建将失败——查 minicc_self.c 是否引入 host-only 语法(?:) 等"
+S1ELF="$W/s1self.elf"
+if RUNX "$H" "$S1SRC" "$S1ELF" >/dev/null 2>&1; then ok "S1-self源在minicc子集内(P1可构建)"
+else bad "S1-self源越出minicc子集" "P1 构建将失败——查 minicc_self.c 是否引入 host-only 语法(?:) 等"; fi
+# ── S2：自举容量纪律钉（#172）──
+# #172 实录：自举不动点曾因"两处按 40KB 源定下的常量"而**静默断掉**且无人知（miccboot 无 CI 层）。
+# 本组把"源涨过头"从慢层的静默失败提前成 FAST 层的显式红；常量一律从**自举源里读**（单一事实
+# 源，改源即改门禁，不在此手抄数值）。能静态判定的三条在此；节点峰值只能实测 ⇒ miccboot 层兜底。
+sget(){ sed -nE "s/^[[:space:]]*(int[[:space:]]+)?$1[[:space:]]*=[[:space:]]*([0-9]+).*/\2/p" "$S1SRC" | head -1; }
+S_ICAP=$(sget IN_CAP); S_ILIMIT=$(sget IN_LIMIT); S_NMAX=$(sget NMAX); S_CCAP=$(sget code_cap)
+S_SRC=$(wc -c < "$S1SRC" | tr -d ' ')
+# S2a：读块余量关系——in 是 xmalloc(IN_CAP)、读块固定 4096；差额不足则"in_len 刚过上限"那次读
+#      会越界写缓冲（旧码 65536/65536 正是缺这个差额，即上限与容量同值）。
+if [ -n "$S_ICAP" ] && [ -n "$S_ILIMIT" ] && [ $((S_ICAP - S_ILIMIT)) -ge 4096 ]; then
+  ok "S2a-读块余量($((S_ICAP - S_ILIMIT))≥4096)"
+else bad "S2a-读块余量不足" "IN_CAP=$S_ICAP IN_LIMIT=$S_ILIMIT（须差 ≥4096）"; fi
+# S2b：源体积 ≤ 75% IN_LIMIT（留 ≥25% 生长余量）——逼近即先红，不等到自举不过才发现。
+if [ -n "$S_ILIMIT" ] && [ "$S_SRC" -le $((S_ILIMIT * 3 / 4)) ]; then
+  ok "S2b-自举源余量($S_SRC≤$((S_ILIMIT * 3 / 4)))"
+else bad "S2b-自举源逼近输入上限" "源 $S_SRC vs IN_LIMIT $S_ILIMIT（须 ≤75%）"; fi
+# S2c：**实测**产物 < 0.9×code_cap。必须实测不能估算：产物长度直接决定 P1 能否产出 P2
+#      （emit1 不扩容 = 产物硬上限），而它同时随 NMAX（零初始化全局数组内联进产物，
+#       每节点 +42 B）与代码量增长——#172 里"抬 NMAX 会挤爆 code_cap"正踩在这条耦合上。
+if [ -s "$S1ELF" ] && [ -n "$S_CCAP" ]; then
+  S_PRD=$(wc -c < "$S1ELF" | tr -d ' ')
+  if [ "$S_PRD" -lt $((S_CCAP * 9 / 10)) ]; then
+    ok "S2c-自举产物余量($S_PRD<$((S_CCAP * 9 / 10)))"
+  else bad "S2c-自举产物逼近 code_cap" "产物 $S_PRD vs code_cap $S_CCAP（须 <90%）"; fi
+else bad "S2c-无法测量自举产物" "S1 未产出产物，或读不到 code_cap=$S_CCAP"; fi
+if [ -n "$S_NMAX" ] && [ "$S_NMAX" -gt 8192 ]; then ok "S2d-节点池未被回退($S_NMAX>8192)"
+else bad "S2d-节点池过小" "NMAX=$S_NMAX（#172 前值 8192 已不够）"; fi
 # ── MC-08 末角已随上游收口（794a49b：parse 期 defined 标记）→ 原 XFAIL 翻 PASS 钉 ──
 # 说明：heavy 层 test_minicc.sh:224-226 已有同形断言（QEMU 路径）；此处为 FAST 宿主层等价钉，
 # 两层运行时不同（freestanding 构建 vs in-guest），双保险属 repo 既有分层风格。
