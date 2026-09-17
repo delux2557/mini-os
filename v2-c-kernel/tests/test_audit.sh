@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-audit（P0-1 外部审计锁）：把四轮审计交付的复测工具固化为 FAST 层常驻门禁。
-#   ① cc500 E1-E18 一致性快照（verify_findings，期望=修复后行为，仅展示）+ F-01 硬断言×3
+#   ① cc500 E1-E21 一致性快照（verify_findings，期望=修复后行为，仅展示）+ F-01 硬断言×3
 #   ② minicc MC 回归矩阵 13 钉（tests/audit/scripts/mc_matrix.sh，含行为值钉）
 #   ③ cc500 启动不动点 P1==P2（纯宿主回环，无 qemu-system）
 # 只 gate「已修守卫」；未来新开放项按 mc_matrix 顶部规则走 XFAIL 告警（P0-4 已随 794a49b 收口转钉）。

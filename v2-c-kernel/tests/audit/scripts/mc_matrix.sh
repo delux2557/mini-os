@@ -14,6 +14,16 @@ W=$(mktemp -d); FAIL=0
 RUNX(){ if [ -n "$RUM" ]; then "$RUM" "$@"; else "$@"; fi; }
 ok(){  printf '  %-40s PASS\n' "$1"; }
 bad(){ printf '  %-40s FAIL %s\n' "$1" "$2"; FAIL=1; }
+# ── 死钉自检设施（#165 复核实测发现）──
+# 原 G5 组在 GG2 **定义之前**就调用了它：bash 只往 stderr 丢一行 `command not found`，而本脚本
+# 无 set -e、调用方也不查 stderr ⇒ 该钉从未执行、小计照报「全绿」（#166 加的判别力钉一直是死的）。
+# 现把整脚本 stderr 收进日志（原 stderr 存 fd 3 以便末尾原样回放），末尾检出该串即判红。
+ERRLOG=$(mktemp); exec 3>&2; exec 2>"$ERRLOG"
+GG2(){ # GG2 <名> <期望exit> <源码>——cc500 编译+运行双验（与 GG1 的仅编译 rc 面互补）
+  printf '%s\n' "$3" > "$W/g2.c"
+  if ! RUNX "$B/hostcc500" "$W/g2.c" "$W/g2.elf" >/dev/null 2>&1; then bad "$1" "cc500 拒编"; return; fi
+  ( cd "$W" && RUNX "$B/cc500run" g2.elf >/dev/null 2>&1 ); local rc=$?
+  if [ "$rc" = "$2" ]; then ok "$1"; else bad "$1" "exit=$rc 期望=$2"; fi; }
 M(){   # M <名> <期望编译rc> <源码>
   printf '%s\n' "$3" > "$W/m.c"
   local out rc; out=$(RUNX "$H" "$W/m.c" "$W/m.elf" 2>&1); rc=$?
@@ -24,6 +34,19 @@ R__(){ # R__ <名> <期望运行exit> <源码>（编译+运行双验）
   if ! RUNX "$H" "$W/m.c" "$W/m.elf" >"$W/m.out" 2>&1; then bad "$1" "编译意外失败: $(head -c 44 "$W/m.out")"; return; fi
   ( cd "$W" && RUNX "$U" m.elf >/dev/null 2>&1 ); local rc=$?
   if [ "$rc" = "$2" ]; then ok "$1"; else bad "$1" "exit=$rc 期望=$2"; fi
+}
+BOTH(){ # BOTH <名> <minicc侧期望> <源码> [cc500侧期望，缺省同 minicc侧]——**同一份源码**两侧各编各跑。
+  # 「对称」两字只能这样证：单侧钉无法区分「两边都对」与「两边各错一半」。第 4 参给出时=**有意
+  # 分歧钉**（cc500 无类型面导致的语义差），两侧各自比对 ⇒ 分歧被显式锁住，任一侧漂移即红。
+  printf '%s\n' "$3" > "$W/b.c"
+  local mc cc
+  if RUNX "$H" "$W/b.c" "$W/b.mc" >/dev/null 2>&1; then ( cd "$W" && RUNX "$U" b.mc >/dev/null 2>&1 ); mc=$?
+  else mc=REJ; fi
+  if RUNX "$B/hostcc500" "$W/b.c" "$W/b.500" >/dev/null 2>&1; then ( cd "$W" && RUNX "$B/cc500run" b.500 >/dev/null 2>&1 ); cc=$?
+  else cc=REJ; fi
+  local want_m="$2" want_c="${4:-$2}"
+  if [ "$mc" = "$want_m" ] && [ "$cc" = "$want_c" ]; then ok "$1"
+  else bad "$1" "minicc=$mc(期望$want_m) cc500=$cc(期望$want_c)"; fi
 }
 
 # ── MC-04 调用 arity（拒错不误对）────────────────────────
@@ -72,6 +95,24 @@ GG1 G6-min空hex拒       1 "$H" 'int main(){int a;a=0x;return a;}'
 GG1 G5-cc500-未知转义拒    1 "$B/hostcc500" 'int main(){char *s;s="a\qb";return 0;}'
 GG2 G5-cc500-双反斜字宽   0 'int main(){char *p;p="a\\b";if(p[2]==98)return 0;return 1;}'
 
+# ── G7：#165 指针访问语法双向对称（cc500 补一元 * 与 &，minicc 补 p[i] 脱糖）──
+# 票面《cc500×minicc 指针访问语法双向不对称》：cc500 无 unary *（读+写），minicc 无指针下标。
+# 收口后四种形态 × 读写位在两侧同源同值；验收义务「对称矩阵」的 FAST 硬门就落在下面 BOTH 钉上。
+# 说明：differ 钉只用 `char *` 串/局部（两编译器宽度口径一致的那一半），`int *` 的宽度有意
+# 分歧单独钉在组末（见其注释），不混进对称矩阵以免"把已知分歧算成对称"。
+BOTH G7-解引用读          0 'int main(){char *s;int x;s="abc";x=*s;return x-97;}'
+BOTH G7-解引用写          0 'int main(){char *s;s="abc";*s=65;return *s-65;}'
+BOTH G7-解引用偏移读      0 'int main(){char *s;int x;s="abc";x=*(s+1);return x-98;}'
+BOTH G7-解引用偏移写      0 'int main(){char *s;s="abc";*(s+1)=66;return *(s+1)-66;}'
+BOTH G7-下标读            0 'int main(){char *s;int x;s="abc";x=s[1];return x-98;}'
+BOTH G7-下标写            0 'int main(){char *s;s="abc";s[1]=66;return s[1]-66;}'
+BOTH G7-取址后解引用      0 'int main(){int a;int *p;a=7;p=&a;return *p-7;}'
+BOTH G7-取址非左值双拒    REJ 'int main(){int a;a=&3;return a;}'
+# 有意分歧钉（**非缺陷**，锁住"分歧是刻意保留的"）：cc500 无类型面 ⇒ deref 恒 char 宽（movsbl），
+# minicc 有类型面 ⇒ 按 int 宽取。同一份源码两侧各自比对，任一侧漂移即红。
+# a=200 的低字节 C8 作有符号取 = -56 < 0 ⇒ cc500 返 7；minicc 读到 200 ⇒ 返 8。
+BOTH G7-有意分歧-int宽    8 'int main(){int a;int*p;a=200;p=&a;if(*p<0)return 7;return 8;}' 7
+
 # ── 自举输入纪律钉：minicc_self.c 必须落在 minicc 自己的可编译子集内（P1 构建=
 #    hostminicc 编它；#157 CI 实锤 ternary 越界后补，本地无法执行 P1 时这是唯一早警）──
 S1SRC="$(cd "$(dirname "$0")/../../.." && pwd)/tools/minicc/minicc_self.c"
@@ -85,11 +126,6 @@ M 冲突钉·函数先行同名变量 1 'int a(){return 1;}int a;int main(){int 
 M 冲突钉·原型先行同名变量 1 'int a();int a;int main(){int x;x=2;return x;}'
 # ── G2：cc500 词法族（M9e 大写标识符/hex/标签、字符转义、// 注释；全走 RUNX）。
 #     值探针编译+运行双验（与 verify_findings 的展示级断言互补，此处分身 fast 硬门）──
-GG2(){ # GG2 <名> <期望exit> <源码>
-  printf '%s\n' "$3" > "$W/g2.c"
-  if ! RUNX "$B/hostcc500" "$W/g2.c" "$W/g2.elf" >/dev/null 2>&1; then bad "$1" "cc500 拒编"; return; fi
-  ( cd "$W" && RUNX "$B/cc500run" g2.elf >/dev/null 2>&1 ); local rc=$?
-  if [ "$rc" = "$2" ]; then ok "$1"; else bad "$1" "exit=$rc 期望=$2"; fi; }
 GG2 G2-大写ident值         0 'int main(){int Counter;Counter=5;return Counter-5;}'
 GG2 G2-大写hex值          0 'int main(){int a;a=0x1F;return a-31;}'
 GG2 G2-大写标签循环        0 'int main(){int i;i=0;L:i=i+1;if(i<3)goto L;return i-3;}'
@@ -113,9 +149,15 @@ GG2 G4-调用减-main非首     0 'int f(){return 1;}int main(){return f()-1;}'
 GG2 G4-双调用和-main非首   0 'int f(){return 1;}int g(){return 2;}int main(){return f()+g()-3;}'
 GG2 G4-调用存取-main非首   0 'int f(){return 1;}int main(){int x;x=f();return x-1;}'
 GG2 G4-入口判别-main非首   0 'int f(){return 7;}int main(){return 0;}'
+# ── 死钉自检（#165 复核实测发现：#166 加的 G5 判别力钉因 GG2 定义滞后而从未执行）──
+# 检出"命令未找到"即判红；同时把整段 stderr 回放到 fd 3（原始 stderr），诊断不丢失。
+if grep -q 'command not found' "$ERRLOG"; then
+  bad "死钉自检·断言函数定义顺序" "$(grep -m1 'command not found' "$ERRLOG")"
+fi
+cat "$ERRLOG" >&3; exec 2>&3; rm -f "$ERRLOG"
 # ── 守卫行 census（第二道保险：整段消失型；阈值=实测留 ~4 行余量）──
-n=$(grep -oE 'octal literals not supported|NUL byte in source|arg count mismatch|nesting too deep|fail\("redefined"\)' \
+n=$(grep -oE 'octal literals not supported|NUL byte in source|arg count mismatch|nesting too deep|fail\("redefined"\)|subscript of non-pointer' \
     "$(dirname "$0")/../../../tools/minicc/minicc.c" "$(dirname "$0")/../../../tools/minicc/minicc_self.c" 2>/dev/null | wc -l)
-if [ "$n" -ge 24 ]; then ok "守卫行 census（两实现≥24）"; else bad "守卫行 census" "$n/24——有守卫被删"; fi
+if [ "$n" -ge 26 ]; then ok "守卫行 census（两实现≥26）"; else bad "守卫行 census" "$n/26——有守卫被删"; fi
 printf '  mc_matrix 小计：%s\n' "$([ $FAIL = 0 ] && echo 全绿 || echo 有红)"
 exit $FAIL

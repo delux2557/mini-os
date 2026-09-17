@@ -306,6 +306,15 @@ if objdump -D -b binary -m i386 "$VD/t_sw1.elf" 2>/dev/null | grep -q '3d '; the
 else
     echo "[FAIL] 宿主 switch 未检出 3d 派发（疑似派发缺失/退化成 if 链）"; HOST_FAIL=$((HOST_FAIL+1))
 fi
+# ---- M13：一元 * 解引用 / & 取址（2026-09-17，收 #165）----
+# 编译路径：deref 读（`*s` / `*(s+1)`）、deref 写、取址后解引用均须 OK。
+# 症状对立：收口前这三态一律 rc=1 `error at`——旧码 unary deref 从未进文法（accept("*") 只有
+# 二元乘与声明层两处）。负对照 = `&3`（非左值取址）必须**仍拒**：新增分支不得把"不可取址"放宽。
+hrun t_ptr1   'int main(){char*s;int x;s="abc";x=*s;if(x==97)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_ptr2   'int main(){char*s;s="abc";*s=65;if(*s==65)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_ptr3   'int main(){char*s;int x;s="abc";x=*(s+1);if(x==98)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_ptr4   'int main(){int a;int*p;a=7;p=&a;if(*p==7)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_ptrneg 'int main(){int a;a=&3;return a;}' 1 'cc500: error' 'compiled OK'
 
 echo "== [3/4] guest：ccboot 自举不动点 + < 运行语义 =="
 if command -v qemu-system-i386 >/dev/null 2>&1; then
@@ -634,6 +643,23 @@ if command -v qemu-system-i386 >/dev/null 2>&1; then
     gwait "guest M12 switch内循环break 编译" "cc500: compiled OK" 60
     gwait "guest M12 switch内循环break r==2 exit0" "'/tswl.elf' exited code=0 PASS" 90
     gsend "rm /tswl.c"; gsend "rm /tswl.elf"
+# M13：指针访问运行语义（2026-09-17，收 #165）。症状对立：deref 读错地址/错宽、下标写不进、
+# *(s+k) 偏移错——每项各置一个独立 bit，全对才 exit 0。单行受 KB_LINE_MAX=128B 限，拆多行。
+    gsend "writefile <<M /tptr.c"
+    gsend "int main(){char*s;char c;char*p;int a;s=\"abc\";a=0;"
+    gsend "if(*s!=97)a=a+1;"
+    gsend "if(*(s+1)!=98)a=a+2;"
+    gsend "if(s[2]!=99)a=a+4;"
+    gsend "c=65;p=&c;*p=66;"
+    gsend "if(c!=66)a=a+8;"
+    gsend "s[0]=70;if(*s!=70)a=a+16;"
+    gsend "return a;}"
+    gsend "M"
+    gwait "M13 指针访问 源写入" "\[writefile\] '/tptr.c' wrote" 40
+    gsend "ccrun /tptr.c /tptr.elf"
+    gwait "guest M13 指针访问 编译" "cc500: compiled OK" 60
+    gwait "guest M13 deref/下标/取址 exit0" "'/tptr.elf' exited code=0 PASS" 90
+    gsend "rm /tptr.c"; gsend "rm /tptr.elf"
     if [ "$GFAIL" -gt 0 ]; then echo "[FAIL] guest 层 ${GFAIL} 项未过"; exit 1; fi
     echo "      guest 自举 + < 语义通过"
 else

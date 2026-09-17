@@ -904,6 +904,26 @@ int unary_expr()
     emit(2, "\xf7\xd0");            /* not %eax */
     return 3;
   }
+  /* ---- 教学里程碑 M13：一元 * 解引用 / & 取地址（2026-09-17，收 #165 对称缺口）----
+   * cc500 的左值表示 = **地址驻留 %eax**（1=char 左值 / 2=字宽左值 / 3=值）。
+   * 故 deref 零发射：指针值经 promote 装载后本身就**是**被指左值的地址，直接返回
+   * 左值类型 1 即可（读走 promote 的 movsbl、写走 emit_store 的 mov %al,(%ebx)）。
+   * 宽度沿用既有 p[i] 口径（postfix_expr 的 `[` 亦恒 1）——两形同宽，避免同源异义。
+   * & 同理：左值地址已在 %eax，返回字宽值即可；非左值（type 3）直接拒，宁拒不坑。
+   * 有意边界（见 README「cc500 方言边界」）：本编译器**无类型面**，故
+   *   ① `*p`/`p[i]` 恒按 char 宽取值 —— `int *p` 的宽度与 minicc/gcc 有意不同；
+   *   ② 不做指针性检查（`*3` 编得过，运行期自成后果）——与"除零属 UB 由使用者负责"同立场。 */
+  if (accept("*")) {
+    type = unary_expr();
+    promote(type);
+    return 1;
+  }
+  if (accept("&")) {
+    type = unary_expr();
+    if (type == 3)
+      error();
+    return 3;
+  }
   return postfix_expr();
 }
 
