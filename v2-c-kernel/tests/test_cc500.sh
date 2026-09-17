@@ -74,8 +74,13 @@ hrun t_heximm 'int main(){return 0xdeadbeef;}' 0 'compiled OK' ''
 # BUG-049 遗留负对照：非 0x 前缀的十进制混入字母仍须 FAIL 且报出错 token
 # 纯非法 hex 字符（0x1z）也 clean error，不静默算错、不骗 compiled OK
 hrun t_hex_bad  'int main(){return 0x1z;}' 1 '0x1z' 'compiled OK'
-# 0x-1 实为 0x-1 即 0-1=-1（'-' 后总是新子表达式，无数字缺口路径）——正例而非负例
-hrun t_hex_sign 'int main(){int x;x=0x-1;return x;}' 0 'compiled OK' ''
+# 0x-1：`0x` 空位无 hex 数字必须拒（对齐 MC-07#5；minicc 基线即 "empty hex literal"）。
+# 旧期望 0 建立在 cc500『空位静默算 0』缺陷上（将错就错的登记正例），本 PR 修复后归正。
+hrun t_hex_sign 'int main(){int x;x=0x-1;return x;}' 1 'cc500: error' 'compiled OK'
+hrun t_hex_eol  'int main(){int x;x=0x;return x;}'    1 'cc500: error' 'compiled OK'
+hrun t_ginit_hexe 'int g=0x;int main(){return 0;}'    1 'cc500: error' 'compiled OK'
+hrun t_switch3  'int main(){int v;v=2;switch(v){case 1:v=10;break;case 2:v=20;break;default:v=30;}return v-20;}' 0 'compiled OK' 'cc500: error'
+hrun t_switchd  'int main(){int i;i=0;int r;r=0;for(i=0;i<3;i=i+1){switch(i){case 0:r=r+1;break;default:r=r+10;}}return r-21;}' 0 'compiled OK' 'cc500: error'
 hrun t_mixalpha 'int main(){return 123abc;}' \
      1 '123abc' 'compiled OK'
 # F-1：关系 < / > / >= / <= 均须能编译通过（编码与语义下方另行实证）
