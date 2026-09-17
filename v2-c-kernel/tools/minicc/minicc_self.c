@@ -25,14 +25,47 @@
 
 int sys_print(char* s) { syscall3(1, s, 0, 0); return 0; }
 
-/* ---- 内存池（全部静态并行数组；code/in 经 brk 动态分配） ---- */
-/* V4 arena 瘦身：小枚举字段用 char[N] 压缩（nkind/nty/nbty/nvkind/nnargs/nnlocals
- * 值恒 <256；其余节点句柄/偏移仍须 int）。 */
-int NMAX = 8192;            /* AST 节点池上限 */
-char nkind[8192]; char nty[8192]; char nbty[8192]; int nlen[8192];
-int nl[8192]; int nr[8192]; int na[8192]; int nb[8192]; int nnext[8192];
-int nval[8192]; char nvkind[8192]; int nvslot[8192]; int nival[8192];
-char nnargs[8192]; char nnlocals[8192];
+/* ---- 内存池 ----
+ * V4 arena 瘦身：小枚举字段用 char（nkind/nty/nbty/nvkind/nnargs/nnlocals 值恒 <256；
+ * 其余节点句柄/偏移仍须 int）。
+ * #172：节点池 15 个并行数组**全部改为运行时 brk 分配**。原先它们是静态数组，而 minicc 不分离
+ * .bss——零初始化数据按字面量全量内联进产物，于是"节点容量"直接等于"内核里那份自举编译器的
+ * 体积"（42 B/节点）。后果是容量只能抠着给：旧配置 8192 只差 123 个节点，可抬容量会让内核涨
+ * 数百 KB，于是谁都不动它、自举就这么静默断了。改为动态后产物只含代码与常量，容量与实际需求
+ * 脱钩，可以一次给足余量。分配见 main()（必须在解析前完成）。 */
+
+/* ---- 自举容量（#172：按源的**实测**体积定；改动前先读这段） ----
+ * 下面几个常量决定"能自举多大的自己"。它们**不随源一起长**，故源涨过头必须同步抬——
+ * 否则症状是自举静默失败：P1 读不下自己的源（input too big）、勉强读下却在解析末尾撞节点池
+ * （too many nodes）、或产物超 code_cap（output too big）。2026-09 已这样断过一次，见 issue #172。
+ *
+ * 三条天花板的**代价**（决定了余量怎么给）：
+ *   ① 输入 IN_CAP/IN_LIMIT：in 走 xmalloc ⇒ 对产物零代价；
+ *   ② 节点池 NMAX：走 xmalloc ⇒ 对产物零代价（#172 前是静态数组，42 B/节点全进产物）；
+ *   ③ 产物 code_cap：emit1 **不扩容** ⇒ 它是产物硬上限（缓冲容量本身不计入产物）。
+ *   ⇒ 如今只有 ③ 与产物挂钩，①② 只吃运行时内存，故可以给足。
+ *
+ * 定容依据（2026-09-17 实测）：
+ *   AST 节点峰值**必须用 minicc_self 自己测**（宿主 minicc 的密度只有一半左右——两份实现各建
+ *   各的 AST，"宿主数据"不能给自举源定容，这正是本段初稿踩的坑）：源 65052 B 时 16384 不足、
+ *   20480 够 ⇒ 密度 ≈ 0.269～0.315 节点/字节；
+ *   产物基线：节点池动态化后约 154 KB（此前 497 KB 里约 344 KB 是节点数组的零填充）。
+ * 取值：IN_LIMIT = 126976（源上限）⇒ 按密度上界 0.315 × 126976 ≈ 40000 节点；
+ *   NMAX = 49152（对**全量** IN_LIMIT 仍留 23% 余量，且不再有产物体积代价）；
+ *   code_cap = 500000（≈154 KB 产物的 3 倍余量）。
+ *
+ * 门禁分工（改本段后必须同步核对）：
+ *   ① mc_matrix 的 S1/S2a/S2b/S2c 钉：可编译子集、读块余量关系、源 ≤75% IN_LIMIT、
+ *      **实测产物** < 0.9×code_cap；
+ *   ② CI 的 miccboot 层：整链真编一次（**节点峰值只能实测**，两份实现的 AST 规模不可互推，
+ *      故这一层不可省）。 */
+int IN_CAP = 131072;        /* 输入缓冲容量（main 里 in 的 xmalloc 大小） */
+int IN_LIMIT = 126976;      /* 可接受的最大源字节数 = IN_CAP - 4096（留一个读块余量） */
+int NMAX = 49152;           /* AST 节点池容量（运行时分配，见上） */
+char* nkind; char* nty; char* nbty; int* nlen;
+int* nl; int* nr; int* na; int* nb; int* nnext;
+int* nval; char* nvkind; int* nvslot; int* nival;
+char* nnargs; char* nnlocals;
 int nn;                     /* 当前节点数（0 保留为 NULL） */
 
 char strtab[20480];         /* 名字池（str_add 追加，NUL 终止） */
@@ -1543,7 +1576,9 @@ int open_input(char* path) {
     in_len = 0;
     int done = 0;
     while (done == 0) {
-        if (in_len >= 60000) fail("input too big");
+        /* IN_LIMIT 而非 IN_CAP：须留一个读块（4096）余量，否则"in_len 刚过上限一点点"
+         * 时那次 4096 读会越界写缓冲（旧码 60000 对 65536 正是这么留的，此处把关系写明）。 */
+        if (in_len >= IN_LIMIT) fail("input too big");
         int n = syscall3(16, 1, in + in_len, 4096);
         if (n <= 0) done = 1;
         else in_len = in_len + n;
@@ -1571,9 +1606,19 @@ int emit_elf_header() {
 }
 
 int main() {
-    code_cap = 860000;
-    code = xmalloc(860000);
-    in = xmalloc(65536);
+    /* 输出缓冲容量（不是产物长度）：emit1 不扩容，故它同时是"产物硬上限"。
+     * 节点池动态化后产物只剩代码与常量（≈154 KB），500000 留了 3 倍余量。 */
+    code_cap = 500000;
+    code = xmalloc(code_cap);
+    in = xmalloc(IN_CAP);
+    /* #172：节点池 15 个并行数组的运行时分配（见文件上方「内存池」段）。
+     * char 字段 1 B/节点，int 字段 4 B/节点；句柄索引 0..NMAX-1，与 node_new 的守卫配套。
+     * 放在解析之前——任何 node_new/数组访问都在这之后发生。 */
+    nkind = xmalloc(NMAX);        nty = xmalloc(NMAX);      nbty = xmalloc(NMAX);
+    nvkind = xmalloc(NMAX);       nnargs = xmalloc(NMAX);   nnlocals = xmalloc(NMAX);
+    nlen = xmalloc(NMAX * 4);     nl = xmalloc(NMAX * 4);   nr = xmalloc(NMAX * 4);
+    na = xmalloc(NMAX * 4);       nb = xmalloc(NMAX * 4);   nnext = xmalloc(NMAX * 4);
+    nval = xmalloc(NMAX * 4);     nvslot = xmalloc(NMAX * 4); nival = xmalloc(NMAX * 4);
     code_len = 0;
     nsym = 0; npatch = 0; nlab = 0; nstr = 0; nn = 0; nstrpool = 0;
     funcs = 0; funcs_tail = 0; gvars = 0; gvars_tail = 0;
