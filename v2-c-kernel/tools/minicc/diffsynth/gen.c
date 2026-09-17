@@ -24,7 +24,7 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
        F_GLOBAL=1<<9, F_ARRAY=1<<10, F_PTR=1<<11, F_FUNC=1<<12,
        F_MOD=1<<13, F_NEG=1<<14, F_CHAR=1<<15, F_SUGAR=1<<16,
        F_DO=1<<17, F_BRK=1<<18, F_CNT=1<<19,
-       F_LEX=1<<20 };   /* 词法族(M9c/e/f/g)：大写名/子句表/空语句/大小写混hex/转义串；仅 minicc+cc500 双收时入网 */
+       F_LEX=1<<20, F_SWITCH=1<<21 };   /* 词法族(M9c/e/f/g)：大写名/子句表/空语句/大小写混hex/转义串；仅 minicc+cc500 双收时入网 */
 /* 评审 P1：F_MOD（% idiv+取余发射路径）、F_NEG（一元负号）显式入网；
  * `<<` 有意排除——有符号左移溢出是 UB，与无 UB 三纪律冲突（评审亦认可刻意排除）。
  * F_CHAR（评审 §5 类型面盲区）：char 变量/char 数组/字符串定点读取入网——
@@ -43,6 +43,9 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
 /* P0-6 更新：M9e 已补大写标识符词法，cc500 的 F_GLOBAL(G%d 命名)与全局子句表解禁；
  * 仍缺 deref/数组下标写/char 数组(#165)——F_ARRAY/F_PTR/F_CHAR/F_SUGAR 维持关。 */
 #define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT|F_GLOBAL|F_LEX)
+/* F_SWITCH 暂缓入 cc500 网（#170 CI 实证）：run_diff 的 minicc 接受通道建立在
+ * 『cc500 能力 ⊆ minicc 子集』前提上，而 minicc 至今无 switch——kind6 模板代码保留、
+     位保留，待 minicc 获得 switch（或 run_diff 支持按位 skip）后在上一行补 |F_SWITCH 即可。 */
 
 static int g_caps;
 static int has(int f){ return g_caps & f; }
@@ -213,13 +216,14 @@ static void stmt_gen(int depth){
     /* 能力集门控的语句 pick 列表（for/do/break/continue 现 cc500 亦入网，见 CAPS_CC500）。
      * 循环计数器用 i0/d0/g0（非下划线）——cc500 词法/符号表不认下划线开头标识符（实测），
      * 命名避开用户变量 v%d、全局 G%d、数组 a%d、指针 p%d、函数 h0/h1、char c%d/ca%d。 */
-    int kinds[7], nk=0;   /* P0-6：+kind5 词法族组合模板 */
+    int kinds[8], nk=0;   /* P0-6/收尾：kind5 词法族、kind6 switch（F_SWITCH 仅 cc500 网） */
     kinds[nk++]=0;                                       /* 赋值 */
     if(has(F_IF))    kinds[nk++]=1;
     if(has(F_WHILE)) kinds[nk++]=2;
     if(has(F_FOR))   kinds[nk++]=3;
     if(has(F_DO))    kinds[nk++]=4;                      /* do-while + break/continue */
     if(has(F_LEX))   kinds[nk++]=5;                      /* M9c/e/f 词法族组合 */
+    if(has(F_SWITCH)) kinds[nk++]=6;                     /* M12 域：case 命中/不命中/default + break */
     int kind=kinds[rndi(0,nk-1)];
     if(kind==0){ expr_gen(b,depth+1,&lo,&hi,0); printf("  %s=(%s);\n",lv,b); }
     else if(kind==1){ used_flags|=F_IF; expr_gen(b,depth+1,&lo,&hi,1);
@@ -227,6 +231,11 @@ static void stmt_gen(int depth){
     else if(kind==2){ used_flags|=F_WHILE; expr_gen(b,depth+1,&lo,&hi,1);
         printf("  {int g0; g0=0; while((%s)&&g0<20){ g0=g0+1; %s=%s+1; }}\n",b,lv,lv); }
     else if(kind==3){ used_flags|=F_FOR; printf("  {int i0; for(i0=0;i0<8;i0=i0+1){ %s=%s+1; }}\n",lv,lv); }
+    else if(kind==6){ /* cc500 M12 switch：三出口（case0/case1/default）值域 {1,2,3} 无 UB；minicc 无 switch 不入本网 */
+        used_flags|=F_SWITCH;
+        printf("  {int sw; sw=((%s)%%3+3)%%3; %s=0; switch(sw){case 0:%s=1;break;case 1:%s=2;break;default:%s=3;}}\n", lv, lv, lv, lv, lv);
+        return;
+    }
     else if(kind==5){ /* M9e/M9c 组合：局部子句表+大写名+空语句；常量界内无 UB */
         used_flags|=F_LEX; int a0=rndi(1,9), b0=rndi(1,5);
         printf("  {int Zz1,Zz2; Zz1=%d;;Zz2=Zz1+%d; %s=Zz2;}\n", a0, b0, lv);
