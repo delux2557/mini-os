@@ -1051,10 +1051,15 @@ int stmt() {
         int lno;
         bw = 0; bn = 0; bs = 0; bc = 0; bl = 0; bp = 0;
         tk_save2(&bp, &bb[0], &bw, &bn, &bs, &bc, &bl);
-        lno = stradd(&tok[0]);
         next_tok();
         if (is_sym_s(":")) {
             next_tok();
+            /* ⚠ 名字入池必须**只在确认是 label 之后**。本条探测对**每条以单词开头的语句**都会
+             * 走一遍（if/while/return/gen(...)…），若在确认 `:` 之前就 stradd，等于给每条语句
+             * 白塞一份名字。实测后果：名字池被撑爆（该池用量已占静态容量的 90%），而 stradd
+             * 当时**没有越界守卫**，溢出写穿相邻内存后报出的是与真因无关的 "too many nodes"
+             * （镜像分支"大源红"的排查全程被误导）。名字从 tk_save2 存下的 bb 取即可，无需提前入池。 */
+            lno = stradd(&bb[0]);
             n = node_new(ND_LABEL_);
             nival[n] = lno;
             int body = stmt();
