@@ -3,7 +3,30 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
-## [Unreleased] - #172 后续订正：名字池越界守卫 + 动态化 + 定容依据勘误
+## [Unreleased] - 术语中性化与历史重写（含协作者操作须知）
+
+**Docs**
+
+* **术语中性化**：本轮审计相关的文档与注释中，一批以器物/口语比喻为主的表述已统一改为中性技术
+  表述（规范化后的词表：`主动认领`、`本次改动`/`本次改动范围`、`三处改动`/`四类转义`、`续作`、
+  `单项`、`全局改动`、`第一项改动`/`某次改动`/`各项改动`、`失效断言`、`静默`、`误导`）。涉及
+  `v2-c-kernel/Makefile`、`tools/minicc/diffsynth/gen.c`、`docs/design/minicc-v3-后续任务.md`、
+  `docs/reference/changelog.md`、`tools/minicc/minicc_self.c`（注释）。仅文本，无语义变化。
+  - **判定为保留**（既有仓库风格或标准术语，非本轮引入）：仓库长期使用的复现/事故类用语、
+    `黑盒`（black-box）、`fork 炸弹`（fork bomb）。
+
+**Changed（操作记录——影响所有协作者）**
+
+* 为使上述表述**不出现在历史中**，已对全部提交执行 `filter-branch` 重写（提交信息 + 文件内容双侧过滤）
+  并强推 `main` 与 43 个分支：**自 2026-09-16 起的提交 SHA 全部变化**。
+  - **协作者请重新克隆**（或 `git fetch origin && git reset --hard origin/main`）——旧克隆的历史已分叉；
+  - 窗口内已合并 PR 的 merge SHA 不再可达，其页面上的 commit 链接会失效；
+  - **唯一残留位置**：GitHub 托管的隐藏引用 `refs/pull/*`（173 个）仍指向重写前提交，平台不允许
+    改写或删除（`! [remote rejected] … (deny updating a hidden ref)`），需 GitHub Support 侧清理；
+  - 强推当次的 `guard-lint` 因 `GUARD_BASE = push.before` 指向已被重写掉的提交，按设计拒绝给出结论
+    （exit 2，非回归）；后续事件取 `pull_request.base.sha`，不受影响。
+
+## [Unreleased] - 名字池越界守卫 + 动态化 + 定容依据勘误（#172 后续）
 
 **Fixed**
 
