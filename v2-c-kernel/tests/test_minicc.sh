@@ -92,6 +92,35 @@ echo "== [2a4] 宿主循环控制错误路径（do-while/break/continue） =="
 # 循环外 break/continue -> 必须 FAIL + break/continue outside loop
 hrun t_breakout 'int main(){break;}' 1 'break outside loop' 'compiled OK'
 hrun t_continueout 'int main(){continue;}' 1 'continue outside loop' 'compiled OK'
+
+echo "== [2a5] §6.3 拒绝清单可执行镜像（docs/design/minicc-design.md） =="
+# 本块是 minicc-design.md §6.3「明确拒绝清单」的**可执行镜像**：清单里每一条在此都有探针，
+# 断言 host 编译期拒绝（rc=1 且不产出产物）。**改清单必须同步改本块，反之亦然**——
+# 该清单是语言契约，而它此前已写错两处却无人发现：
+#   · 仍列 `goto` 为拒绝项（M14goto 早已在 host #175 / self #182 实装，接受面见 [2b6]）；
+#   · "隐式指针转换"未分方向，与 §7.3「type_eq 允许右值 int 赋给指针」自相矛盾。
+# 契约文档写反 = 宣告红线不成立，故把清单钉成可执行（判据：拒绝 = rc 1 + 无产物）。
+# 注：位域在 minicc 里没有 struct 载体，探针只能借 struct 触发——拒绝理由是载体，非位域本身。
+hrun rl_longdouble   'int main(){long double d; return 0;}'                1 '' 'compiled OK'
+hrun rl_double       'int main(){double d; return 0;}'                     1 '' 'compiled OK'
+hrun rl_float        'int main(){float f; return 0;}'                      1 '' 'compiled OK'
+hrun rl_unsigned     'int main(){unsigned u; return 0;}'                   1 '' 'compiled OK'
+hrun rl_struct       'struct S{int a;};int main(){return 0;}'              1 '' 'compiled OK'
+hrun rl_union        'union U{int a;};int main(){return 0;}'               1 '' 'compiled OK'
+hrun rl_enum         'enum E{A};int main(){return 0;}'                     1 '' 'compiled OK'
+hrun rl_vla          'int main(){int n;n=3;int a[n];return 0;}'            1 '' 'compiled OK'
+hrun rl_varargs      'int f(int a,...){return a;}int main(){return f(1);}' 1 '' 'compiled OK'
+hrun rl_bitfield     'struct S{int a:3;};int main(){return 0;}'            1 '' 'compiled OK'
+hrun rl_ppdirective  '#define X 1
+int main(){return 0;}'                                                     1 '' 'compiled OK'
+hrun rl_funcaddr     'int main(){int x; x = main; return x;}'              1 '' 'compiled OK'
+hrun rl_multilevel   'int main(){int* p; int** q; return 0;}'              1 '' 'compiled OK'
+hrun rl_derefnonptr  'int main(){int a; a=1; return *a;}'                  1 '' 'compiled OK'
+hrun rl_addrnonlval  'int main(){int a; a=1; int* p; p = &(a+1); return 0;}' 1 '' 'compiled OK'
+hrun rl_ptr_to_int   'int main(){int a; int* p; a = p; return a;}'         1 '' 'compiled OK'
+# ⚠ 反向（int → ptr）是**有意放宽**、不得列入拒绝清单（§7.3：type_eq 放宽右值 int 赋给指针，
+#   用于承接 xmalloc 的 brk 地址）。这对探针成对出现，防将来有人"顺手把整条标成拒绝"。
+hrun rl_int_to_ptr   'int main(){int* p; p = 5; return 0;}'                0 'compiled OK' ''
 echo "== [2b] 宿主成功路径 =="
 # 成功：变量/四则/if/else/while/递归/全局/逻辑，编译层全过
 hrun t_arith 'int main(){int a;a=1+2*3-4;return 0;}' 0 'compiled OK' ''
