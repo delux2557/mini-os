@@ -473,7 +473,7 @@ int e1000_arp_learn_gw(void) {
             if (e1000_rx(rxb, sizeof(rxb), &rlen) == 1) {
                 uint32_t sip = 0;
                 uint8_t smac[6];
-                if (net_parse_arp_reply(rxb, rlen, &sip, smac) == 0) {
+                if (net_parse_arp_reply(rxb, rlen, gw_ip, &sip, smac) == 0) {
                     for (int j = 0; j < 6; j++) gw_mac[j] = smac[j];
                     gw_known = 1;
                     serial_printf("[net] arp: gw %u.%u.%u.%u @ %02x:%02x:%02x:%02x:%02x:%02x -> OK\n",
@@ -524,7 +524,7 @@ void e1000_selftest(void) {
             if (pd_rx(buf, sizeof(buf), &rlen) == 1) {
                 uint32_t sip = 0;
                 uint8_t smac[6];
-                if (net_parse_arp_reply(buf, rlen, &sip, smac) == 0) {
+                if (net_parse_arp_reply(buf, rlen, gw_ip, &sip, smac) == 0) {
                     for (int j = 0; j < 6; j++) gw_mac[j] = smac[j];
                     gw_known = 1;
                     serial_printf("[net] selftest: rx ARP reply 10.0.2.2 @ "

@@ -16,8 +16,10 @@ int net_build_arp_request(uint8_t *frame, const uint8_t *src_mac,
 /* 取以太网类型（II 帧第 12-13 字节）；帧太短返回 -1 */
 int net_eth_type(const uint8_t *frame, uint32_t len, uint16_t *etype);
 
-/* 解析 ARP 应答：成功返回 0，填 sender_ip（网络序转主机序）与 sender_mac */
-int net_parse_arp_reply(const uint8_t *frame, uint32_t len,
+/* 解析 ARP 应答：成功返回 0，填 sender_ip（网络序转主机序）与 sender_mac。
+ * 校验 htype/ptype/hlen/plen，并要求 spa == expect_sender_ip（传 0 表示不门控）——
+ * 调用方须传自己正在等待的那台机器（网关），否则一条伪造应答即可劫持网关寻址。 */
+int net_parse_arp_reply(const uint8_t *frame, uint32_t len, uint32_t expect_sender_ip,
                         uint32_t *sender_ip, uint8_t *sender_mac);
 
 #endif

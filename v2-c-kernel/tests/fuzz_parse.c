@@ -2,8 +2,8 @@
  * 阶段二「加固」：宿主侧模糊测试（v0.29 候选）。
  * 对纯逻辑解析模块注入随机字节 / 随机路径，验证"畸形输入被拒绝而不崩溃"：
  *   - fs_walk 路径解析（fs_lookup/create/mkdir/rmdir/delete/list）
- *   - elf_load_range（畸形 ELF 头扫描：只解析不写内存）
- *   - net_eth_type / net_parse_arp_reply（以太网/ARP）
+ *   - elf_load_range + elf_load（后者带门控 mapfn，覆盖会写内存的入口——F1）
+ *   - net_eth_type / net_parse_arp_reply（以太网/ARP；含 spa 门控）
  *   - ip_parse / udp_parse / icmp_parse（IP/UDP/ICMP 协议解析）
  *   - dhcp_parse_reply（BOOTP 应答解析）
  * 确定性 PRNG（xorshift32 固定种子，可复现）；建议 ASan 下运行以抓越界/
@@ -55,6 +55,21 @@ static uint8_t *rand_buf(uint32_t *out_n, uint32_t max) {
     return b;
 }
 
+/* ---- ELF 写路径靶区（安全复核 F1）----
+ * elf_load 的 mapfn 在这里承担内核 mapfn 的同一职责：目标区必须落在已验证窗口内，
+ * 越出即 -1（加载器随即中止，不 memcpy）→ ASan 只见合法写，非法形态必被拒。 */
+#define ELF_ARENA_SZ (64u * 1024u)
+static uint8_t elf_arena_buf[ELF_ARENA_SZ] __attribute__((aligned(4096)));
+static uint8_t *elf_arena = elf_arena_buf;
+
+static int fuzz_elf_map(uint32_t dst, uint32_t len) {
+    uint32_t lo = (uint32_t)(uintptr_t)elf_arena_buf;
+    uint32_t hi = lo + ELF_ARENA_SZ;
+    if (len > ELF_ARENA_SZ) return -1;
+    if (dst < lo || dst + len > hi || dst + len < dst) return -1;
+    return 0;
+}
+
 int main(void) {
     long iters = 60000;
     const char *e = getenv("FUZZ_ITERS");
@@ -89,6 +104,10 @@ int main(void) {
             uint32_t n; uint8_t *b = rand_buf(&n, 512);
             uint32_t base = 0, end = 0;
             (void)elf_load_range(b, n, &base, &end);
+            /* 安全复核 F1：fuzz 此前只覆盖 elf_load_range（只读不写）。会把内存写出去的
+             * elf_load 必须同样进 ASan 面；门控 mapfn 等价内核侧"必须落在已验证窗口"。 */
+            uint32_t entry = 0;
+            (void)elf_load(b, n, (uint32_t)(uintptr_t)elf_arena, fuzz_elf_map, &entry);
             free(b);
         }
 
@@ -97,7 +116,7 @@ int main(void) {
             uint32_t n; uint8_t *b = rand_buf(&n, 128);
             uint16_t et = 0; uint32_t sip = 0; uint8_t smac[6];
             (void)net_eth_type(b, n, &et);
-            (void)net_parse_arp_reply(b, n, &sip, smac);
+            (void)net_parse_arp_reply(b, n, 0x0A000202u, &sip, smac);   /* F4：门控到网关，伪造 spa 即拒 */
             free(b);
         }
 

@@ -24,6 +24,10 @@ void app_main(int argc, char **argv) {
     if ((int)syscall3(SYS_NET_SENDTO, 0xDEADBEEFu, 0, 0) != -1) { fail++; sys_print(" [s] masked net_sendto not -1\n"); }
     if ((int)syscall3(SYS_NET_RECVFROM, 0xDEADBEEFu, 0, 0) != -1) { fail++; sys_print(" [s] masked net_recvfrom not -1\n"); }
     if ((int)syscall3(SYS_NET_CLOSE, 0xDEADBEEFu, 0, 0) != -1) { fail++; sys_print(" [s] masked net_close not -1\n"); }
+    /* 安全复核 F3：创建端与 netdiag 曾不在 SC_NET 内——禁网后仍可开新槽（配合 close 被禁
+     * 即为永久占位 DoS）、仍可触发内核三段自检。此处封口成断言。 */
+    if ((int)syscall3(SYS_NET_SOCKET, 0, 0, 0) != -1) { fail++; sys_print(" [s] masked net_socket not -1\n"); }
+    if ((int)syscall3(SYS_NETDIAG, 0, 0, 0) != -1) { fail++; sys_print(" [s] masked netdiag not -1\n"); }
 
     /* 生存必需项不受影响 */
     sys_print("[sandboxdemo] still alive pid=");

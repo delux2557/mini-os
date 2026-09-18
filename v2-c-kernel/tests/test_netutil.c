@@ -45,14 +45,30 @@ int main(void) {
 
     uint32_t sip = 0;
     uint8_t sm[6] = {0};
-    CHECK(net_parse_arp_reply(reply, 42, &sip, sm) == 0);
+    CHECK(net_parse_arp_reply(reply, 42, 0x0A000202u, &sip, sm) == 0);
     CHECK(sip == 0x0A000202u);
     for (int i = 0; i < 6; i++) CHECK(sm[i] == rm[i]);
 
     /* ---- 错误输入 ---- */
-    CHECK(net_parse_arp_reply(reply, 30, &sip, sm) == -1);      /* 太短 */
+    CHECK(net_parse_arp_reply(reply, 30, 0x0A000202u, &sip, sm) == -1);   /* 太短 */
     reply[21] = 1;                                              /* op=request 非应答 */
-    CHECK(net_parse_arp_reply(reply, 42, &sip, sm) == -1);
+    CHECK(net_parse_arp_reply(reply, 42, 0x0A000202u, &sip, sm) == -1);
+    reply[21] = 2;
+
+    /* ---- 安全复核 F4：ARP 应答认证 ---- */
+    /* spa 与所等待的网关不符（gratuitous 伪造）必须拒 */
+    reply[28] = 10; reply[29] = 99; reply[30] = 99; reply[31] = 99;
+    CHECK(net_parse_arp_reply(reply, 42, 0x0A000202u, &sip, sm) == -1);
+    reply[28] = 10; reply[29] = 0; reply[30] = 2; reply[31] = 2;
+    CHECK(net_parse_arp_reply(reply, 42, 0x0A000202u, &sip, sm) == 0);   /* 复原后仍接受 */
+    /* hlen/plen/htype 异常（全 0 之类）必须拒 */
+    reply[18] = 0;
+    CHECK(net_parse_arp_reply(reply, 42, 0x0A000202u, &sip, sm) == -1);  /* hlen */
+    reply[18] = 6; reply[19] = 0;
+    CHECK(net_parse_arp_reply(reply, 42, 0x0A000202u, &sip, sm) == -1);  /* plen */
+    reply[19] = 4; reply[14] = 1;
+    CHECK(net_parse_arp_reply(reply, 42, 0x0A000202u, &sip, sm) == -1);   /* htype */
+    reply[14] = 0;
 
     UTEST_SUMMARY("test_netutil");
 }
