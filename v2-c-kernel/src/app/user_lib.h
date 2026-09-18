@@ -119,10 +119,16 @@ static inline uint32_t sys_sbrk(int32_t incr) {
 static inline uint32_t sys_limit(uint32_t mask_lo, uint32_t mask_hi) {
     return syscall3(SYS_LIMIT, mask_lo, mask_hi, 0);
 }
+#define SC_SOCK  (1ull << 30)   /* net_socket（创建端） */
 #define SC_SEN   (1ull << 31)   /* net_sendto */
 #define SC_RECV  (1ull << 32)   /* net_recvfrom */
 #define SC_NETC  (1ull << 33)   /* net_close */
-#define SC_NET   (SC_SEN | SC_RECV | SC_NETC)      /* 整条网络面 */
+#define SC_NETD  (1ull << 38)   /* netdiag（内核三段自检：忙等窗口 + 真实发包） */
+/* 安全复核 F3：原 SC_NET 只含 31/32/33 却在注释里称"整条网络面"。缺创建端即可
+ * "能开不能关"地永久占表（DoS），缺 netdiag 则受限进程仍可触发内核态忙等与发包。 */
+#define SC_NET   (SC_SOCK | SC_SEN | SC_RECV | SC_NETC | SC_NETD)
+/* DHCP 原子口 40-44：仅 dhcpd 需要；其余进程禁网时应一并禁（本文 §6-1 待定语义） */
+#define SC_DHCP  ((1ull << 40) | (1ull << 41) | (1ull << 42) | (1ull << 43) | (1ull << 44))
 #define SC_FSC   (1ull << 13)   /* fs_create */
 #define SC_FSO   (1ull << 14)   /* fs_open（按 syscall 号粗粒度：禁 14 连只读 open 一并禁，
                                    掩码不解析 mode 参数，偏严安全但无法只放行只读触口）*/

@@ -1175,12 +1175,18 @@ int parse_program() {
             nval[fn] = si;
             int func_scope = nsym;
             cur_nargs = 0; cur_frame = 0;
-            int params = 0; int ptail = 0;
+            int params = 0; int ptail = 0; int ptb;   /* F6：decl_type 的 int 中转 */
             if (is_sym_s(")") == 0) {
                 int more = 1;
                 while (more) {
                     int p = node_new(ND_VAR);
-                    nty[p] = decl_type(&nbty[p]);
+                    /* 安全复核 F6：nbty 是 char 池（V4 arena 瘦身），decl_type 要 int*——
+                     * 直接把 &nbty[p] 传进去会以 4 字节写踩相邻节点，p 落在池末位时越出
+                     * 分配尾 3 字节（ASan 看不见 brk 池，UBSan 报 store to misaligned address）。
+                     * 经局部 int 中转再按 char 回写，语义不变。 */
+                    ptb = 0;
+                    nty[p] = decl_type(&ptb);
+                    nbty[p] = ptb;
                     if (tok_is_word == 0) fail("expected parameter name");
                     nival[p] = stradd(&tok[0]);
                     next_tok();

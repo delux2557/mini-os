@@ -202,5 +202,16 @@ int main(void) {
     ((elf32_phdr *)(img + EHDR_SZ + PHDR_SZ))->p_type = 0;
     CHECK_EQ(elf_load_range(img, sizeof(img), &lb, &le), -1);
 
+    /* 6) 安全复核 F1：p_filesz > p_memsz —— 窗口按 memsz 建、拷贝按 filesz，
+     *    不校验即内核态写越出已验证/已映射区（实测触发 [kern] PF user-half 并误杀调用者）。 */
+    memset(arena, 0xAA, sizeof(arena));
+    build_elf(img, base + 0x4000u, base + 0x5000u, base + 0x4000u);
+    ((elf32_phdr *)(img + EHDR_SZ))->p_memsz = 1;      /* filesz=4 > memsz=1 */
+    CHECK_EQ(elf_load(img, EHDR_SZ + 2 * PHDR_SZ + 4, 0, NULL, &entry), -1);
+    CHECK_EQ(*(uint32_t *)&arena[0x4000], 0xAAAAAAAAu);    /* 必须一次写都没发生 */
+    /* 6.1 不误伤合法形态：filesz==memsz 与 bss(memsz>filesz) 仍通过 */
+    build_elf(img, base + 0x4000u, base + 0x5000u, base + 0x4000u);
+    CHECK_EQ(elf_load(img, EHDR_SZ + 2 * PHDR_SZ + 4, 0, NULL, &entry), 0);
+
     UTEST_SUMMARY("test_elf");
 }

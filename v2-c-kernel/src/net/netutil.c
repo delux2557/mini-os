@@ -33,13 +33,22 @@ int net_eth_type(const uint8_t *f, uint32_t len, uint16_t *etype) {
     return 0;
 }
 
-int net_parse_arp_reply(const uint8_t *f, uint32_t len,
+int net_parse_arp_reply(const uint8_t *f, uint32_t len, uint32_t expect_sender_ip,
                         uint32_t *sender_ip, uint8_t *sender_mac) {
     if (len < 42) return -1;
     if ((f[12] << 8 | f[13]) != NET_ETH_TYPE_ARP) return -1;
-    if (!(f[20] == 0 && f[21] == 2)) return -1;            /* op = reply */
-    for (int i = 0; i < 6; i++) sender_mac[i] = f[22 + i]; /* sha */
-    *sender_ip = ((uint32_t)f[28] << 24) | ((uint32_t)f[29] << 16) |
-                 ((uint32_t)f[30] << 8) | (uint32_t)f[31]; /* spa */
+    /* 安全复核 F4：硬件/协议参数必须是 Ethernet/IPv4 的 6/4。不校验时一条全 0 字段的
+     * 伪造帧即可通过，并被当作网关 MAC 写入内核寻址表。 */
+    if (!(f[14] == 0 && f[15] == 1)) return -1;                /* htype = Ethernet */
+    if (!(f[16] == 0x08 && f[17] == 0x00)) return -1;          /* ptype  = IPv4 */
+    if (f[18] != 6 || f[19] != 4) return -1;                   /* hlen/plen */
+    if (!(f[20] == 0 && f[21] == 2)) return -1;                /* op = reply */
+    uint32_t spa = ((uint32_t)f[28] << 24) | ((uint32_t)f[29] << 16) |
+                   ((uint32_t)f[30] << 8) | (uint32_t)f[31];   /* spa */
+    /* 安全复核 F4：只接受"我们在等的那台"的应答。不比对 spa 时，同一链路的任意主机
+     * gratuitous 发一条 op=2 就能改写内核 gw_mac（MITM）。expect_sender_ip==0 = 不门控。 */
+    if (expect_sender_ip && spa != expect_sender_ip) return -1;
+    for (int i = 0; i < 6; i++) sender_mac[i] = f[22 + i];     /* sha */
+    *sender_ip = spa;
     return 0;
 }
