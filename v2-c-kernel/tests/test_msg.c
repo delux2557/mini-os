@@ -147,5 +147,42 @@ int main(void) {
     CHECK_EQ(outv, 5);
     CHECK_EQ(msg_recv_wake(&q), 1);             /* 唤醒队首生产者，其消息入缓冲 */
 
+    /* 11) 进程死亡回收（msg_reap）：两侧语义不同，都在此钉死
+     *     —— 对位 socket 侧 F-0a 的退出回收；本模块纯逻辑，故语义由宿主单测钉死。 */
+    /* 11a) 死**消费者**必须摘：否则 send_wake 会把消息从缓冲 pop 出来交付给一个不会运行的
+     *      进程 ⇒ 消息静默蒸发（这是本回收函数存在的核心理由）。 */
+    msg_init(&q, 1);
+    CHECK_EQ(msg_recv_try(&q, &outv, 7), 1);        /* 消费者 7 阻塞（空缓冲） */
+    CHECK_EQ(msg_cons_wait(&q), 1);
+    CHECK_EQ(msg_reap(&q, 7), 1);
+    CHECK_EQ(msg_cons_wait(&q), 0);
+    CHECK_EQ(msg_send_try(&q, 300, 8), 0);          /* 入队成功 */
+    CHECK_EQ(msg_send_wake(&q, &outv), MSG_NO_PID); /* 无活消费者 ⇒ 不交棒 */
+    CHECK_EQ(msg_count(&q), 1);                     /* 消息留在缓冲（未蒸发） */
+    CHECK_EQ(msg_recv_try(&q, &outv, 9), 0);        /* 活消费者照常取到 */
+    CHECK_EQ(outv, 300);
+    /* 11b) 死**生产者**必须摘且丢弃其暂存消息：它阻塞中 ⇒ 它的 send 从未返回成功，
+     *      按"未完成即不生效"处理（否则内核会代发一条"发送者已死"的消息）。 */
+    msg_init(&q, 1);
+    CHECK_EQ(msg_send_try(&q, 100, 1), 0);          /* 占满 */
+    CHECK_EQ(msg_send_try(&q, 200, 2), 1);          /* 生产者 2 暂存并阻塞 */
+    CHECK_EQ(msg_prod_wait(&q), 1);
+    CHECK_EQ(msg_reap(&q, 2), 1);
+    CHECK_EQ(msg_prod_wait(&q), 0);
+    CHECK_EQ(msg_recv_try(&q, &outv, 3), 0);        /* 取走 100 */
+    CHECK_EQ(outv, 100);
+    CHECK_EQ(msg_recv_wake(&q), MSG_NO_PID);        /* 死生产者已摘 ⇒ 不再代发 */
+    CHECK_EQ(msg_count(&q), 0);
+    /* 11c) 摘除后等待槽可再用（否则 8 个死等待者即可永久撑满队列、让活进程 send/recv 失败） */
+    msg_init(&q, 1);
+    for (i = 0; i < MSG_MAX_WAITERS; i++)
+        CHECK_EQ(msg_recv_try(&q, &outv, i + 1), 1);
+    CHECK_EQ(msg_recv_try(&q, &outv, 99), -1);      /* 满 */
+    CHECK_EQ(msg_reap(&q, 3), 1);
+    CHECK_EQ(msg_cons_wait(&q), MSG_MAX_WAITERS - 1);
+    CHECK_EQ(msg_recv_try(&q, &outv, 100), 1);      /* 槽位已回收 ⇒ 可再入队 */
+    /* 11d) pid 不在任一队列：摘 0 个 */
+    CHECK_EQ(msg_reap(&q, 12345), 0);
+
     UTEST_SUMMARY("test_msg");
 }

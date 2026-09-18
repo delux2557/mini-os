@@ -114,5 +114,36 @@ int main(void) {
     s.count = -1;                          /* 人为破坏：负计数 */
     CHECK_EQ(sem_invariant_ok(&s), 0);
 
+    /* 12) 进程死亡回收（sem_reap）：摘除死等待者**不丢 token**、队列保序前移
+     *     —— 对位 socket 侧 F-0a 的退出回收；本模块纯逻辑，故语义由宿主单测钉死。 */
+    sem_init(&s, 0);
+    CHECK_EQ(sem_wait_try(&s, 21), 1);      /* 21 入队 */
+    CHECK_EQ(sem_wait_try(&s, 22), 1);      /* 22 入队 */
+    CHECK_EQ(sem_wait_try(&s, 23), 1);      /* 23 入队 */
+    CHECK_EQ(sem_reap(&s, 99), 0);          /* 不在队列：摘 0 个、队列不动 */
+    CHECK_EQ(sem_wait_count(&s), 3);
+    CHECK_EQ(sem_reap(&s, 22), 1);          /* 摘中间那个 */
+    CHECK_EQ(sem_wait_count(&s), 2);
+    CHECK_EQ(s.waiters[0], 21);             /* 保序前移正确 */
+    CHECK_EQ(s.waiters[1], 23);
+    CHECK_EQ(s.count, 0);                   /* 排队者本不持有 token ⇒ count 不该动 */
+    CHECK_EQ(sem_invariant_ok(&s), 1);
+    CHECK_EQ(sem_signal_wake(&s), 21);      /* 活等待者照常被唤醒（未被死条目堵住） */
+    CHECK_EQ(sem_signal_wake(&s), 23);
+    CHECK_EQ(s.count, 0);
+    /* 死等待者是**队首**时：摘除后 signal 走"无人等待"分支 ⇒ token 归还 count（不丢失） */
+    sem_init(&s, 0);
+    CHECK_EQ(sem_wait_try(&s, 31), 1);
+    CHECK_EQ(sem_reap(&s, 31), 1);
+    CHECK_EQ(sem_signal_wake(&s), SEM_NO_PID);
+    CHECK_EQ(s.count, 1);                   /* 关键：token 没有被交棒给死进程而蒸发 */
+    /* 摘除后腾出的等待槽可再用（否则 8 个死 pid 就能永久撑满队列、让活进程 wait 失败） */
+    sem_init(&s, 0);
+    for (i = 0; i < SEM_MAX_WAITERS; i++) CHECK_EQ(sem_wait_try(&s, i + 1), 1);
+    CHECK_EQ(sem_wait_try(&s, 99), -1);     /* 满 */
+    for (i = 0; i < SEM_MAX_WAITERS; i++) CHECK_EQ(sem_reap(&s, i + 1), 1);
+    CHECK_EQ(sem_wait_count(&s), 0);
+    CHECK_EQ(sem_wait_try(&s, 100), 1);     /* 槽位已回收 ⇒ 可再入队 */
+
     UTEST_SUMMARY("test_sem");
 }

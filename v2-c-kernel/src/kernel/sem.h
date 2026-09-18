@@ -27,6 +27,11 @@ int      sem_wait_try(sem_t *s, uint32_t pid);
 /* V 操作：返回需唤醒的 pid；无等待者时 count++ 并返回 SEM_NO_PID */
 uint32_t sem_signal_wake(sem_t *s);
 uint32_t sem_wait_count(sem_t *s);
+/* 进程死亡回收：摘除队列中该 pid 的全部条目，返回摘除数（0=不在队列）。
+ * 语义要点：**排队中的等待者并不持有 token**（token 只在 sem_signal_wake 弹出的那一刻
+ * 才交棒），所以摘除死等待者**不丢 token**，故本函数无需动 count。
+ * 纯逻辑（本模块不查活跃性）：由调用方在进程退出路径按 pid 调用。 */
+int      sem_reap(sem_t *s, uint32_t pid);
 /* 不变量审计（v0.21）：count>=0、waiters<=上限、且 count>0 时无等待者
  * （资源空闲而队列有人 = 丢失了一次 signal）。返回 1=成立 / 0=违反。
  * 纯逻辑，无内核依赖，宿主单测与内核自审计共用。 */
