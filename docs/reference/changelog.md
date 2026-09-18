@@ -25,6 +25,37 @@
 
 ---
 
+## [Unreleased] - self 侧内存安全门禁（UBSan）+ 构建依赖缺口修复
+
+**Added**
+
+* **`[2b7]` self 编译器内存安全门禁**（`tests/test_minicc.sh`）：hostself 以
+  `-fsanitize=undefined -fno-sanitize-recover=all` 构建，跑形参密集语料 6 例，断言
+  ①全部 `compiled OK` ②零 UBSan `runtime error` ③产物与 hostminicc **逐字节一致**。
+  - 动机：安全复核 F6（char 池字段当 `int*` 传出去 ⇒ 4 字节错位写）属"**三面皆不报**"类缺陷——
+    编译期无警告（gcc 视角是合法 int* 写）、功能上常"恰好正确"（故 miccboot 的产物逐字节比对
+    不会红）、且 self 侧此前不在任何 ASan/UBSan 面内 ⇒ 可长期静默存活。三面皆不报的缺陷必须
+    补一面显式门禁。
+  - **实测判别力**：换回 F6 前源 ⇒ 6/6 各报 1 次 `store to misaligned address`（`minicc_self.c:556`）；
+    修复源 ⇒ 6/6 清零且产物同 hostminicc。
+  - 入口路径不加写 `/` 依赖：`minicc_self.c` 的 `main` 固定读 `/minicc.c` 写 `/out.elf`，而 CI runner
+    无 `/` 写权限（既有 `[2b4]/[2b5]` 因此 SKIP）⇒ 本块用**路径重写副本**，并断言两个路径字面量
+    各命中 1 处（源一改即报错，覆盖不会静默失效）。
+
+**Fixed**
+
+* **app 对象不参与头文件依赖跟踪**（`Makefile`）：`-include $(BUILD)/*.d` 只覆盖顶层对象，而 app
+  对象的 `.d` 在 `$(BUILD)/apps/` 下 ⇒ **改头文件（如 `src/app/user_lib.h`）不会重编 guest app**，
+  本地增量验证会静默使用旧 app 二进制（"假绿"）。补 `-include $(BUILD)/apps/*.d`。
+  - 实测：修复前改 `user_lib.h` 后 `make` 不重编 sandboxdemo（A/B 实验因此被静默作废）；修复后
+    正确重编；内核侧 `src/net/netutil.h` 的依赖跟踪不受影响。
+
+**Engineering**
+
+* `make test-minicc` ✔（宿主 119/0，含新块 6 例）· `make test-fast` ✔ · 构建 `-Werror` 干净。
+
+---
+
 ## [Unreleased] - 术语中性化与历史重写（含协作者操作须知）
 
 **Docs**

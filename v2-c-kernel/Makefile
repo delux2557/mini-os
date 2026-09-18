@@ -540,6 +540,10 @@ clean:
 	rm -rf "$$tsv_st"
 
 # v0.26 bugfix: 头文件变更自动触发重编（-MMD 生成的 .d 依赖）
+# 注：$(BUILD)/*.d 只覆盖顶层对象；**app 对象在 $(BUILD)/apps/** 下（.d 同目录），
+#     漏掉它会让"改头文件不重编 guest app"——本地增量验证会静默跑旧 app 二进制
+#     （实测：改 app/user_lib.h 后 make 不重编 sandboxdemo，A/B 实验因此失效）。
 -include $(BUILD)/*.d
+-include $(BUILD)/apps/*.d
 
 .PHONY: run run-serial test test-host test-audit test-golden guard-diff test-boundary golden-update test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-miccboot test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean

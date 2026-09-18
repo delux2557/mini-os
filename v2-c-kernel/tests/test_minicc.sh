@@ -309,6 +309,63 @@ hrun t_goto_undef 'int main(){goto nod;return 0;}' 1 'undefined label' 'compiled
 hrun t_goto_dup   'int main(){L:return 1;L:return 2;}' 1 'label redefined' 'compiled OK'
 hrun t_goto_tail  'int main(){T:return 7;}' 0 'compiled OK' 'control reaches end'
 
+echo "== [2b7] self 编译器内存安全门禁（UBSan：F6 类错位/越宽写） =="
+# 背景（安全复核 F6，2026-09-18）：形参解析曾把 char 池字段当 int* 传出去
+# （`nty[p] = decl_type(&nbty[p])`，而 nbty 是 xmalloc(NMAX) 的 1 字节/节点池）⇒ 4 字节错位写：
+# 踩相邻节点字段，p 落在池末位时越出分配尾。该类缺陷的特征是**三面皆不报**：
+#   - 编译期无警告（从 gcc 视角是一次合法的 int* 写）；
+#   - 功能上常"恰好正确"（写地址随 p 递增、终值由各自调用定格）⇒ miccboot 的产物逐字节
+#     比对不会红（实测产物确实一致）；
+#   - self 侧此前不在任何 ASan/UBSan 面内（宿主 sanitizer 只覆盖 tests/test_fuzz 的解析模块）。
+# 三面皆不报 ⇒ 缺陷可长期静默存活（本轮即如此被发现）。本块把它固化为常驻门禁。
+#
+# 入口路径：minicc_self.c 的 main 固定读 /minicc.c、写 /out.elf（自举契约），而 CI runner 无 /
+# 写权限（既有 [2b4]/[2b5] 块因此 SKIP）⇒ 本块改用**路径重写副本**：只把这两个字面量替换为
+# 临时路径，并断言各命中 1 处（源一改即在此报错，不会静默失去覆盖）。除这两处字符串外与源同源。
+#
+# 断言：①语料全部 compiled OK；②零 UBSan runtime error；③产物与 hostminicc **逐字节一致**
+# （③同时是 F6 修复自身的验收口径：类型修正不得改语义）。语料为形参密集族——正是该缺陷的
+# 触发面（实测 F6 前 6/6 各报 1 次 misaligned store，修复后 6/6 清零）。
+SAN_OK=1
+SAN_IN="$VD/san_in.c"; SAN_OUT="$VD/san_out.elf"; SAN_SRC="$VD/minicc_self_san.c"
+sed -e "s,\"/minicc.c\",\"$SAN_IN\"," -e "s,\"/out.elf\",\"$SAN_OUT\"," tools/minicc/minicc_self.c > "$SAN_SRC"
+if [ "$(grep -c "\"$SAN_IN\"" "$SAN_SRC")" != 1 ] || [ "$(grep -c "\"$SAN_OUT\"" "$SAN_SRC")" != 1 ]; then
+    echo "[FAIL] self 源入口路径重写未命中（minicc_self.c 的固定路径变了？本块须同步）"; SAN_OK=0; HOST_FAIL=$((HOST_FAIL+1))
+fi
+RUN32=(); [ "${RUN[0]}" = "qemu-i386" ] && RUN32=(qemu-i386)
+if [ "$SAN_OK" = 1 ]; then
+    if gcc -m32 -std=gnu99 -O1 -w -fpermissive -fsanitize=undefined -fno-sanitize-recover=all \
+           -Dmain=minicc_guest_main -c "$SAN_SRC" -o "$VD/self_san.o" 2>"$VD/self_san.log" \
+       && gcc -m32 -std=gnu99 -O1 -w -fpermissive -c tools/minicc/host_crt.c -o "$VD/host_crt_san.o" 2>>"$VD/self_san.log" \
+       && gcc -m32 -o "$VD/hostself_san" "$VD/self_san.o" "$VD/host_crt_san.o" -fsanitize=undefined 2>>"$VD/self_san.log"; then
+        san_case() { # san_case <名> <源>
+            local name="$1" src="$2" out rc n
+            printf '%s' "$src" >"$SAN_IN"; rm -f "$SAN_OUT"
+            out=$(timeout 30 "${RUN32[@]}" "$VD/hostself_san" 2>&1); rc=$?
+            n=$(printf '%s' "$out" | grep -c 'runtime error')
+            printf '%s' "$src" >"$VD/san_ref_$name.c"
+            "${RUN[@]}" "$VD/san_ref_$name.c" "$VD/san_ref_$name.elf" >/dev/null 2>&1
+            if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'compiled OK' && [ "$n" -eq 0 ] \
+               && [ -s "$SAN_OUT" ] && cmp -s "$SAN_OUT" "$VD/san_ref_$name.elf"; then
+                HOST_PASS=$((HOST_PASS+1)); echo "[ok]   UBSan self $name（零报错 + 产物同 hostminicc）"
+            else
+                HOST_FAIL=$((HOST_FAIL+1))
+                echo "[FAIL] UBSan self $name rc=$rc runtime_error=$n"
+                printf '%s\n' "$out" | grep -i 'runtime error' | head -3 | sed 's/^/        /'
+            fi
+        }
+        san_case p08_plain  'int f(int aa,int bb,int cc,int dd,int ee,int ff,int gg,int hh){return aa+bb+cc+dd+ee+ff+gg+hh;}int main(){return f(1,2,3,4,5,6,7,8)-36;}'
+        san_case p16_many   'int f(int p00,int p01,int p02,int p03,int p04,int p05,int p06,int p07,int p08,int p09,int p10,int p11,int p12,int p13,int p14,int p15){return p00+p01+p02+p03+p04+p05+p06+p07+p08+p09+p10+p11+p12+p13+p14+p15;}int main(){return f(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)-16;}'
+        san_case p06_longnm 'int f(int parameter_number_00,int parameter_number_01,int parameter_number_02,int parameter_number_03,int parameter_number_04,int parameter_number_05){return parameter_number_00+parameter_number_01+parameter_number_02+parameter_number_03+parameter_number_04+parameter_number_05;}int main(){return f(1,1,1,1,1,1)-6;}'
+        san_case p04_char   'int f(char a,char b,int c,int d){return a+b+c+d;}int main(){return f(1,2,3,4)-10;}'
+        san_case p03_nested 'int h(int a,int b,int c,int d,int e,int f,int g,int k){return a+b+c+d+e+f+g+k;}int f(int x){return h(x,1,2,3,4,5,6,7);}int main(){return f(0)-28;}'
+        san_case p05_locals 'int f(int a,int b,int c){int t;t=a+b+c;return t;}int main(){return f(1,2,3)-6;}'
+    else
+        echo "[SKIP] UBSan hostself 构建失败（缺 32 位 libubsan？gcc-multilib 应带 lib32ubsan1）；见 $VD/self_san.log"
+        tail -3 "$VD/self_san.log" 2>/dev/null | sed 's/^/        /'
+    fi
+fi
+
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
 # 注意源码含 % 与 ;，printf 须用 '%s' 格式防格式串解析
