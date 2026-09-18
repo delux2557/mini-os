@@ -48,12 +48,19 @@ int sys_print(char* s) { syscall3(1, s, 0, 0); return 0; }
  * 否则症状是自举静默失败：P1 读不下自己的源（input too big）、勉强读下却在解析末尾撞节点池
  * （too many nodes）、或产物超 code_cap（output too big）。2026-09 已这样断过一次，见 issue #172。
  *
- * 四条天花板的**代价**（决定了余量怎么给）：
+ * 七条天花板的**代价**（决定了余量怎么给）：
  *   ① 输入 IN_CAP/IN_LIMIT：in 走 xmalloc ⇒ 对产物零代价；
  *   ② 节点池 NMAX：走 xmalloc ⇒ 对产物零代价（#172 前是静态数组，42 B/节点全进产物）；
  *   ③ 产物 code_cap：emit1 **不扩容** ⇒ 它是产物硬上限（缓冲容量本身不计入产物）；
- *   ④ 名字池 STRTAB_CAP：走 xmalloc ⇒ 对产物零代价（#172 前是静态 20 KB，也进产物）。
- *   ⇒ 四条里只有 ③ 与产物挂钩，其余只吃运行时内存，故可以给足。
+ *   ④ 名字池 STRTAB_CAP：走 xmalloc ⇒ 对产物零代价（#172 前是静态 20 KB，也进产物）；
+ *   ⑤⑥⑦ 符号表 SYM_MAX / 补丁表 PATCH_MAX / 标签表 LAB_MAX：本轮同样由静态数组改 brk
+ *      ⇒ 对产物零代价（改前 56,576 B 全进产物，见下段实测）。
+ *   ⇒ 只有 ③ 与产物挂钩；①④⑤⑥⑦ 只吃运行时内存，故可以给足。
+ *   ⚠ **仍是静态数组的**（本轮未动，逐项实测占位）：循环帧栈 loop_brk/loop_cont 16,384 B、
+ *      strpool 4,096 B、goto 表（gnm/gpnd/gdef/gpc）4,032 B、tok 256 B、loop_*_n 256 B
+ *      —— 合计 ≈25 KB，仍计入产物。其中只有循环帧栈带容量含义，且它受"循环嵌套 ≤32 /
+ *      每循环 ≤64 个 break|continue"的守卫约束，不是可由源涨破的池式天花板。
+ *      将来若要再瘦产物，这 ≈25 KB 是下一批可动的。
  *
  * 定容依据（2026-09-17 实测，源 66121 B）：
  *   AST 节点峰值 = **8,809**（用 minicc_self 自己打点；宿主 minicc 同源 8,317 ⇒ 两份实现只差
@@ -66,13 +73,17 @@ int sys_print(char* s) { syscall3(1, s, 0, 0); return 0; }
  * 取值：IN_LIMIT = 126976（源上限；密度 0.133 ⇒ 满源约需 17k 节点）；
  *   NMAX = 49152（≈5× 当前需求，动态分配故只吃运行时内存）；
  *   STRTAB_CAP = 131072（满源按 0.28 需 ≈36 KB ⇒ 3.6× 余量）；
+ *   SYM_MAX = 512 / PATCH_MAX = 4096 / LAB_MAX = 4096（与 host 侧对齐；实测峰值
+ *     **240 / 2057 / ≈1250** ⇒ 余量 2.1× / 2.0× / 3.3×。峰值随源涨，须复核，
+ *     见下「门禁分工」②）；
  *   code_cap = 500000（≈155 KB 产物的 3 倍余量）。
  *
  * 门禁分工（改本段后必须同步核对）：
  *   ① mc_matrix 的 S1/S2a~S2e 钉：可编译子集、读块余量关系、源 ≤75% IN_LIMIT、
  *      **实测产物** < 0.9×code_cap、节点池未回退、名字池 ≥ 源 × 0.5（按 0.28 实测留足余量）；
  *   ② CI 的 miccboot 层：整链真编一次（**节点峰值只能实测**，两份实现的 AST 规模不可互推，
- *      故这一层不可省）。 */
+ *      故这一层不可省）。**⑤⑥⑦ 的符号/补丁/标签峰值同理只能实测**——本轮就是靠它（宿主
+ *      等价复现 + guest 真编）量出"余量仅 18/75 位"的；容量调小或源涨过头时，它就是那道闸。 */
 int IN_CAP = 131072;        /* 输入缓冲容量（main 里 in 的 xmalloc 大小） */
 int IN_LIMIT = 126976;      /* 可接受的最大源字节数 = IN_CAP - 4096（留一个读块余量） */
 int NMAX = 49152;           /* AST 节点池容量（运行时分配，见上） */
@@ -92,15 +103,29 @@ int nstrpool; int strpool_base;
 char tok[256];              /* 当前 token 缓冲 */
 int toklen; int tok_is_word; int tok_is_num; int tok_is_str; int tok_is_char;
 
-int SYM_MAX = 256; int PATCH_MAX = 2048; int LAB_MAX = 2048;
-int skind[256]; int sty[256]; int sbty[256]; int slen[256]; int sval[256]; int sname[256];
-int snargs[256]; /* FUNC 形参个数（未知=-1）——MC-04 arity 收敛（minicc.c FIX-G 同步） */
-char sdef[256];  /* MC-08 末角（与 minicc.c Sym.defined 同步）：FUNC/GLOBAL 是否已给出定义
-                    （parse 期即可判定；1=已定义）。sval 只在 codegen 期才非负，旧判定 parse 期恒假 */
+/* ── ⑤⑥⑦ 符号表 / 补丁表 / 标签表（原为静态数组，本轮改运行时 brk，见下）──
+ * 为什么改：它们与 NMAX/STRTAB_CAP 同类，是**容量天花板**，但此前是静态数组 ⇒ 容量按字节
+ * 全量内联进产物（实测 29 B/符号位、12 B/补丁位、12 B/标签位；旧配置 256/2048/2048 合计
+ * 56,576 B，占产物 142,638 B 的 40%），于是"抬容量"= 给内核加体积，容量只能抠着给。
+ * 旧配置的余量实测（自举源对 host 的最小可行容量 = 真实峰值）：SYM **238** 对 256、
+ *   PATCH **1,973** 对 2048、LAB **≈1250** 对 2048 ⇒ 余量 18 / 75 / ~800 位。
+ *   符号与补丁只剩个位数百分比，属**近在眼前的悬崖**（#182 goto 镜像一个特性就吃掉 6 个
+ *   符号位：232→238；按此速率两者都撑不过 2~3 个特性 PR）。
+ * 改法沿用 #172 对节点池/名字池的处理：容量与产物脱钩 ⇒ 一次给足并与 host 侧对齐
+ *   （host SYM/PATCH/LAB = 512/4096/4096）。运行时开销 ≈113 KB，对 guest 64 MB 可忽略。
+ * 代价与验收（本轮实测）：产物 142,638 → **87,349 B（−55.3 KB）**；改后峰值
+ *   SYM 240 / PATCH 2,057 / LAB ≈1250（余量 2.1× / 2.0× / 3.3×）；
+ *   ⚠ 改 brk 后**每个表引用点要多占 1 个补丁位**（指针全局需地址补丁，静态数组可直接寻址）
+ *   ⇒ 补丁需求 1,973 → 2,057（+84，+4%，仍在 4096 的一半以下）；符号只 +2（两个清零点）。 */
+int SYM_MAX = 512; int PATCH_MAX = 4096; int LAB_MAX = 4096;
+int* skind; int* sty; int* sbty; int* slen; int* sval; int* sname;
+int* snargs; /* FUNC 形参个数（未知=-1）——MC-04 arity 收敛（minicc.c FIX-G 同步） */
+char* sdef;  /* MC-08 末角（与 minicc.c Sym.defined 同步）：FUNC/GLOBAL 是否已给出定义
+                （parse 期即可判定；1=已定义）。sval 只在 codegen 期才非负，旧判定 parse 期恒假 */
 int nsym;
-int pk[2048]; int ppos[2048]; int pname[2048];
+int* pk; int* ppos; int* pname;
 int npatch;
-int lpos[2048]; int lkind[2048]; int ltarget[2048];
+int* lpos; int* lkind; int* ltarget;
 int nlab;
 /* V3b 循环帧栈（与 minicc.c 同步）：ND_DO/WHILE/FOR 的 break/continue 未决跳转记录。
  * minicc 不支持多维数组声明，故以 [32 帧 * 64 槽] 线性展开；host 用 loop_brk[32][64]。 */
@@ -183,6 +208,13 @@ int xmalloc(int n) {
     if (syscall3(35, old + n, 0, 0) != 0) fail("out of memory");
     return old;
 }
+
+/* brk 内存**不保证为零**（静态数组才隐式清零）。下面两个清零点供「⑤⑥⑦ 三表」在分配后
+ * 显式归零——其中 lpos 的清零是**语义必需**而非防御：finish() 用 `lpos[lab] < 95` 判定
+ * "标签已分配但从未发射"（内部缺陷），依赖的正是静态数组的初值 0；读到垃圾若 ≥95 就会
+ * 跳过该守卫，转而用野位置去 save32 回填，产出静默坏码。 */
+int zero_ints(int* p, int n) { int i = 0; while (i < n) { p[i] = 0; i = i + 1; } return 0; }
+int zero_chrs(char* p, int n) { int i = 0; while (i < n) { p[i] = 0; i = i + 1; } return 0; }
 
 /* ---- 字符串工具（名字池） ---- */
 int seq_tok(char* s) {          /* tok 与字面量相等 */
@@ -1750,6 +1782,18 @@ int main() {
     na = xmalloc(NMAX * 4);       nb = xmalloc(NMAX * 4);   nnext = xmalloc(NMAX * 4);
     nval = xmalloc(NMAX * 4);     nvslot = xmalloc(NMAX * 4); nival = xmalloc(NMAX * 4);
     strtab = xmalloc(STRTAB_CAP);   /* 名字池（④；同样必须在解析前就位） */
+    /* ⑤⑥⑦ 符号/补丁/标签三表：同样必须在解析前就位；brk 内存非零 ⇒ 分配后立即清零
+     * （清零的必要性见 zero_ints 处注释；三表合计 ≈113 KB，容量已与 host 对齐）。 */
+    skind = xmalloc(SYM_MAX * 4);  sty = xmalloc(SYM_MAX * 4);   sbty = xmalloc(SYM_MAX * 4);
+    slen = xmalloc(SYM_MAX * 4);   sval = xmalloc(SYM_MAX * 4);  sname = xmalloc(SYM_MAX * 4);
+    snargs = xmalloc(SYM_MAX * 4); sdef = xmalloc(SYM_MAX);
+    zero_ints(skind, SYM_MAX);  zero_ints(sty, SYM_MAX);   zero_ints(sbty, SYM_MAX);
+    zero_ints(slen, SYM_MAX);   zero_ints(sval, SYM_MAX);  zero_ints(sname, SYM_MAX);
+    zero_ints(snargs, SYM_MAX); zero_chrs(sdef, SYM_MAX);
+    pk = xmalloc(PATCH_MAX * 4);   ppos = xmalloc(PATCH_MAX * 4);  pname = xmalloc(PATCH_MAX * 4);
+    zero_ints(pk, PATCH_MAX);   zero_ints(ppos, PATCH_MAX);  zero_ints(pname, PATCH_MAX);
+    lpos = xmalloc(LAB_MAX * 4);   lkind = xmalloc(LAB_MAX * 4);  ltarget = xmalloc(LAB_MAX * 4);
+    zero_ints(lpos, LAB_MAX);   zero_ints(lkind, LAB_MAX);   zero_ints(ltarget, LAB_MAX);
     code_len = 0;
     nsym = 0; npatch = 0; nlab = 0; nstr = 0; nn = 0; nstrpool = 0;
     funcs = 0; funcs_tail = 0; gvars = 0; gvars_tail = 0;
