@@ -362,6 +362,27 @@ if [ "$SAN_OK" = 1 ]; then
                 printf '%s\n' "$out" | grep -i 'runtime error' | head -3 | sed 's/^/        /'
             fi
         }
+        san_case_neg() { # san_case_neg <名> <源> <期望错误前缀>
+            local name="$1" src="$2" want="$3" out rc ho
+            printf '%s' "$src" >"$SAN_IN"; rm -f "$SAN_OUT"
+            out=$(timeout 30 "${RUN32[@]}" "$VD/hostself_san" 2>&1); rc=$?
+            printf '%s' "$src" >"$VD/san_ref_$name.c"
+            "${RUN[@]}" "$VD/san_ref_$name.c" "$VD/san_ref_$name.elf" >/dev/null 2>&1; ho=$?
+            # self：必须非 0 退出且报同一错误前缀；host：同样必须报错（ho!=0）
+            if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "$want" && [ "$ho" -ne 0 ] \
+               && [ ! -s "$SAN_OUT" ]; then
+                HOST_PASS=$((HOST_PASS+1)); echo "[ok]   UBSan self $name（双实现同拒：$want）"
+            else
+                HOST_FAIL=$((HOST_FAIL+1))
+                echo "[FAIL] UBSan self $name rc=$rc hostrc=$ho 期望同拒[$want] selfOut=$(printf '%s' "$out"|tail -1)"
+            fi
+        }
+        GEN256=$(python3 -c "print(','.join(['7']*256))")
+        GEN257=$(python3 -c "print('1,'+','.join([str(i) for i in range(256)]))")
+        GEN250=$(python3 -c "import itertools;ps=', '.join('int p%d'%i for i in range(250));cs=', '.join(str(i) for i in range(250));print((ps,cs))")
+        san_case_neg p20_arity_wrap0 "int f(){return 0;}int main(){return f($GEN256);}" "arg count mismatch"
+        san_case_neg p21_arity_wrap1 "int f(int p0){return p0;}int main(){return f($GEN257)-1;}" "arg count mismatch"
+        san_case p22_arity250 "int f($(python3 -c "print(', '.join('int p%d'%i for i in range(250)))")){return p0+p249;}int main(){return f($(python3 -c "print(', '.join(str(i) for i in range(250)))"))-249;}"
         san_case p08_plain  'int f(int aa,int bb,int cc,int dd,int ee,int ff,int gg,int hh){return aa+bb+cc+dd+ee+ff+gg+hh;}int main(){return f(1,2,3,4,5,6,7,8)-36;}'
         san_case p16_many   'int f(int p00,int p01,int p02,int p03,int p04,int p05,int p06,int p07,int p08,int p09,int p10,int p11,int p12,int p13,int p14,int p15){return p00+p01+p02+p03+p04+p05+p06+p07+p08+p09+p10+p11+p12+p13+p14+p15;}int main(){return f(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)-16;}'
         san_case p06_longnm 'int f(int parameter_number_00,int parameter_number_01,int parameter_number_02,int parameter_number_03,int parameter_number_04,int parameter_number_05){return parameter_number_00+parameter_number_01+parameter_number_02+parameter_number_03+parameter_number_04+parameter_number_05;}int main(){return f(1,1,1,1,1,1)-6;}'

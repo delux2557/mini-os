@@ -26,7 +26,11 @@
 int sys_print(char* s) { syscall3(1, s, 0, 0); return 0; }
 
 /* ---- 内存池 ----
- * V4 arena 瘦身：小枚举字段用 char（nkind/nty/nbty/nvkind/nnargs 值恒 <256；
+ * V4 arena 瘦身：小枚举字段用 char（nkind/nty/nbty/nvkind 值恒 <256；
+ * ⚠ nnargs **不能**用 char：它是实参/形参计数（本编译器允许到 int），char 会把
+ *   257 截断成 1，使 1 形参函数 + 257 实参的 arity 校验被静默绕过、并让调用点
+ *   `add esp` 泄漏 256 个实参所占的栈（安全复核 F6 家族，2026-09-18）。
+
  * 其余节点句柄/偏移仍须 int）。
  * ⚠ nnlocals 是**局部帧字节数**（上限 LOCAL_BYTES_MAX=4096），**不能**用 char：会被按 256 取模
  *   截断（328→72、256→0），产物 prologue 的 `sub esp,imm` 随之写小 ⇒ 帧内局部数组越界写栈。
@@ -75,7 +79,7 @@ int NMAX = 49152;           /* AST 节点池容量（运行时分配，见上）
 char* nkind; char* nty; char* nbty; int* nlen;
 int* nl; int* nr; int* na; int* nb; int* nnext;
 int* nval; char* nvkind; int* nvslot; int* nival;
-char* nnargs; int* nnlocals;
+int* nnargs; int* nnlocals;
 int nn;                     /* 当前节点数（0 保留为 NULL） */
 
 int STRTAB_CAP = 131072;    /* 名字池容量（运行时分配，见上 ④） */
@@ -1740,7 +1744,7 @@ int main() {
      * nnlocals 走 4 B/节点：它是帧字节数（上限 4096），char 会按 256 取模截断（见上「内存池」段）。
      * 放在解析之前——任何 node_new/数组访问都在这之后发生。 */
     nkind = xmalloc(NMAX);        nty = xmalloc(NMAX);      nbty = xmalloc(NMAX);
-    nvkind = xmalloc(NMAX);       nnargs = xmalloc(NMAX);
+    nvkind = xmalloc(NMAX);       nnargs = xmalloc(NMAX * 4);
     nnlocals = xmalloc(NMAX * 4);
     nlen = xmalloc(NMAX * 4);     nl = xmalloc(NMAX * 4);   nr = xmalloc(NMAX * 4);
     na = xmalloc(NMAX * 4);       nb = xmalloc(NMAX * 4);   nnext = xmalloc(NMAX * 4);
