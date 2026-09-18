@@ -301,10 +301,16 @@ enum { K_FUNC, K_GLOBAL, K_LOCAL, K_ARG };
 enum { TY_INT, TY_CHAR, TY_PTR, TY_ARRAY };  /* V2c：char（无符号）；V2d：数组 */
 /* （Sym 类型 / syms / nsym 已收进顶部 CC 上下文，见文件头"编译器上下文 CC"） */
 
-/* 安全复核 F7：同作用域重声明判定（C 6.7.6.3p15 —— 形参各有自己的块作用域，
- * 故函数体顶层块里与形参同名是**合法遮蔽**，而形参表内部彼此同名是**错误**。
- * scope_floor = 当前作用域在符号表里的下界：[scope_floor, nsym) 即"同一作用域"。
- * 块进出时保存/恢复（见 block_stmt_inner），因此嵌套遮蔽仍合法（BUG-035 依赖它）。 */
+/* 安全复核 F7：同作用域重声明判定（"绝不产出坏码"红线——此前三族静默接受，
+ * 名字被悄悄换绑、初值落到另一个槽位）。
+ * scope_floor = 当前作用域在符号表里的下界：[scope_floor, nsym) 即"同一作用域"；
+ * 块进出时保存/恢复（见 block_stmt_inner），故嵌套块遮蔽外层局部仍合法（BUG-035 依赖它）。
+ * ⚠ **与 gcc 的一处已登记分歧**：形参表内部彼此同名报错（与 gcc 一致），但"函数体顶层块
+ * 与形参同名"本实现视为**遮蔽**并接受，而 gcc（c89/c99/c11）报
+ * `'a' redeclared as different kind of symbol`。**这不是"C 合法"**（早期注释如此写，是误判）；
+ * 保留宽松口径是有意的：cc500 同宽 ⇒ 只改 minicc 会让两编译器互相分叉，且改严需额外区分
+ * "函数体块/普通块"。台账 `DIV-param-shadow` 逐位锁死该档位，实测与理由见
+ * tests/test_boundary.sh 该行注释。 */
 static int scope_floor;
 
 static void sym_check_dup(const char *name, const char *what) {

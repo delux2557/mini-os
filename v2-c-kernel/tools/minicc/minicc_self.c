@@ -467,9 +467,11 @@ int accept_s(char* s) {
 int expect_s(char* s) { if (accept_s(s) == 0) fail("expected token"); return 0; }
 
 /* ---- 符号表 / 补丁 / 标签 ---- */
-/* 安全复核 F7（与 minicc.c 同构）：形参各有自己的块作用域（C 6.7.6.3p15），
- * 故函数体顶层块与形参同名是合法遮蔽，形参表内彼此同名是错误。
- * scope_floor = 当前作用域下界，[scope_floor, nsym) 即同一作用域。 */
+/* 安全复核 F7（与 minicc.c 同构）：同作用域重声明判定。
+ * scope_floor = 当前作用域下界，[scope_floor, nsym) 即同一作用域；块进出保存/恢复。
+ * 形参表内彼此同名报错（与 gcc 一致）；"函数体顶层块与形参同名"本实现视为遮蔽并接受，
+ * 与 gcc 相左 —— **这是已登记分歧 `DIV-param-shadow` 而非"C 合法"**，理由与实测见
+ * minicc.c 同处注释与 tests/test_boundary.sh 该行。 */
 int scope_floor = 0;
 
 int sym_find_from(int lo, int noff) {
