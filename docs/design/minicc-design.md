@@ -184,7 +184,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 
 ### 6.3 明确拒绝清单（编译期静态报错，不产出坏码）
 
-`long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、预处理指令、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、以及**指针→整型**方向的混赋。
+`long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、预处理指令、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、以及**指针→整型**方向的混赋；F7 起再加两条：**同作用域重声明**（`int a=1,a;`／同块内 `int a;int a;`，报 `redeclaration in same scope`）与**形参表内重名**（`int f(int a,int a)`，报 `duplicate parameter name`）——此前三族均静默接受且产物语义与 C 不可对应（安全复核 F7）。
 
 > - 位运算已支持：`& | ^ << >> ~`（V3a，见 [minicc.c](../../v2-c-kernel/tools/minicc/minicc.c) 的 `ND_BITAND/BITOR/BITXOR/SHL/SHR/BNOT`），不再列入拒绝清单。
 > - **`goto` 已不属本清单**：M14goto 已在 host（#175）与 self（#182）两侧实装，接受面由 `test_minicc.sh` `[2b6]` 钉住。本清单此前长期把 `goto` 列为拒绝项而无人察觉——**契约文档写反等于宣告红线不成立**，故本清单现已改为可执行（见末条）。
@@ -351,4 +351,6 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 - guest 22 项：变量四则 `a=1+2==3`、递归 `fact(5)==120`、`while` 累加 `g==45`、`17/5==3&&17%5==2`、非零退出码 `return 1` 报 FAIL（证明退出码真实传回）、未定义函数编译报错；指针（V2b）取地址/解引用读写/指针参数 `f(&a)`/指针算术 `p+0`/多级指针编译拒绝；字符串/char（V2c）char 变量、字符串解引用、**产物运行期输出 "ZY"（`\x`** **转义避免与源码回显串扰，证明 syscall3 stub 真实 I/O）**；数组（V2d）读写求和、char 数组、全局数组、`&a[0]` 指针。
 
 - cc500 回归未受影响（`make test-cc500` 全绿，ccrun 重构向后兼容）。
-
+> - **同作用域重声明 ≠ 遮蔽**：C 6.7.6.3p15 下每个形参自有块作用域，故函数体顶层块内
+>   与形参同名、嵌套块遮蔽外层局部、局部遮蔽同名全局函数（BUG-035）**都是合法遮蔽**，
+>   不在本清单内；由 `[2a5]` 的 `rl_int_to_ptr` 反向哨兵与台账 `shadow-*` 三形态共同守。

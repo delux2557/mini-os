@@ -154,6 +154,13 @@ S_STRCAP=$(sget STRTAB_CAP)
 if [ -n "$S_STRCAP" ] && [ "$S_STRCAP" -ge $((S_SRC / 2)) ]; then
   ok "S2e-名字池余量($S_STRCAP≥$((S_SRC / 2)))"
 else bad "S2e-名字池容量不足" "STRTAB_CAP=$S_STRCAP vs 源 $S_SRC（须 ≥ 源/2）"; fi
+# ── M7d 同作用域重声明（F7/#186）：三条受控拒 + 两条"遮蔽合法"哨兵（防过度收紧）──
+M  M7d-同子句重名拒        1 'int main(){int a=1,a;return a-1;}'
+M  M7d-同块两语句重名拒    1 'int main(){int a;int a;a=2;return a-2;}'
+M  M7d-形参重名拒          1 'int f(int a,int a){return a;}int main(){return 0;}'
+R__ M7d-嵌套块遮蔽不误伤   0 'int main(){int a;a=1;{int a;a=5;return a-5;}}'
+R__ M7d-局部遮蔽全局函数名 0 'int rel(){return 7;}int main(){int rel;rel=3;return rel-3;}'
+
 # ── MC-08 末角已随上游收口（794a49b：parse 期 defined 标记）→ 原 XFAIL 翻 PASS 钉 ──
 # 说明：heavy 层 test_minicc.sh:224-226 已有同形断言（QEMU 路径）；此处为 FAST 宿主层等价钉，
 # 两层运行时不同（freestanding 构建 vs in-guest），双保险属 repo 既有分层风格。

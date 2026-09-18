@@ -53,6 +53,17 @@ chk(){ # chk <名> <gcc期望> <cc期望> <min期望> <源码>
   fi
 }
 echo "== [boundary] 双编译器×gcc 语言契约三方台账（FAST）=="
+# ── F7（#186）同作用域重声明：minicc 与 gcc 对齐；cc500 仍静默接受 ⇒ 按离群登记（SPLIT-C-*）──
+# 三条实测：修复前 minicc 与 cc500 同为"静默受"（`int a=1,a;` 产物取错值），现将与 C 一致报错。
+chk SPLIT-C-dupclause REJ 0   REJ 'int main(){int a=1,a;return a-1;}'
+chk SPLIT-C-dupblock  REJ 0   REJ 'int main(){int a;int a;a=2;return a-2;}'
+chk SPLIT-C-dupportyr REJ 0   REJ 'int f(int p0,int p0){return p0;}int main(){return 0;}'
+# 反向：文件作用域 `int a,a;` gcc 按多条暂定声明接受，两侧编译器均拒（既有口径，登记防误导）
+chk SPLIT-G-globdup   0   REJ REJ 'int a,a;int main(){return 0;}'
+# 正例（过度收紧哨兵）：C 合法的遮蔽必须仍然合法——嵌套块遮蔽局部、局部遮蔽同名全局函数
+chk shadow-nested     0   0   0   'int main(){int a;a=1;{int a;a=5;return a-5;}}'
+chk shadow-gfun       0   0   0   'int rel(){return 7;}int main(){int rel;rel=3;return rel-3;}'
+
 # ── 全拒家族（数制/字面量纪律，MC-07/E5/M9）──
 # 注：`010` 是合法 C 八进制（gcc=V8）；两侧显式拒=子集纪律，gcc 列锁真实值防误导
 chk octal            8    REJ REJ 'int main(){int a;a=010;return a;}'
