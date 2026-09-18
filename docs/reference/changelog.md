@@ -70,6 +70,47 @@
 
 * 闸门：`test-minicc` 宿主 **139/0** ✔ · `test-serial` ✔（两条新断言实跑通过）·
   `test-fast` ✔ · `miccboot` P1 == P2 ✔。
+## [Unreleased] - 同作用域重声明受控拒绝（安全复核 F7：minicc 与 gcc 对齐）
+
+**Fixed**
+
+* **minicc 静默接受 C 必须拒绝的重声明**（host 与 self 双侧同源根因）：`int a=1,a;`、
+  `int a;int a;`（同一块内）、`int f(int a,int a)`（形参表内）三族都直接 `sym_add`，
+  而 `sym_find` 是"从后往前、最近声明优先"⇒ 三族**全部编译通过，产物语义与 C 不可对应**：
+  `int a=1,a; return a-1` 读到未初始化的后一个 `a`（实测退出码 1），同族用例实测**直接崩溃**
+  （台账观测值 `165` = 信号归一哨兵）；C 对这三族都是编译期错误。
+  这正是本仓 §6.3 的"**绝不产出坏码**"红线所针对的形态。
+  - 改法：新增 `scope_floor`（当前作用域在符号表中的下界）+ `sym_check_dup`，
+    在**局部声明子句**与**形参**两处 `sym_add` 前受控报错（`redeclaration in same scope` /
+    `duplicate parameter name`）；`block_stmt` 进出保存/恢复下界。
+  - **不误伤合法遮蔽**：嵌套块遮蔽外层局部、局部遮蔽同名全局函数（BUG-035 依赖）仍合法，
+    由台账 `shadow-nested` / `shadow-gfun` 与 `mc_matrix` 的 `M7d-*` 哨兵守着；`self` 侧按
+    同一消息同一路径镜像（子集内无 `void`/三目，故拆成两个 `int` 助手），由 `[2b7]` 的
+    `p23_dup_clause`/`p24_dup_param` 钉断言「双实现同拒 + `error: ` 前缀段等值」。
+  - ⚠ **一处与 gcc 的已登记分歧（#187 复核时发现并订正）**：`int f(int a){int a;…}` 本实现
+    **接受**，而 gcc（c89/c99/c11 实测）报 `'a' redeclared as different kind of symbol`。
+    初稿把它与前两类并列为"C 合法遮蔽"是**误判**（gcc 视为重定义）。保留该宽松口径是有意的：
+    **cc500 同宽**（实测两者都返回 7）⇒ 只改 minicc 会让双编译器互相分叉，而 cc500 侧须按 M
+    里程碑走"旧语法产物零变化"证明才能动。已登记为 `DIV-param-shadow`（锁 `REJ/7/7`，唯一
+    离群者是 gcc）；复核并实测：把口径**改严后 `minicc_self.c` 与 golden 全 13 例仍全编过**
+    ⇒ 该分歧**可消除，但当前不划算**（改单侧得不偿失）。
+* **本 PR 自身也按 #186 的"清单 ↔ 镜像"规矩同步**：两类新增拒绝已入 §6.3（并写明"重声明 ≠
+  遮蔽"只适用于嵌套块/遮蔽全局函数两类；形参-体顶层同名单独登记为上述 `DIV-` 分歧），
+  `[2a5]` 补 3 条探针 `rl_dup_scope` / `rl_dup_two_stmt` / `rl_dup_param` ⇒ 宿主段 141 → 144。
+* **仍存的一处文档债（本 PR 不做）**：§6 语言面表缺 #157（声明子句表 + C 空语句）、
+  #171（`p[i]`）、#175（`goto`/标签，self 镜像见 #182）三批已实现语法；§6 自称"语言面
+  唯一事实来源"，这批当时只落在 changelog 与代码注释里。补它们须按同一规矩为每条配
+  `[2a5]` 风格的**接受面**探针（清单与镜像同改），是独立一件事。
+
+**Engineering**
+
+* 新增 **6 条三方台账行（28→34 形态）**：`SPLIT-C-dupclause` / `SPLIT-C-dupblock` / `SPLIT-C-dupportyr`
+  （本轮把 minicc 拉回与 gcc 一致 ⇒ **cc500 成为离群者**，其静默接受显式登记为 `0`；
+  不在本 PR 动 cc500——它是单遍无类型面设计，改动需按 M 里程碑纪律走产物零变化证明）；
+  `SPLIT-G-globdup`（文件作用域 `int a,a;` 按 C 合法，两编译器均拒——既有更严口径，登记防误导）；
+  `shadow-nested` / `shadow-gfun` 两条**过度收紧哨兵**（期望 `0/0/0`）。
+* `mc_matrix.sh` 加 `M7d-*` 五钉（3 拒 + 2 哨兵），`[2b7]` 加 `p23/p24` 双实现同拒钉。
+* 实测判别力：去掉守卫后三条 `SPLIT-C-dup*` 的 minicc 列由 `REJ` 变 `OK(0)` ⇒ 台账即门禁。
 
 ---
 
@@ -2666,4 +2707,3 @@ Docs：本条目。
 * 实模式 → 保护模式切换
 
 * VGA 打印 "Hello Micro-OS!"
-

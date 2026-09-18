@@ -9,6 +9,9 @@
 #   SPLIT-C：cc500 接受面缺口（arity 不校验、`*3` 不阻编译 ⇒ 编得过但运行期自成后果）；
 #   DIV：**显式登记的已知分歧**（cc500 无类型面 ⇒ deref 恒 char 宽；#171 契约）——期望仍逐位
 #       锁死，"分歧变大/变小/消失"都要红（消失也许意味着该修本台账了，那也是红给你看）。
+#       亦含 **gcc 更严** 的方向（如 `DIV-param-shadow`：cc500 与 minicc 一致视为遮蔽、gcc 视为
+#       重定义）——登记这类行的意义是把"我方口径与 C 的偏差"变成**逐位锁死的已声明事实**，
+#       而不是让它在某次"按 gcc 翻正"里被单侧改掉、制造两个自家编译器互相分叉。
 # 值域全部按 exit 低 8 位比较（三方同构口径）；编译期消息文本不断言（只 REJ 档位）。
 set -u
 K=$(cd "$(dirname "$0")/.." && pwd)
@@ -53,6 +56,34 @@ chk(){ # chk <名> <gcc期望> <cc期望> <min期望> <源码>
   fi
 }
 echo "== [boundary] 双编译器×gcc 语言契约三方台账（FAST）=="
+# ── F7（#186）同作用域重声明：minicc 与 gcc 对齐；cc500 仍静默接受 ⇒ 按离群登记（SPLIT-C-*）──
+# 三条实测：修复前 minicc 与 cc500 同为"静默受"（`int a=1,a;` 产物取错值），现将与 C 一致报错。
+chk SPLIT-C-dupclause REJ 0   REJ 'int main(){int a=1,a;return a-1;}'
+chk SPLIT-C-dupblock  REJ 0   REJ 'int main(){int a;int a;a=2;return a-2;}'
+chk SPLIT-C-dupportyr REJ 0   REJ 'int f(int p0,int p0){return p0;}int main(){return 0;}'
+# 反向：文件作用域 `int a,a;` gcc 按多条暂定声明接受，两侧编译器均拒（既有口径，登记防误导）
+chk SPLIT-G-globdup   0   REJ REJ 'int a,a;int main(){return 0;}'
+# 正例（过度收紧哨兵）：C 合法的遮蔽必须仍然合法——嵌套块遮蔽局部、局部遮蔽同名全局函数
+chk shadow-nested     0   0   0   'int main(){int a;a=1;{int a;a=5;return a-5;}}'
+chk shadow-gfun       0   0   0   'int rel(){return 7;}int main(){int rel;rel=3;return rel-3;}'
+# ── 同族的**已登记分歧**（gcc 更严 / 两编译器更宽）：不是"C 合法"，而是**有意保留的实现取舍** ──
+# ① 形参与函数体顶层块内同名：gcc（c89/c99/c11 实测均报 `'a' redeclared as different kind of
+#    symbol`）视为重定义，**cc500 与 minicc 一致视为遮蔽**（本行即锁 REJ/7/7，唯一离群者是 gcc）。
+#    保留理由（两条，按强度排序）：
+#      1) **改单侧会让两编译器互相分叉**：cc500 同样宽松，只把 minicc 改严 ⇒ 双编译器差分出现
+#         新的 SPLIT-C 行；而 cc500 要按 M 里程碑走"旧语法产物零变化"证明才能动 ⇒ 该分歧应由
+#         cc500 侧一并收口，不在本 PR 范围内。
+#      2) 实现更简：本实现的作用域下界按块入口符号数重置，函数体块因此天然排除形参；严格对齐 C
+#         需额外区分"函数体块/普通块"（多一个标志）。
+#    **语料侧不需要该严格性**（复核实测：把口径改严后 minicc_self.c 与 golden 全 13 例均仍编过
+#    ⇒ 分歧本身可消除，只是不划算）。登记它，防"按 gcc 翻正"重踩并制造单侧分叉。
+#    用例刻意**不读被遮蔽的变量**（`int a;` 后先赋值再用）：否则锁的是"未初始化读"的垃圾值，
+#    会随帧布局漂移而假红——台账要锁的是**档位**（受/拒 + 确定性值），不是偶然字节。
+chk DIV-param-shadow  REJ 7   7   'int f(int a){int a;a=7;return a;}int main(){return f(1);}'
+# ② 文件域"定义 + 暂定声明"（`int a=1;int a;`）：C 允许多条暂定声明合并，两编译器均拒 ⇒
+#    与既有 SPLIT-G-globdup 同族（gcc 更宽 = 有意子集边界）。
+chk SPLIT-G-globtent  1   REJ REJ 'int a=1;int a;int main(){return a;}'
+
 # ── 全拒家族（数制/字面量纪律，MC-07/E5/M9）──
 # 注：`010` 是合法 C 八进制（gcc=V8）；两侧显式拒=子集纪律，gcc 列锁真实值防误导
 chk octal            8    REJ REJ 'int main(){int a;a=010;return a;}'

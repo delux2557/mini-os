@@ -118,6 +118,12 @@ hrun rl_multilevel   'int main(){int* p; int** q; return 0;}'              1 '' 
 hrun rl_derefnonptr  'int main(){int a; a=1; return *a;}'                  1 '' 'compiled OK'
 hrun rl_addrnonlval  'int main(){int a; a=1; int* p; p = &(a+1); return 0;}' 1 '' 'compiled OK'
 hrun rl_ptr_to_int   'int main(){int a; int* p; a = p; return a;}'         1 '' 'compiled OK'
+hrun rl_dup_scope      'int main(){int a=1,a;return a-1;}'                     1 '' 'compiled OK'
+hrun rl_dup_two_stmt   'int main(){int a;int a;a=2;return a-2;}'               1 '' 'compiled OK'
+hrun rl_dup_param      'int f(int a,int a){return a;}int main(){return 0;}'    1 '' 'compiled OK'
+# F7 三条同作用域重声明也在此清单内；**遮蔽不是拒绝项**（C 6.7.6.3p15）——
+#   下方 rl_int_to_ptr 与台账 shadow-nested/shadow-gfun、mc_matrix M7d 哨兵共同守住这条边界，
+#   防有人把"同作用域重名"顺手做成"整函数一把拒"（那会立刻编不动 minicc_self.c 与 dhcpd）。
 # ⚠ 反向（int → ptr）是**有意放宽**、不得列入拒绝清单（§7.3：type_eq 放宽右值 int 赋给指针，
 #   用于承接 xmalloc 的 brk 地址）。这对探针成对出现，防将来有人"顺手把整条标成拒绝"。
 hrun rl_int_to_ptr   'int main(){int* p; p = 5; return 0;}'                0 'compiled OK' ''
@@ -411,6 +417,8 @@ if [ "$SAN_OK" = 1 ]; then
         san_case_neg p20_arity_wrap0 "int f(){return 0;}int main(){return f($GEN256);}" "arg count mismatch"
         san_case_neg p21_arity_wrap1 "int f(int p0){return p0;}int main(){return f($GEN257)-1;}" "arg count mismatch"
         san_case p22_arity250 "int f($(python3 -c "print(', '.join('int p%d'%i for i in range(250)))")){return p0+p249;}int main(){return f($(python3 -c "print(', '.join(str(i) for i in range(250)))"))-249;}"
+        san_case_neg p23_dup_clause 'int main(){int a=1,a;return a-1;}' "redeclaration in same scope"
+        san_case_neg p24_dup_param  'int f(int a,int a){return a;}int main(){return 0;}' "duplicate parameter name"
         san_case p08_plain  'int f(int aa,int bb,int cc,int dd,int ee,int ff,int gg,int hh){return aa+bb+cc+dd+ee+ff+gg+hh;}int main(){return f(1,2,3,4,5,6,7,8)-36;}'
         san_case p16_many   'int f(int p00,int p01,int p02,int p03,int p04,int p05,int p06,int p07,int p08,int p09,int p10,int p11,int p12,int p13,int p14,int p15){return p00+p01+p02+p03+p04+p05+p06+p07+p08+p09+p10+p11+p12+p13+p14+p15;}int main(){return f(1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)-16;}'
         san_case p06_longnm 'int f(int parameter_number_00,int parameter_number_01,int parameter_number_02,int parameter_number_03,int parameter_number_04,int parameter_number_05){return parameter_number_00+parameter_number_01+parameter_number_02+parameter_number_03+parameter_number_04+parameter_number_05;}int main(){return f(1,1,1,1,1,1)-6;}'

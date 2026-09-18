@@ -184,7 +184,7 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 
 ### 6.3 明确拒绝清单（编译期静态报错，不产出坏码）
 
-`long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、预处理指令、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、以及**指针→整型**方向的混赋。
+`long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、预处理指令、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、以及**指针→整型**方向的混赋；F7 起再加两条：**同作用域重声明**（`int a=1,a;`／同块内 `int a;int a;`，报 `redeclaration in same scope`）与**形参表内重名**（`int f(int a,int a)`，报 `duplicate parameter name`）——此前三族均静默接受且产物语义与 C 不可对应（安全复核 F7）。
 
 > - 位运算已支持：`& | ^ << >> ~`（V3a，见 [minicc.c](../../v2-c-kernel/tools/minicc/minicc.c) 的 `ND_BITAND/BITOR/BITXOR/SHL/SHR/BNOT`），不再列入拒绝清单。
 > - **`goto` 已不属本清单**：M14goto 已在 host（#175）与 self（#182）两侧实装，接受面由 `test_minicc.sh` `[2b6]` 钉住。本清单此前长期把 `goto` 列为拒绝项而无人察觉——**契约文档写反等于宣告红线不成立**，故本清单现已改为可执行（见末条）。
@@ -192,6 +192,8 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 > - 位域在 minicc 中无 `struct` 载体，实际由 `struct` 本身被拒（探针只能借 struct 触发，拒绝理由是载体而非位域本身）。
 >
 > **可执行镜像**：上列每一条都在 `v2-c-kernel/tests/test_minicc.sh` 的 **`[2a5]`** 有对应探针，断言"编译期拒绝且不产出产物"，另含 `int → ptr` 的对照探针。**改本清单必须同步改 `[2a5]`（反之亦然）**——这是本仓库对"拒绝清单即契约"的兑现方式。
+> - **重声明 ≠ 遮蔽**：嵌套块遮蔽外层局部、局部遮蔽同名全局函数（BUG-035 依赖）**都不是重声明**、仍是合法 C，不在本清单内；由台账 `shadow-nested` / `shadow-gfun` 与 `mc_matrix` 的 `M7d-*` 哨兵守着。
+> - ⚠ **一处与 gcc 的已登记分歧**：`int f(int a){int a;…}`（函数体顶层块与形参同名）本实现视为**遮蔽**而**接受**；gcc（c89/c99/c11 实测）报 `'a' redeclared as different kind of symbol`。**这不是"C 合法"**（本 PR 的初稿如此写，实为误判），而是**有意保留的取舍**：cc500 同宽 ⇒ 只把 minicc 改严会让两编译器互相分叉（且改严需额外区分"函数体块/普通块"）。台账行 `DIV-param-shadow` 锁 `REJ/7/7`（唯一离群者是 gcc），复核证据见该行注释——含"改严后 `minicc_self.c` 与 golden 全 13 例仍全编过"的实测，即该分歧**可消除但不划算**。
 
 ***
 
@@ -351,4 +353,3 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 - guest 22 项：变量四则 `a=1+2==3`、递归 `fact(5)==120`、`while` 累加 `g==45`、`17/5==3&&17%5==2`、非零退出码 `return 1` 报 FAIL（证明退出码真实传回）、未定义函数编译报错；指针（V2b）取地址/解引用读写/指针参数 `f(&a)`/指针算术 `p+0`/多级指针编译拒绝；字符串/char（V2c）char 变量、字符串解引用、**产物运行期输出 "ZY"（`\x`** **转义避免与源码回显串扰，证明 syscall3 stub 真实 I/O）**；数组（V2d）读写求和、char 数组、全局数组、`&a[0]` 指针。
 
 - cc500 回归未受影响（`make test-cc500` 全绿，ccrun 重构向后兼容）。
-

@@ -301,6 +301,23 @@ enum { K_FUNC, K_GLOBAL, K_LOCAL, K_ARG };
 enum { TY_INT, TY_CHAR, TY_PTR, TY_ARRAY };  /* V2c：char（无符号）；V2d：数组 */
 /* （Sym 类型 / syms / nsym 已收进顶部 CC 上下文，见文件头"编译器上下文 CC"） */
 
+/* 安全复核 F7：同作用域重声明判定（"绝不产出坏码"红线——此前三族静默接受，
+ * 名字被悄悄换绑、初值落到另一个槽位）。
+ * scope_floor = 当前作用域在符号表里的下界：[scope_floor, nsym) 即"同一作用域"；
+ * 块进出时保存/恢复（见 block_stmt_inner），故嵌套块遮蔽外层局部仍合法（BUG-035 依赖它）。
+ * ⚠ **与 gcc 的一处已登记分歧**：形参表内部彼此同名报错（与 gcc 一致），但"函数体顶层块
+ * 与形参同名"本实现视为**遮蔽**并接受，而 gcc（c89/c99/c11）报
+ * `'a' redeclared as different kind of symbol`。**这不是"C 合法"**（早期注释如此写，是误判）；
+ * 保留宽松口径是有意的：cc500 同宽 ⇒ 只改 minicc 会让两编译器互相分叉，且改严需额外区分
+ * "函数体块/普通块"。台账 `DIV-param-shadow` 逐位锁死该档位，实测与理由见
+ * tests/test_boundary.sh 该行注释。 */
+static int scope_floor;
+
+static void sym_check_dup(const char *name, const char *what) {
+    for (int i = nsym - 1; i >= scope_floor; i--)
+        if (s_eq(syms[i].name, name)) fail(what);
+}
+
 static int sym_find(const char *name) {
     /* V3：从后往前查找（最近声明优先）——局部变量遮蔽同名的全局函数/变量
      * （如 finish() 的局部 rel 遮蔽解析函数 rel，BUG-035）。 */
@@ -1105,6 +1122,8 @@ static Node *stmt(void);
 
 static Node *block_stmt_inner(void) {
     int mark = nsym;
+    int saved_floor = scope_floor;         /* F7：块内新作用域 */
+    scope_floor = mark;
     Node *head = NULL, **tail = &head;
     while (!is_sym("}")) {
         if (tok[0] == 0) fail("unexpected end of file");
@@ -1113,6 +1132,7 @@ static Node *block_stmt_inner(void) {
     }
     expect("}");
     nsym = mark;                /* 作用域：丢弃块内局部符号 */
+    scope_floor = saved_floor;  /* F7：恢复外层作用域下界 */
     Node *n = node_new(ND_BLOCK);
     n->a = head;
     return n;
@@ -1187,6 +1207,8 @@ static Node *stmt(void) {
         cur_frame += size;
         if (cur_frame > 4096) fail("frame too big");
         n->val = cur_frame;             /* 帧字节偏移（首个变量 = 4，lea -4(%ebp)） */
+        /* F7：同一作用域（含同一条声明语句的后续子句）重名 → 受控报错，不产出坏码 */
+        sym_check_dup(name, "redeclaration in same scope");
         sym_add(name, K_LOCAL, n->ty, n->bty, n->len, n->val);
         if (accept("=")) {
             n->l = expr();
@@ -1322,6 +1344,7 @@ static void parse_program(void) {
             s_cpy(fn->name, name);
             fn->val = si;
             int func_scope = nsym;
+            scope_floor = func_scope;   /* F7：形参彼此同作用域 */
             cur_nargs = 0; cur_frame = 0;
             Node *params = NULL, **ptail = &params;
             if (!is_sym(")")) {
@@ -1333,6 +1356,7 @@ static void parse_program(void) {
                     next_tok();
                     int plen;
                     if (array_suffix(p->ty, &plen)) fail("unsupported: array parameter");
+                    sym_check_dup(p->name, "duplicate parameter name");   /* F7 */
                     p->vkind = K_ARG;
                     p->vslot = cur_nargs;
                     sym_add(p->name, K_ARG, p->ty, p->bty, 0, cur_nargs);

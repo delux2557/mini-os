@@ -467,6 +467,33 @@ int accept_s(char* s) {
 int expect_s(char* s) { if (accept_s(s) == 0) fail("expected token"); return 0; }
 
 /* ---- 符号表 / 补丁 / 标签 ---- */
+/* 安全复核 F7（与 minicc.c 同构）：同作用域重声明判定。
+ * scope_floor = 当前作用域下界，[scope_floor, nsym) 即同一作用域；块进出保存/恢复。
+ * 形参表内彼此同名报错（与 gcc 一致）；"函数体顶层块与形参同名"本实现视为遮蔽并接受，
+ * 与 gcc 相左 —— **这是已登记分歧 `DIV-param-shadow` 而非"C 合法"**，理由与实测见
+ * minicc.c 同处注释与 tests/test_boundary.sh 该行。 */
+int scope_floor = 0;
+
+int sym_find_from(int lo, int noff) {
+    int i = nsym - 1;
+    while (i >= lo) {
+        if (seq(sname[i], &strtab[noff])) return i;
+        i = i - 1;
+    }
+    return -1;
+}
+
+/* minicc 子集内无 void/三目，故按消息拆成两个整型返回的助手（与 minicc.c 同消息文本） */
+int sym_check_dup_local(int noff) {
+    if (sym_find_from(scope_floor, noff) >= 0) fail("redeclaration in same scope");
+    return 0;
+}
+
+int sym_check_dup_param(int noff) {
+    if (sym_find_from(scope_floor, noff) >= 0) fail("duplicate parameter name");
+    return 0;
+}
+
 int sym_find(int noff) {
     /* 从后往前（最近声明优先）：局部变量可遮蔽同名全局函数（如 finish 的局部 rel）。 */
     int i = nsym - 1;
@@ -1030,6 +1057,8 @@ int expr() {
 
 int block_stmt_inner() {
     int mark = nsym;
+    int saved_floor = scope_floor;   /* F7：块内新作用域 */
+    scope_floor = mark;
     int head = 0; int tail = 0;
     while (is_sym_s("}") == 0) {
         if (tok[0] == 0) fail("unexpected end of file");
@@ -1039,6 +1068,7 @@ int block_stmt_inner() {
     }
     next_tok();
     nsym = mark;
+    scope_floor = saved_floor;   /* F7：恢复外层下界 */
     int n = node_new(ND_BLOCK);
     na[n] = head;
     return n;
@@ -1129,6 +1159,7 @@ int stmt() {
             cur_frame = cur_frame + dsize;
             if (cur_frame > 4096) fail("frame too big");
             nval[n] = cur_frame;
+            sym_check_dup_local(dnoff);   /* F7 */
             sym_add(dnoff, K_LOCAL, nty[n], nbty[n], nlen[n], nval[n]);
             if (accept_s("=")) {
                 nl[n] = expr();
@@ -1262,6 +1293,7 @@ int parse_program() {
             nival[fn] = noff;
             nval[fn] = si;
             int func_scope = nsym;
+            scope_floor = func_scope;   /* F7：形参彼此同作用域 */
             cur_nargs = 0; cur_frame = 0;
             int params = 0; int ptail = 0; int ptb;   /* F6：decl_type 的 int 中转 */
             if (is_sym_s(")") == 0) {
@@ -1282,6 +1314,7 @@ int parse_program() {
                     if (array_suffix(nty[p], &plen)) fail("unsupported: array parameter");
                     nvkind[p] = K_ARG;
                     nvslot[p] = cur_nargs;
+                    sym_check_dup_param(nival[p]);   /* F7 */
                     sym_add(nival[p], K_ARG, nty[p], nbty[p], 0, cur_nargs);
                     if (params == 0) params = p; else nnext[ptail] = p;
                     ptail = p;
