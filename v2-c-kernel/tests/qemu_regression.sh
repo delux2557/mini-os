@@ -171,8 +171,10 @@ cmd "exec 失败反馈"   "exec nosuchprog
 "      "\[exec\] FAILED to exec '"
 # ---- v0.16 单行结构化自检（agent 可 grep 一行确认全量通过） ----
 # v0.21：第 6 项为内核自审计（帧配平/堆完整性/信号量守恒/PCB 状态机）
+# v0.38：自审计新增 IPC 挂起可达性（阻塞在 sem/msg 者必须在对应等待队列里）⇒ 一并钉住；
+#        该行含 "checked N" 计数，故断言只取前缀（N 随当轮阻塞进程数变化）。
 cmd "selftest 自检"   "selftest
-"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] heap ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[selftest\] PASS (6 checks)"
+"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] heap ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[audit\] ipc ok" "\[selftest\] PASS (6 checks)"
 # ---- v0.17 syscall 边界校验：内核指针全部被拒 ----
 cmd "run abuse"       "run abuse
 "      "\[abuse\] write buf@0xB8000 -> 4294967295" "\[abuse\] verify OK"

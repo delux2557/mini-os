@@ -32,6 +32,10 @@ uint32_t sem_wait_count(sem_t *s);
  * 才交棒），所以摘除死等待者**不丢 token**，故本函数无需动 count。
  * 纯逻辑（本模块不查活跃性）：由调用方在进程退出路径按 pid 调用。 */
 int      sem_reap(sem_t *s, uint32_t pid);
+/* 「挂起可达性」判据（v0.38）：该 pid 是否仍在本信号量的等待队列里。
+ * 唤醒只可能由本队列产生（sem_signal_wake）⇒ **不在队列 = 永不可能被唤醒**（可判定的挂起）。
+ * 供内核看门狗 kind=3 与 [audit] ipc 使用；纯逻辑，宿主可单测。 */
+int      sem_waiter_present(const sem_t *s, uint32_t pid);
 /* 不变量审计（v0.21）：count>=0、waiters<=上限、且 count>0 时无等待者
  * （资源空闲而队列有人 = 丢失了一次 signal）。返回 1=成立 / 0=违反。
  * 纯逻辑，无内核依赖，宿主单测与内核自审计共用。 */

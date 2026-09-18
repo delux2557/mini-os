@@ -413,6 +413,21 @@ test-tr-stable:
 test-rp:
 	bash tests/test_replay.sh
 
+# record/replay 实战（P3 配套，v0.38 接线）：A) 两次冷启同命令集做产物逐字节差分
+# B) 掺入 syscall 边界/不存在对象/深嵌套做压力扫描 C) tr2sqlite 索引 + 基线巡检 + 现场复原归档。
+# 判据齐备且自带退出码（此前**未接任何 target** ⇒ 写好却不在 CI 里跑，接线即本项的全部价值）。
+# 实测耗时 ≈3.5 min（两次 icount 冷启 + 差分 + 索引），故独立成层而非塞进 rp。
+test-rp-torture:
+	bash tests/rp_torture.sh
+
+# ⚠ 以下三个脚本**有意不接 target**（不是漏了）：它们是带参数的**复现工具**，不是测试套件——
+# 本身只"跑一遍并把现场写进日志"，没有 pass/fail 判据，接线成 target 会给出虚假的绿。
+#   · tests/repro_closer.sh    <kernel.elf> <out.log>  F-0b 场景（closer 挂死）的最小复现
+#   · tests/repro_faithful.sh  <kernel.elf> <out.log>  test_socket 全时序的 ack 背压复刻
+#   · tests/ccboot_check.sh    <kernel.elf> <out.log>  ccboot 不动点(P1==P2)的手工快查
+# 用法即"给内核与输出路径"，用于出问题时就地取现场（对应场景的**常驻断言**已在
+# tests/test_socket.sh（F-0a/F-0b）与 tests/test_miccboot.sh（P1==P2）里）。
+
 # record/replay 接 repro_bugs.sh：BUG-A(文件槽泄漏)/BUG-B(cc500 argv) 复现命令流经 transcript
 # 录制固化为可回放证据（.in.tr/.out.tr），并断言两 bug 在修复版"未复现"（含 -nic none）。
 # 录制的 transcript 可被 replay.sh 消费重放（P3 方向，闭环见 docs）。
@@ -483,9 +498,9 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host audit golden boundary qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp stack
+TEST_LAYERS       = host audit golden boundary qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture stack
 TEST_LAYERS_FAST  = host stack audit golden boundary
-TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp
+TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture
 
 test: $(addprefix test-,$(TEST_LAYERS))
 test-fast: $(addprefix test-,$(TEST_LAYERS_FAST))
@@ -546,4 +561,4 @@ clean:
 -include $(BUILD)/*.d
 -include $(BUILD)/apps/*.d
 
-.PHONY: run run-serial test test-host test-audit test-golden guard-diff test-boundary golden-update test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-miccboot test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-audit test-golden guard-diff test-boundary golden-update test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-miccboot test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-rp-torture test-repro test-tcp-attack test-stack test-layers lint clean

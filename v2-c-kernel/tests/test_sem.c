@@ -145,5 +145,21 @@ int main(void) {
     CHECK_EQ(sem_wait_count(&s), 0);
     CHECK_EQ(sem_wait_try(&s, 100), 1);     /* 槽位已回收 ⇒ 可再入队 */
 
+    /* 13) 「挂起可达性」判据（sem_waiter_present）：看门狗 kind=3 与 [audit] ipc 的共用基础。
+     *     语义：唤醒只可能来自本队列 ⇒ 不在队列 = 永不可能被唤醒（可判定的挂起）。 */
+    sem_init(&s, 0);
+    CHECK_EQ(sem_wait_try(&s, 41), 1);
+    CHECK_EQ(sem_wait_try(&s, 42), 1);
+    CHECK_EQ(sem_waiter_present(&s, 41), 1);
+    CHECK_EQ(sem_waiter_present(&s, 42), 1);
+    CHECK_EQ(sem_waiter_present(&s, 43), 0);   /* 不在队列 ⇒ 判挂起 */
+    CHECK_EQ(sem_signal_wake(&s), 41);         /* 被唤醒即离开队列 */
+    CHECK_EQ(sem_waiter_present(&s, 41), 0);
+    CHECK_EQ(sem_reap(&s, 42), 1);             /* 回收后同样离开队列 */
+    CHECK_EQ(sem_waiter_present(&s, 42), 0);
+    sem_init(&s, 3);                            /* 计数充足时 wait 不阻塞 ⇒ 不入队 */
+    CHECK_EQ(sem_wait_try(&s, 44), 0);
+    CHECK_EQ(sem_waiter_present(&s, 44), 0);
+
     UTEST_SUMMARY("test_sem");
 }
