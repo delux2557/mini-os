@@ -379,7 +379,6 @@ if [ "$SAN_OK" = 1 ]; then
         }
         GEN256=$(python3 -c "print(','.join(['7']*256))")
         GEN257=$(python3 -c "print('1,'+','.join([str(i) for i in range(256)]))")
-        GEN250=$(python3 -c "import itertools;ps=', '.join('int p%d'%i for i in range(250));cs=', '.join(str(i) for i in range(250));print((ps,cs))")
         san_case_neg p20_arity_wrap0 "int f(){return 0;}int main(){return f($GEN256);}" "arg count mismatch"
         san_case_neg p21_arity_wrap1 "int f(int p0){return p0;}int main(){return f($GEN257)-1;}" "arg count mismatch"
         san_case p22_arity250 "int f($(python3 -c "print(', '.join('int p%d'%i for i in range(250)))")){return p0+p249;}int main(){return f($(python3 -c "print(', '.join(str(i) for i in range(250)))"))-249;}"
