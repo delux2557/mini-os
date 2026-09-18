@@ -184,9 +184,14 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
 
 ### 6.3 明确拒绝清单（编译期静态报错，不产出坏码）
 
-`long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、`goto`、预处理指令、隐式指针转换、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、指针/整型混赋。
+`long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、预处理指令、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、以及**指针→整型**方向的混赋。
 
-> 位运算已支持：`& | ^ << >> ~`（V3a，见 [minicc.c](../../v2-c-kernel/tools/minicc/minicc.c) 的 `ND_BITAND/BITOR/BITXOR/SHL/SHR/BNOT`），不再列入拒绝清单。
+> - 位运算已支持：`& | ^ << >> ~`（V3a，见 [minicc.c](../../v2-c-kernel/tools/minicc/minicc.c) 的 `ND_BITAND/BITOR/BITXOR/SHL/SHR/BNOT`），不再列入拒绝清单。
+> - **`goto` 已不属本清单**：M14goto 已在 host（#175）与 self（#182）两侧实装，接受面由 `test_minicc.sh` `[2b6]` 钉住。本清单此前长期把 `goto` 列为拒绝项而无人察觉——**契约文档写反等于宣告红线不成立**，故本清单现已改为可执行（见末条）。
+> - **指针/整型混赋是单向的**：`ptr → int` 拒绝（`type mismatch in assignment`），而 **`int → ptr` 有意放宽**（§7.3 的 `type_eq`，用于承接 `xmalloc` 返回的 brk 地址）。原清单只写"隐式指针转换"而未分方向，与 §7.3 自相矛盾，已订正。
+> - 位域在 minicc 中无 `struct` 载体，实际由 `struct` 本身被拒（探针只能借 struct 触发，拒绝理由是载体而非位域本身）。
+>
+> **可执行镜像**：上列每一条都在 `v2-c-kernel/tests/test_minicc.sh` 的 **`[2a5]`** 有对应探针，断言"编译期拒绝且不产出产物"，另含 `int → ptr` 的对照探针。**改本清单必须同步改 `[2a5]`（反之亦然）**——这是本仓库对"拒绝清单即契约"的兑现方式。
 
 ***
 

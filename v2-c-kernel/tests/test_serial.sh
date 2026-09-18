@@ -82,6 +82,10 @@ send() { printf '%s\n' "$1" >&9; sleep 0.3; }
 
 # 等 shell 提示符出现（内核启动 + 加载 shell 完成）
 wait_for "shell 提示符"        "mini-os\$ " 20
+# SSP 随机化：ssp_seed() 在启动早期以 RDTSC 混入随机初值（fixed 值可被针对性覆盖绕过，
+# 见 src/kernel/ssp.c）。此前该防线**在任何测试里都没有断言**——"防线存在"不等于"防线可证"，
+# 故在此钉住它的自报日志（无条件打印，随启动日志即可命中）。
+wait_for "SSP 金丝雀已随机化"   "\[ssp\] kernel stack guard randomized" 5
 
 echo "== [3/3] agent 逐命令交互 =="
 # F10/3b：超长单行应触发内核截断告警（提示用 heredoc）。send 一条 >128B 无空格垃圾串，
@@ -161,6 +165,17 @@ wait_for "沙盒演示启动"        "\[sandboxdemo\] mask demo start"
 wait_for "沙盒受限后存活"      "\[sandboxdemo\] still alive pid="
 wait_for "沙盒演示通过"        "\[sandboxdemo\] verify OK"
 wait_for "沙盒演示退出码"      "'sandboxdemo' exited code="
+# 掩码的**内核侧自报**：app 自己的 "verify OK" 只说明它的期望成立，不足以证明内核真拦下了 syscall
+# （若掩码失效，被禁调用"成功返回"也可能凑出 OK）。故断言内核拦截日志本身
+# （[syscall] pid=N masked syscall M，见 src/kernel/usermode.c 的 dispatch）——
+# 这是把"防线存在"升级为"防线可证"的判据所在。
+wait_for "内核侧拦截日志"      "\[syscall\] pid=.* masked syscall"
+# 本文件另有两条防线日志**故意不在此断言**（诚实留档，勿误认为遗漏）：
+#   · `[STACK-GUARD] canary stomped` —— 只有**内核栈**金丝雀被改写才打（panic 路径），正常用例
+#     触发不到；用户栈溢出走的是另一条 `[user] STACK OVERFLOW`（qemu_regression.sh 已断言）。
+#   · `[WATCHDOG] … STALLED` —— 需"被 wait 的子进程长时间不被调度"才打，而 wdog_check 既
+#     **一次性**（`wdg_fired`）又**只扫 `BLOCK_WAIT`**（src/kernel/sched.c:686/691）⇒ 正常用例
+#     造不出稳定触发场景。这本身是一条待收口项：覆盖面无断言 ⇔ 覆盖面对应的失败形态不可证。
 # ---- v0.26 用户栈按需生长 ----
 send "run deep"
 wait_for "deep 开始递归"       "\[deep\] pid=.* recursing 12\*1KB on a 4KB start stack"
