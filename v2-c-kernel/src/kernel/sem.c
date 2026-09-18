@@ -37,6 +37,20 @@ uint32_t sem_signal_wake(sem_t *s) {
 
 uint32_t sem_wait_count(sem_t *s) { return s->wait_count; }
 
+/* 进程死亡回收：压缩式摘除所有 == pid 的条目（返回摘除数）。
+ * 用压缩而非"找到即 memmove"是为了同时覆盖"同一 pid 出现多次"（当前调度下不可达——
+ * 阻塞中的进程无法再发系统调用——但摘除语义不该依赖这个巧合）。
+ * 不动 count：见 sem.h 的说明（排队者不持有 token）。 */
+int sem_reap(sem_t *s, uint32_t pid) {
+    uint32_t i = 0, w = 0, n = 0;
+    for (i = 0; i < s->wait_count; i++) {
+        if (s->waiters[i] == pid) { n++; continue; }
+        s->waiters[w++] = s->waiters[i];
+    }
+    s->wait_count = w;
+    return (int)n;
+}
+
 /* v0.21 不变量审计：见 sem.h。正常操作序列下恒成立，任何一步错误即返回 0。 */
 int sem_invariant_ok(const sem_t *s) {
     if (s->count < 0) return 0;                       /* 计数不得为负 */

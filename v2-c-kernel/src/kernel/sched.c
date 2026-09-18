@@ -858,6 +858,12 @@ static void terminate_current(registers_t *r, uint32_t code, const char *why) {
     /* v0.31（socket 归属）：进程退出时归还其打开的 UDP socket（F-0b 根治）。
      * 否则开 socket 不关即退出会永久占用 netsock 表槽位，直到表满网络降级。 */
     netsock_close_pid(p->pid);
+    /* v0.38（IPC 生命周期）：把本进程从全部 IPC 等待队列（sem.waiters / msg.producers,
+     * consumers）摘除——对位上面这行对 socket 做的回收。不摘的后果是**静默吞资源**：
+     * 交棒语义下 signal/send_wake 会把 token 或消息交付给一个不会运行的进程。
+     * 现状标注：今天无可达路径（无 kill syscall，阻塞进程不具备死亡条件）⇒ 预备防线；
+     * 语义与"为何不按创建者回收对象"见 usermode.c 的 ipc_reclaim 注释。 */
+    ipc_reclaim(p->pid);
     /* v0.15: 父进程退出 -> 子进程孤儿化（parent_pid=0，交心跳回收）。
      * 否则父的 pid 槽被复用后，孤儿永远等不到"父进程 FREE"而被回收。 */
     for (uint32_t i = 1; i < MAX_PROCS; i++)
