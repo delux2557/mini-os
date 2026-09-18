@@ -247,20 +247,28 @@ if [ -x "$VD/hostself" ]; then
     printf '%s' 'int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i==3)break;s=s+i;}if(s==3)return 0;return 1;}' >"$VD/v3b_brk.c"
     printf '%s' 'int main(){int i;int s;s=0;for(i=0;i<10;i=i+1){if(i%2==0)continue;s=s+i;}if(s==25)return 0;return 1;}' >"$VD/v3b_cnt.c"
     printf '%s' 'int main(){break;}' >"$VD/v3b_bo.c"    # 负例：循环外 break 必须拒绝
+    printf '%s' 'int main(){int i;i=0;r:i=i+1;if(i<3)goto r;int a;a=0;j:a=a+i;goto e;e:if(i==3)if(a==3)return 0;return 1;}' >"$VD/v3b_goto.c"   # M14goto 前后跳+值判定
+    printf '%s' 'int main(){goto nowhere;return 0;}' >"$VD/v3b_gneg.c"   # 负例：未定义标签必须拒
     if [ -w / ]; then
         V3B_OK=1
-        for t in v3b_cp v3b_pre v3b_post v3b_do v3b_brk v3b_cnt; do
+        for t in v3b_cp v3b_pre v3b_post v3b_do v3b_brk v3b_cnt v3b_goto; do
             ln -sf "$PWD/$VD/$t.c" /minicc.c
             qemu-i386 "$VD/hostself" >/dev/null 2>&1; rc=$?
             rm -f /minicc.c
             if [ "$rc" -eq 0 ]; then echo "[ok]   self 编译 $t 通过"; else echo "[FAIL] self 编译 $t rc=$rc"; V3B_OK=0; fi
         done
+        ln -sf "$PWD/$VD/v3b_gneg.c" /minicc.c
+        qemu-i386 "$VD/hostself" >/dev/null 2>&1; rc=$?
+        rm -f /minicc.c
+        if [ "$rc" -eq 1 ]; then echo "[ok]   self 拒绝未定义标签"; else echo "[FAIL] self 未拒未定义标签(rc=$rc)"; V3B_OK=0; fi
         ln -sf "$PWD/$VD/v3b_bo.c" /minicc.c
         qemu-i386 "$VD/hostself" >/dev/null 2>&1; rc=$?
         rm -f /minicc.c
         if [ "$rc" -eq 1 ]; then echo "[ok]   self 拒绝循环外 break"; else echo "[FAIL] self 未拒绝循环外 break rc=$rc"; V3B_OK=0; fi
+        # ⚠ hostself 为 gcc -O1 构建：编大源（self 自身）时会先撞 NMAX（gcc text 膨胀），
+        #   属构建器差异非实现 bug——大源权威闸是 guest 侧 miccboot（P1/P2 同为 minicc 构建）。
         # 双编译器产物逐字节比对（hostminicc vs hostself 编译同一 V3b 用例）
-        for t in v3b_cp v3b_pre v3b_post v3b_do v3b_brk v3b_cnt; do
+        for t in v3b_cp v3b_pre v3b_post v3b_do v3b_brk v3b_cnt v3b_goto; do
             qemu-i386 "$VD/hostminicc" "$VD/$t.c" "$VD/${t}_h.elf" >/dev/null 2>&1
             ln -sf "$PWD/$VD/$t.c" /minicc.c
             qemu-i386 "$VD/hostself" >/dev/null 2>&1; cp /out.elf "$VD/${t}_s.elf"

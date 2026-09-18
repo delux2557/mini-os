@@ -26,8 +26,13 @@
 int sys_print(char* s) { syscall3(1, s, 0, 0); return 0; }
 
 /* ---- 内存池 ----
- * V4 arena 瘦身：小枚举字段用 char（nkind/nty/nbty/nvkind/nnargs/nnlocals 值恒 <256；
+ * V4 arena 瘦身：小枚举字段用 char（nkind/nty/nbty/nvkind/nnargs 值恒 <256；
  * 其余节点句柄/偏移仍须 int）。
+ * ⚠ nnlocals 是**局部帧字节数**（上限 LOCAL_BYTES_MAX=4096），**不能**用 char：会被按 256 取模
+ *   截断（328→72、256→0），产物 prologue 的 `sub esp,imm` 随之写小 ⇒ 帧内局部数组越界写栈。
+ *   旧注释把 nnlocals 也列进"值恒 <256"是错的——此前自举源里没有帧 ≥256 的函数，该假设一直
+ *   没被打破；本分支给 stmt() 新增 `char bb[256]` 后帧首次越过 256，才经由 miccboot 的逐字节
+ *   比对显形（编译期/功能面皆不报，同类"三面皆不报"）。
  * #172：节点池 15 个并行数组**全部改为运行时 brk 分配**。原先它们是静态数组，而 minicc 不分离
  * .bss——零初始化数据按字面量全量内联进产物，于是"节点容量"直接等于"内核里那份自举编译器的
  * 体积"（42 B/节点）。后果是容量只能抠着给：旧配置 8192 只差 123 个节点，可抬容量会让内核涨
@@ -70,7 +75,7 @@ int NMAX = 49152;           /* AST 节点池容量（运行时分配，见上）
 char* nkind; char* nty; char* nbty; int* nlen;
 int* nl; int* nr; int* na; int* nb; int* nnext;
 int* nval; char* nvkind; int* nvslot; int* nival;
-char* nnargs; char* nnlocals;
+char* nnargs; int* nnlocals;
 int nn;                     /* 当前节点数（0 保留为 NULL） */
 
 int STRTAB_CAP = 131072;    /* 名字池容量（运行时分配，见上 ④） */
@@ -101,6 +106,11 @@ int nloop;
 
 int CODE_BASE = 0x800a0000; /* APP_LINK（hex 字面量，int 可载） */
 int cur_nargs; int cur_frame; int frame_patch;
+/* M14goto：具名标签表（g 前缀避让匿名 jmp 标签；24×32/24×32 全一维打平——minicc 无数组套数组） */
+char gnm[768];            /* 标签名槽：位 i*32 */
+int gdef[24];             /* -1=未定义 */
+int gpnd[768];            /* 前向 goto 的 jmp 指令起点：位 i*32+n */
+int gpc[24]; int ngl;
 int code_cap;
 
 char* code; int code_len;   /* 产物缓冲（brk 分配，char* 字节流） */
@@ -126,6 +136,8 @@ int ND_DECL = 35; int ND_FUNC = 36; int ND_GVAR = 37;
 /* V3b（与 minicc.c 同步）：后缀 ++/--（值为旧值）、do-while、break/continue */
 int ND_POST_INC = 38; int ND_POST_DEC = 39;
 int ND_DO = 40; int ND_BREAK = 41; int ND_CONTINUE = 42;
+/* M14goto（与 minicc.c 同步；self 方言五课：一维表/无 void/无原型/&x[0] 传参/int 返回） */
+int ND_LABEL_ = 43; int ND_GOTO_ = 44;
 
 /* MC-09 递归深度守卫（与 host minicc.c 同步；guest 用户栈仅 28KB，超限受控报错非 SIGSEGV）：
  *   EXPR_DEPTH_MAX 32  表达式/操作数嵌套（expr/unary 入口）
@@ -1007,6 +1019,17 @@ int block_stmt() {
     return r;
 }
 
+int tk_save2(int *p, char *b, int *w, int *nu, int *st, int *ch, int *tll) {
+    *p = src_pos; { int i = 0; while (tok[i] != 0) { b[i] = tok[i]; i = i + 1; } b[i] = 0; }
+    *w = tok_is_word; *nu = tok_is_num; *st = tok_is_str; *ch = tok_is_char; *tll = toklen;
+    return 0;
+}
+int tk_load2(int *p, char *b, int *w, int *nu, int *st, int *ch, int *tll) {
+    src_pos = *p; { int i = 0; while (b[i] != 0) { tok[i] = b[i]; i = i + 1; } tok[i] = 0; }
+    tok_is_word = *w; tok_is_num = *nu; tok_is_str = *st; tok_is_char = *ch; toklen = *tll;
+    return 0;
+}
+
 int stmt() {
     int n;
     if (is_sym_s("{")) {
@@ -1018,6 +1041,37 @@ int stmt() {
         n = node_new(ND_BLOCK);
         na[n] = 0;
         return n;
+    }
+    if (accept_s("goto")) {                    /* M14goto（与 host 同构） */
+        if (tok_is_word == 0) fail("expected label name");
+        n = node_new(ND_GOTO_);
+        nival[n] = stradd(&tok[0]);
+        next_tok();
+        expect_s(";");
+        return n;
+    }
+    if (tok_is_word != 0 && peek_s("int") == 0 && peek_s("char") == 0) {
+        /* ident ':' 判 label；非 label 完整回退 */
+        int bp; char bb[256]; int bw, bn, bs, bc, bl;
+        int lno;
+        bw = 0; bn = 0; bs = 0; bc = 0; bl = 0; bp = 0;
+        tk_save2(&bp, &bb[0], &bw, &bn, &bs, &bc, &bl);
+        next_tok();
+        if (is_sym_s(":")) {
+            next_tok();
+            /* ⚠ 名字入池必须**只在确认是 label 之后**。本条探测对**每条以单词开头的语句**都会
+             * 走一遍（if/while/return/gen(...)…），若在确认 `:` 之前就 stradd，等于给每条语句
+             * 白塞一份名字。实测后果：名字池被撑爆（该池用量已占静态容量的 90%），而 stradd
+             * 当时**没有越界守卫**，溢出写穿相邻内存后报出的是与真因无关的 "too many nodes"
+             * （镜像分支"大源红"的排查全程被误导）。名字从 tk_save2 存下的 bb 取即可，无需提前入池。 */
+            lno = stradd(&bb[0]);
+            n = node_new(ND_LABEL_);
+            nival[n] = lno;
+            int body = stmt();
+            nl[n] = body;
+            return n;
+        }
+        tk_load2(&bp, &bb[0], &bw, &bn, &bs, &bc, &bl);
     }
     if (peek_s("int") || peek_s("char")) {
         /* 局部声明子句表（`int a,b,*c[3];`——与 host 严格同构，§7.3 双编译器契约） */
@@ -1507,6 +1561,28 @@ int gen_stmt_inner(int n) {
         loop_leave();
         return 0;                           /* 条件假 → 自然落出循环 */
     }
+    if (nkind[n] == ND_LABEL_ || nkind[n] == ND_GOTO_) {
+        int gi; int p; int j2;
+        gi = g_find(nival[n]);
+        if (nkind[n] == ND_LABEL_) {
+            if (gdef[gi] != -1) fail("label redefined");
+            gdef[gi] = code_len;
+            j2 = 0;
+            while (j2 < gpc[gi]) { p = gpnd[gi * 32 + j2]; save32(p + 1, code_len - (p + 5)); j2 = j2 + 1; }
+            gpc[gi] = 0;
+            gen_stmt(nl[n]);
+            return 0;
+        }
+        if (gdef[gi] != -1) {                    /* 同 host 同款表达式：先占位后写回 */
+            emit1(0xE9); emit4(0);
+            save32(code_len - 4, gdef[gi] - code_len);
+            return 0;
+        }
+        if (gpc[gi] >= 32) fail("too many gotos to one label");
+        gpnd[gi * 32 + gpc[gi]] = code_len; gpc[gi] = gpc[gi] + 1;
+        emit1(0xE9); emit4(0);
+        return 0;
+    }
     if (nkind[n] == ND_BREAK) {
         if (nloop == 0) fail("break outside loop");
         loop_brk_add();
@@ -1528,6 +1604,26 @@ int gen_stmt_inner(int n) {
 }
 
 /* MC-09 守卫 wrapper：gen_stmt 随语句嵌套递归，与 gen 共享 gdepth */
+int gdef_eq(int i, int off) {           /* gnm[i*32..] vs strtab[off..] */
+    int j = 0; int b = i * 32;
+    while (gnm[b + j] != 0 && strtab[off + j] != 0) {
+        if (gnm[b + j] != strtab[off + j]) return 0;
+        j = j + 1;
+    }
+    if (gnm[b + j] != strtab[off + j]) return 0;
+    return 1;
+}
+int g_find(int off) {            /* 名字(strtab 偏移)→表位；查无则建 */
+    int i = 0;
+    while (i < ngl) { if (gdef_eq(i, off) != 0) return i; i = i + 1; }
+    if (ngl >= 24) fail("too many labels");
+    { int j = 0; int b = ngl * 32;
+      while (strtab[off + j] != 0) { gnm[b + j] = strtab[off + j]; j = j + 1; }
+      gnm[b + j] = 0; }
+    gdef[ngl] = -1; gpc[ngl] = 0;
+    ngl = ngl + 1;
+    return ngl - 1;
+}
 int gen_stmt(int n) {
     if (gdepth >= GEN_DEPTH_MAX) fail("expression nesting too deep");
     gdepth = gdepth + 1;
@@ -1550,7 +1646,9 @@ int gen_global(int n) {
 
 int gen_func(int n) {
     int si = nval[n];
+    int lj;
     sval[si] = code_len;
+    ngl = 0;                              /* M14goto：标签表函数作用域 */
     cur_nargs = nnargs[n];
     emit_op("\x55\x89\xe5");
     emit_op("\x81\xec"); emit4(0);
@@ -1558,6 +1656,8 @@ int gen_func(int n) {
     gen_stmt(nb[n]);
     emit_epilogue();
     save32(frame_patch, nnlocals[n]);
+    lj = 0;                               /* M14goto：未定义标签终检（同 host） */
+    while (lj < ngl) { if (gdef[lj] == -1 && gpc[lj] > 0) fail("undefined label"); lj = lj + 1; }
     return 0;
 }
 
@@ -1637,9 +1737,11 @@ int main() {
     in = xmalloc(IN_CAP);
     /* #172：节点池 15 个并行数组的运行时分配（见文件上方「内存池」段）。
      * char 字段 1 B/节点，int 字段 4 B/节点；句柄索引 0..NMAX-1，与 node_new 的守卫配套。
+     * nnlocals 走 4 B/节点：它是帧字节数（上限 4096），char 会按 256 取模截断（见上「内存池」段）。
      * 放在解析之前——任何 node_new/数组访问都在这之后发生。 */
     nkind = xmalloc(NMAX);        nty = xmalloc(NMAX);      nbty = xmalloc(NMAX);
-    nvkind = xmalloc(NMAX);       nnargs = xmalloc(NMAX);   nnlocals = xmalloc(NMAX);
+    nvkind = xmalloc(NMAX);       nnargs = xmalloc(NMAX);
+    nnlocals = xmalloc(NMAX * 4);
     nlen = xmalloc(NMAX * 4);     nl = xmalloc(NMAX * 4);   nr = xmalloc(NMAX * 4);
     na = xmalloc(NMAX * 4);       nb = xmalloc(NMAX * 4);   nnext = xmalloc(NMAX * 4);
     nval = xmalloc(NMAX * 4);     nvslot = xmalloc(NMAX * 4); nival = xmalloc(NMAX * 4);
