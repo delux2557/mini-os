@@ -3,6 +3,28 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - diffsynth：cc500 目标解禁 F_SUGAR（复合赋值/自增自减入网）+ 覆盖断言
+
+**Changed**
+
+* **cc500 目标解禁 `F_SUGAR`**（`gen.c` 的 `CAPS_CC500`）：
+  复合赋值（`+= -= /= %=`）与前后缀 `++/--` 入 cc500 差分网。原台账记"cc500 无 ++/-- 与复合赋值"
+  为**过时表述**——cc500 的 M4（`+= -= *= %=`）/M8（`++ --`）/M9b（`/=`）与 minicc V3b 早已实现；
+  生成的左值仅限 int 全局/局部（`v%d`/`G%d`），不触 char/数组/指针，无 UB、值域收敛。
+  能力台账注释同步订正（F_ARRAY/F_PTR/F_CHAR 仍关，各自门槛不变）。
+
+**Added**
+
+* **`F_SUGAR` 覆盖断言**（`test_diffsynth.sh`）：
+  cc500 目标样本必须真的采样到语法糖形态，否则判红——防"解禁"成为空洞 PASS（同 GG2 死钉教训）。
+
+**Engineering**
+
+* `make test-diffsynth` ✔：minicc 5 seed + cc500 3 seed 全过，acceptance/退码差分 0；
+  `F_SUGAR 覆盖` ✔（11 个样本含语法糖形态）；gcc 参考侧纪律（无挂/信号/确定性错）保持。
+
+---
+
 ## [Unreleased] - 术语中性化与历史重写（含协作者操作须知）
 
 **Docs**
