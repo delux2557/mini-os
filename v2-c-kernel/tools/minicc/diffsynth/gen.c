@@ -39,13 +39,15 @@ enum { F_CONST=1<<0, F_VAR=1<<1, F_ARITH=1<<2, F_CMP=1<<3,
  * 位运算 & | ^ >> ~、一元 - ! ~、% 现均支持；M9c/e/f/g 之后大写标识符/混排 hex/子句表/
  * 转义串已闭合 → F_GLOBAL(G%d 命名)随 F_LEX 入网 cc500。 */
 /* P0-6 更新：M9e 已补大写标识符词法，cc500 的 F_GLOBAL(G%d 命名)与全局子句表解禁。 */
-/* #165（M13）更新：cc500 已补一元 `*` 与 `&`、minicc 已补 `p[i]` 脱糖（双向对称）。但
- * F_ARRAY/F_PTR/F_CHAR/F_SUGAR **仍维持关**——各有独立门槛，与 deref 无关：
+/* #165（M13）更新：cc500 已补一元 `*` 与 `&`、minicc 已补 `p[i]` 脱糖（双向对称）。
+ * 能力台账（2026-09-17 复核订正）：
  *   F_ARRAY：cc500 无数组声明；且 `npa = has(F_PTR)&&na>0` ⇒ F_PTR 依赖 F_ARRAY 同关；
  *   F_CHAR ：含 char 数组（F_CHAR 才开 na 之外的 char 池）⇒ 同上；
- *   F_SUGAR：cc500 无 ++/-- 与复合赋值。
+ *   F_SUGAR：**已解禁**——cc500 的 M4（+= -= *= %=）/M8（++ --）/M9b（/=）与 minicc V3b
+ *     早已实现，旧记"cc500 无 ++/-- 与复合赋值"为过时表述（登记时 cc500 已具备）。生成的
+ *     lv 只会是 int 全局/局部（v%d/G%d），不触 char/数组/指针，无 UB、值域收敛。
  * 即本轮解禁的是**语法接受面**，不是这一族的生成网——故注释在此只作能力台账订正。 */
-#define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT|F_GLOBAL|F_LEX)
+#define CAPS_CC500 (F_CONST|F_VAR|F_ARITH|F_CMP|F_LOGIC|F_IF|F_WHILE|F_FOR|F_MOD|F_NEG|F_BIT|F_DO|F_BRK|F_CNT|F_GLOBAL|F_LEX|F_SUGAR)
 /* F_SWITCH 暂缓入 cc500 网（#170 CI 实证）：run_diff 的 minicc 接受通道建立在
  * 『cc500 能力 ⊆ minicc 子集』前提上，而 minicc 至今无 switch——kind6 模板代码保留、
      位保留，待 minicc 获得 switch（或 run_diff 支持按位 skip）后在上一行补 |F_SWITCH 即可。 */

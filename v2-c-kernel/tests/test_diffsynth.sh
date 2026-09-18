@@ -49,6 +49,15 @@ for seed in 7 42 99; do
     FAIL=1
   fi
 done
+# F_SUGAR 覆盖断言：cc500 目标样本必须真的采样到语法糖（+= -= /= %= ++ --），
+# 否则"解禁"是空洞 PASS——防"已绿但一直绿得错误"（同 GG2 死钉教训）。
+SUGAR_N=$(grep -lE '\+=|-=|/=|%=|\+\+|--' "$BUILD"/diffsynth/prog_*.c 2>/dev/null | wc -l)
+if [ "$SUGAR_N" -ge 1 ]; then
+  echo "[ok]   F_SUGAR 覆盖（$SUGAR_N 个样本含语法糖形态）"
+else
+  echo "[FAIL] cc500 目标零 F_SUGAR 采样（假绿：解禁未进生成网）"
+  FAIL=1
+fi
 
 if [ "$FAIL" -eq 0 ]; then
   echo "== [diffsynth] PASS =="; exit 0
