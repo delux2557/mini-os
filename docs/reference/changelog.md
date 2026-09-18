@@ -3,6 +3,32 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - self 编译器帧大小 char 截断修复（#182 收口：miccboot P1 == P2）
+
+**Fixed**
+
+* **`nnlocals` 误用 `char` ⇒ 局部帧 ≥256 B 被按 256 取模截断**（`minicc_self.c` 内存池段）：
+  `gen_func` 以 `save32(frame_patch, nnlocals[n])` 回填 prologue 的 `sub esp,imm`，而 `nnlocals`
+  与 `nkind/nty/nbty/nvkind/nnargs` 一并被定为 char，注释断言"值恒 <256"——但它是**局部帧字节数**
+  （上限 `LOCAL_BYTES_MAX = 4096`），该断言不成立：328 → 72、256 → 0。
+  - **为何长期静默**：截断前自举源自带函数没有一个帧 ≥256，缺陷没有显形条件；本分支给 `stmt()`
+    新增 label 探测的 `char bb[256]` 后帧首次到 328（328 & 0xFF = 72），才由 miccboot 的逐字节
+    比对暴露。编译期无警告、功能面不复现（帧内写入未越界到他人），属**只有产物比对才可见**的一类。
+  - 修法：`nnlocals` 改 `int*`（4 B/节点，分配同步 `NMAX * 4`），注释订正该字段不在"恒 <256"之列。
+  - 帧计算本身（`cur_frame`/`bytes_of`）与 host 一直一致，故这是分支上**唯一**一处 P1/P2 差异。
+
+**Engineering**
+
+* 宿主等价 A/B（免 QEMU）：最小用例 `int f(){int bb[64];...}` 帧 host=256 / self=0 → 修后双方 256；
+  打回原状即复现 `[diff] off=115975 a=1 b=0`（host `sub esp,0x148` vs self `sub esp,0x48`）。
+* 闸门：`test-miccboot` **P1 == P2 逐字节一致** ✔（修前 FAIL）· `test-minicc` 宿主 119/0 ✔（含 [2b7]）
+  · `test-fast` ✔（audit/golden/boundary 28 形态）· `test-cc500` 103/0 ✔ · `test-diffsynth` ✔ ·
+  `test-diffsynth-guest` 12/12 ✔。
+* 本类缺陷的常驻门禁**已存在**（miccboot 在 CI 全链内，且正是本次抓出它的那道闸），故不另加门禁；
+  若后续把 `char bb[256]` 从自举源中移除，该处覆盖会随之消失——届时需在 gate 层另钉一条帧 ≥256 的用例。
+
+---
+
 ## [Unreleased] - diffsynth：cc500 目标解禁 F_SUGAR（复合赋值/自增自减入网）+ 覆盖断言
 
 **Changed**

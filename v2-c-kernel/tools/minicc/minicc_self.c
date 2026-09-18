@@ -26,8 +26,13 @@
 int sys_print(char* s) { syscall3(1, s, 0, 0); return 0; }
 
 /* ---- 内存池 ----
- * V4 arena 瘦身：小枚举字段用 char（nkind/nty/nbty/nvkind/nnargs/nnlocals 值恒 <256；
+ * V4 arena 瘦身：小枚举字段用 char（nkind/nty/nbty/nvkind/nnargs 值恒 <256；
  * 其余节点句柄/偏移仍须 int）。
+ * ⚠ nnlocals 是**局部帧字节数**（上限 LOCAL_BYTES_MAX=4096），**不能**用 char：会被按 256 取模
+ *   截断（328→72、256→0），产物 prologue 的 `sub esp,imm` 随之写小 ⇒ 帧内局部数组越界写栈。
+ *   旧注释把 nnlocals 也列进"值恒 <256"是错的——此前自举源里没有帧 ≥256 的函数，该假设一直
+ *   没被打破；本分支给 stmt() 新增 `char bb[256]` 后帧首次越过 256，才经由 miccboot 的逐字节
+ *   比对显形（编译期/功能面皆不报，同类"三面皆不报"）。
  * #172：节点池 15 个并行数组**全部改为运行时 brk 分配**。原先它们是静态数组，而 minicc 不分离
  * .bss——零初始化数据按字面量全量内联进产物，于是"节点容量"直接等于"内核里那份自举编译器的
  * 体积"（42 B/节点）。后果是容量只能抠着给：旧配置 8192 只差 123 个节点，可抬容量会让内核涨
@@ -70,7 +75,7 @@ int NMAX = 49152;           /* AST 节点池容量（运行时分配，见上）
 char* nkind; char* nty; char* nbty; int* nlen;
 int* nl; int* nr; int* na; int* nb; int* nnext;
 int* nval; char* nvkind; int* nvslot; int* nival;
-char* nnargs; char* nnlocals;
+char* nnargs; int* nnlocals;
 int nn;                     /* 当前节点数（0 保留为 NULL） */
 
 int STRTAB_CAP = 131072;    /* 名字池容量（运行时分配，见上 ④） */
@@ -1732,9 +1737,11 @@ int main() {
     in = xmalloc(IN_CAP);
     /* #172：节点池 15 个并行数组的运行时分配（见文件上方「内存池」段）。
      * char 字段 1 B/节点，int 字段 4 B/节点；句柄索引 0..NMAX-1，与 node_new 的守卫配套。
+     * nnlocals 走 4 B/节点：它是帧字节数（上限 4096），char 会按 256 取模截断（见上「内存池」段）。
      * 放在解析之前——任何 node_new/数组访问都在这之后发生。 */
     nkind = xmalloc(NMAX);        nty = xmalloc(NMAX);      nbty = xmalloc(NMAX);
-    nvkind = xmalloc(NMAX);       nnargs = xmalloc(NMAX);   nnlocals = xmalloc(NMAX);
+    nvkind = xmalloc(NMAX);       nnargs = xmalloc(NMAX);
+    nnlocals = xmalloc(NMAX * 4);
     nlen = xmalloc(NMAX * 4);     nl = xmalloc(NMAX * 4);   nr = xmalloc(NMAX * 4);
     na = xmalloc(NMAX * 4);       nb = xmalloc(NMAX * 4);   nnext = xmalloc(NMAX * 4);
     nval = xmalloc(NMAX * 4);     nvslot = xmalloc(NMAX * 4); nival = xmalloc(NMAX * 4);
