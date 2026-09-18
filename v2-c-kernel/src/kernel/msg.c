@@ -91,3 +91,21 @@ uint32_t msg_recv_wake(msgq_t *q) {
     }
     return MSG_NO_PID;
 }
+
+/* 进程死亡回收：压缩式摘除两个等待队列里 == pid 的条目（返回摘除数合计）。
+ * 生产者侧连其暂存 value 一起丢弃（结构体一起前移即可）——语义见 msg.h。 */
+int msg_reap(msgq_t *q, uint32_t pid) {
+    uint32_t i = 0, w = 0, n = 0;
+    for (i = 0; i < q->prod_count; i++) {
+        if (q->producers[i].pid == pid) { n++; continue; }
+        q->producers[w++] = q->producers[i];
+    }
+    q->prod_count = w;
+    w = 0;
+    for (i = 0; i < q->cons_count; i++) {
+        if (q->consumers[i] == pid) { n++; continue; }
+        q->consumers[w++] = q->consumers[i];
+    }
+    q->cons_count = w;
+    return (int)n;
+}

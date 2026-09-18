@@ -63,6 +63,38 @@ static msg_obj_t msg_objects[MSG_MAX_OBJ];
  * 基址/槽数在 mem.h 定义（v0.12：fork 需据此识别共享页以跳过深拷贝）。 */
 static uint32_t shmem_phys[SHMEM_SLOTS];
 
+/* ---- v0.38 IPC 生命周期（对位 socket 侧 F-0a/F-0b 的收口） ----
+ * 【语义拍板】IPC 对象是**内核所有、全局持久**的：固定 id 是**全局命名空间**（sem 1..15、
+ * msg 1..7），对象不随创建者退出而回收。理由：命名空间是共享的 ⇒"创建者已退出"不等于
+ * "无人再用"（父建子用、父先退是正常形态），按创建者回收会抽掉别人脚下的对象。
+ * 这条与 socket 的 owner 语义**刻意不同**：socket 是独占端点（谁开的谁关），
+ * IPC 是共享通道（双方都要能操作）——照搬 owner 会直接废掉 IPC 的用途。
+ * 代价是"对象永不销毁 ⇒ 15/8 个 id 会被永久占满"，故 create 的**冲突路径必须可观测**
+ * （见 SYS_SEM_CREATE/SYS_MSG_CREATE 的 REUSE 日志），不能静默别名化。
+ *
+ * 【回收】与"持久"并不矛盾：持久的是**对象**，要回收的是**死进程留在等待队列里的条目**。
+ * 交棒语义下把死进程当可交付者会静默吞掉资源（sem 丢 token / msg 丢消息），故死亡路径
+ * 必须摘除。 */
+void ipc_reclaim(uint32_t pid) {
+    uint32_t i;
+    for (i = 1; i < SEM_MAX_OBJ; i++) {
+        if (!sem_objects[i].used) continue;
+        int n = sem_reap(&sem_objects[i].sem, pid);
+        if (n > 0) serial_printf("[sem] reap pid=%u id=%u waiters=%d\n", pid, i, n);
+    }
+    for (i = 1; i < MSG_MAX_OBJ; i++) {
+        if (!msg_objects[i].used) continue;
+        int n = msg_reap(&msg_objects[i].q, pid);
+        if (n > 0) serial_printf("[msg] reap pid=%u id=%u waiters=%d\n", pid, i, n);
+    }
+}
+/* ⚠ 现状标注（勿当成已修的可达缺陷）：今天**没有 kill 系统调用、也没有跨进程 kill 命令**，
+ * 进程只在自身退出或故障时经 sched_kill->terminate_current 死亡；而阻塞在 IPC 上的进程既
+ * 不在运行（无法出故障）也无自杀路径 ⇒ 本函数**当前不可达**，属**预备防线**：
+ *   ① 它是"任何共享资源都必须在进程退出路径登记 reclaim"这条约定的首个范本（pipe 落地时
+ *      直接照抄这一处钩子）；
+ *   ② 一旦加入 kill/超时终止，它就立刻变活——届时语义已在此推完，不必重推。 */
+
 /* ---- v0.31（per-process fd）：每进程打开文件表入 PCB（fs_file_t 定义移至 sched.h）。
  * v0.8-v0.30 为全局 fs_files[8] 表——跨进程槽号互污染、异常退出泄漏（BUG-031）。
  * 改造后 fd 号是"本进程内约定号"：打开/读写/关闭都在当前进程自己的 fd 表上做，
@@ -581,6 +613,13 @@ void syscall_dispatch(registers_t *r) {
             sem_objects[a].used = 1;
             sem_init(&sem_objects[a].sem, (int32_t)b);
             serial_printf("[sem] create id=%u init=%d\n", a, (int32_t)b);
+        } else {
+            /* 固定 id 是全局命名空间：已存在即"取用"（get），init 被忽略。这本是一条**静默
+             * 别名化**路径——两个独立 app 都用 id=1 时，后者会拿到前者的对象与当前计数，却
+             * 以为自己新建了一个 count=init 的信号量。改为可观测：id 冲突必须能被看见。 */
+            serial_printf("[sem] create id=%u REUSE (init=%d ignored; exists count=%d waiters=%u)\n",
+                          a, (int32_t)b, sem_objects[a].sem.count,
+                          sem_wait_count(&sem_objects[a].sem));
         }
         r->eax = a;
         return;
@@ -642,6 +681,11 @@ void syscall_dispatch(registers_t *r) {
             msg_objects[a].used = 1;
             msg_init(&msg_objects[a].q, (uint32_t)b);
             serial_printf("[msg] create id=%u capacity=%u\n", a, (uint32_t)b);
+        } else {
+            /* 同 sem：全局 id 命名空间的"取用"路径，capacity 被忽略 ⇒ 必须可观测（见上）。 */
+            serial_printf("[msg] create id=%u REUSE (capacity=%u ignored; exists capacity=%u count=%u)\n",
+                          a, (uint32_t)b, msg_capacity(&msg_objects[a].q),
+                          msg_count(&msg_objects[a].q));
         }
         r->eax = a;
         return;

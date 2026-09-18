@@ -33,4 +33,9 @@ void usermode_set_esp0(uint32_t esp0);
  *  - 返回 pid 或 -1。 */
 int usermode_spawn_elf(const char *name, uint32_t vbase, int resident);
 
+/* v0.38 IPC 生命周期：把 pid 从全部 IPC 等待队列（sem 的 waiters、msg 的
+ * producers/consumers）摘除。进程退出/故障终止路径必须调用——对位 netsock_close_pid
+ * 对 socket 做的 F-0a 回收。详见 usermode.c 的实现注释（含"当前不可达"的现状标注）。 */
+void ipc_reclaim(uint32_t pid);
+
 #endif
