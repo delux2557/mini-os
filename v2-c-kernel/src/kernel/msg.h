@@ -62,4 +62,10 @@ uint32_t msg_recv_wake(msgq_t *q);
  *    按"未完成即不生效"丢弃（否则内核会代发一条"发送者已死"的消息，且等待槽被永久占用）。 */
 int      msg_reap(msgq_t *q, uint32_t pid);
 
+/* 「挂起可达性」判据（v0.38）：该 pid 是否仍登记在本队列的生产者**或**消费者等待队列里。
+ * 阻塞在 msg 上的进程二者必居其一（缓冲满 ⇒ 暂存为生产者；缓冲空 ⇒ 排队为消费者）；
+ * 唤醒只可能由本队列产生（msg_send_wake / msg_recv_wake）⇒ **两者都不在 = 永不可能被唤醒**。
+ * 供内核看门狗 kind=3 与 [audit] ipc 使用；纯逻辑，宿主可单测。 */
+int      msg_waiter_present(const msgq_t *q, uint32_t pid);
+
 #endif

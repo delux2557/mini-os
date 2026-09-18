@@ -51,6 +51,14 @@ int sem_reap(sem_t *s, uint32_t pid) {
     return (int)n;
 }
 
+/* 「挂起可达性」：见 sem.h。O(等待者数)，仅在诊断路径调用（看门狗每 16 心跳/审计一次）。 */
+int sem_waiter_present(const sem_t *s, uint32_t pid) {
+    uint32_t i = 0;
+    for (i = 0; i < s->wait_count; i++)
+        if (s->waiters[i] == pid) return 1;
+    return 0;
+}
+
 /* v0.21 不变量审计：见 sem.h。正常操作序列下恒成立，任何一步错误即返回 0。 */
 int sem_invariant_ok(const sem_t *s) {
     if (s->count < 0) return 0;                       /* 计数不得为负 */

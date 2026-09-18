@@ -173,9 +173,11 @@ wait_for "内核侧拦截日志"      "\[syscall\] pid=.* masked syscall"
 # 本文件另有两条防线日志**故意不在此断言**（诚实留档，勿误认为遗漏）：
 #   · `[STACK-GUARD] canary stomped` —— 只有**内核栈**金丝雀被改写才打（panic 路径），正常用例
 #     触发不到；用户栈溢出走的是另一条 `[user] STACK OVERFLOW`（qemu_regression.sh 已断言）。
-#   · `[WATCHDOG] … STALLED` —— 需"被 wait 的子进程长时间不被调度"才打，而 wdog_check 既
-#     **一次性**（`wdg_fired`）又**只扫 `BLOCK_WAIT`**（src/kernel/sched.c:686/691）⇒ 正常用例
-#     造不出稳定触发场景。这本身是一条待收口项：覆盖面无断言 ⇔ 覆盖面对应的失败形态不可证。
+#   · `[WATCHDOG] … STALLED` —— 报的是"你等的那个东西**已不可能**让你前进"（kind=1/2 子进程
+#     卡住；kind=3 阻塞在 sem/msg 却不在该对象等待队列），**只在真出缺陷时出现**，正常用例造不出
+#     稳定触发场景（要造它就得开故障注入面，不值得）。
+#     ⇒ v0.38 起改为**把不变量本身钉住**：同一判据由 selftest 的 `[audit] ipc ok` 主动查一遍，
+#       并在 qemu_regression.sh 的 selftest 链里断言 —— 缺陷一出现断言先红，dump 只负责给现场。
 # ---- v0.26 用户栈按需生长 ----
 send "run deep"
 wait_for "deep 开始递归"       "\[deep\] pid=.* recursing 12\*1KB on a 4KB start stack"

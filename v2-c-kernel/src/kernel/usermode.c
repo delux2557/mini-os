@@ -95,6 +95,27 @@ void ipc_reclaim(uint32_t pid) {
  *      直接照抄这一处钩子）；
  *   ② 一旦加入 kill/超时终止，它就立刻变活——届时语义已在此推完，不必重推。 */
 
+/* ---- v0.38 IPC 生命周期③：「挂起可达性」判据 ---- */
+/* 阻塞在 sem/msg 上的进程，**必须**仍登记在它等的那个队列里（唤醒只可能由该队列产生：
+ * sem_signal_wake / msg_send_wake / msg_recv_wake）。不登记 ⇒ **永不可能被唤醒**，
+ * 这是**可判定的挂起**（不依赖对用户意图的猜测，故无误报）。
+ * 两处共用本判据：① 内核看门狗 kind=3（被动、周期性）；② kern_audit 的 [audit] ipc（主动、selftest）。
+ * 返回 1 = 可达（或该阻塞原因不适用）；0 = 不可达（缺陷）。
+ * ⚠ 为什么只覆盖 SEM/MSG 而不扫全部阻塞原因：BLOCK_SLEEP 由定时器兜底、BLOCK_KEYBOARD 由用户
+ *   输入兜底——它们"等很久"是**合法语义**，扫它们只会制造误报。BLOCK_WAIT 已有既有判据
+ *   （子进程就绪却久不被调度 kind=1 / 在跑却无进展 kind=2），本函数不动它。 */
+int ipc_blocked_ok(uint32_t pid, uint32_t reason, uint32_t id) {
+    if (reason == BLOCK_SEM) {
+        if (id == 0 || id >= SEM_MAX_OBJ || !sem_objects[id].used) return 0;  /* 对象不在 ⇒ 无人能 signal */
+        return sem_waiter_present(&sem_objects[id].sem, pid);
+    }
+    if (reason == BLOCK_MSG) {
+        if (id == 0 || id >= MSG_MAX_OBJ || !msg_objects[id].used) return 0;
+        return msg_waiter_present(&msg_objects[id].q, pid);
+    }
+    return 1;   /* 非 IPC 阻塞原因：本判据不适用 */
+}
+
 /* ---- v0.31（per-process fd）：每进程打开文件表入 PCB（fs_file_t 定义移至 sched.h）。
  * v0.8-v0.30 为全局 fs_files[8] 表——跨进程槽号互污染、异常退出泄漏（BUG-031）。
  * 改造后 fd 号是"本进程内约定号"：打开/读写/关闭都在当前进程自己的 fd 表上做，
@@ -338,7 +359,8 @@ void usermode_set_esp0(uint32_t esp0) { tss.esp0 = esp0; }
 
 /* ---- v0.21 内核自审计 ----
  * 由 selftest 一键触发：物理帧配平（mem_audit）+ 堆完整性（heap_audit）
- * + 信号量不变量（sem_invariant_ok）+ PCB 状态机（sched_audit）。
+ * + 信号量不变量（sem_invariant_ok）+ PCB 状态机（sched_audit）
+ * + IPC 挂起可达性（v0.38：阻塞在 sem/msg 者必须在对应等待队列里，见 ipc_blocked_ok）。
  * 各子系统打印一行 [audit] 日志（serial+vga），
  * 本函数汇总返回失败检查项总数（0=全部通过）。 */
 static uint32_t kern_audit(void) {
@@ -376,6 +398,26 @@ static uint32_t kern_audit(void) {
         serial_printf("[audit] sem ok: no semaphores\n");
     else if (bad == 0)
         serial_printf("[audit] sem ok: %u objects\n", objs);
+    /* v0.38：IPC 挂起可达性（与看门狗 kind=3 同一判据，此处由 selftest 主动查一次）。
+     * "阻塞在 sem/msg 上却不在对应等待队列" = 永不可能被唤醒 —— 可判定的挂起，正常必须为 0；
+     * 这正是 #188 修的"交棒吞资源"那一类缺陷的**哨兵**（当时的缺口没有任何检查能看见）。 */
+    uint32_t ipc_bad = 0, ipc_n = 0;
+    for (uint32_t i = 1; i < MAX_PROCS; i++) {
+        pcb_t *p = sched_get(i);
+        if (!p || p->state != PROC_BLOCKED) continue;
+        if (p->block_reason != BLOCK_SEM && p->block_reason != BLOCK_MSG) continue;
+        ipc_n++;
+        if (!ipc_blocked_ok(p->pid, p->block_reason, p->block_arg)) {
+            serial_printf("[audit] ipc FAIL: pid=%u reason=%u arg=%u (阻塞却不在等待队列)\n",
+                          p->pid, p->block_reason, p->block_arg);
+            vga_printf("[audit] ipc FAIL: pid=%u reason=%u arg=%u\n",
+                       p->pid, p->block_reason, p->block_arg);
+            ipc_bad++;
+            bad++;
+        }
+    }
+    /* 计数也印出来：0 个被检对象与"查过且都可达"是**不同**的结论（前者不构成证据）。 */
+    serial_printf("[audit] ipc ok: blocked-waiter reachability (checked %u)\n", ipc_n);
     return bad;
 }
 

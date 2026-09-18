@@ -38,4 +38,9 @@ int usermode_spawn_elf(const char *name, uint32_t vbase, int resident);
  * 对 socket 做的 F-0a 回收。详见 usermode.c 的实现注释（含"当前不可达"的现状标注）。 */
 void ipc_reclaim(uint32_t pid);
 
+/* v0.38 IPC 生命周期「挂起可达性」判据：阻塞原因 reason（block_arg=id）的进程是否仍能被唤醒。
+ * 返回 1=可达或不适用 / 0=不可达（阻塞在 sem/msg 上却不在对应等待队列 ⇒ 永不可能被唤醒）。
+ * 看门狗 kind=3 与 kern_audit 的 [audit] ipc 共用；语义与覆盖面见 usermode.c 实现注释。 */
+int  ipc_blocked_ok(uint32_t pid, uint32_t reason, uint32_t id);
+
 #endif

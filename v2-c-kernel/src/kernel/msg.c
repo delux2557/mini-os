@@ -109,3 +109,13 @@ int msg_reap(msgq_t *q, uint32_t pid) {
     q->cons_count = w;
     return (int)n;
 }
+
+/* 「挂起可达性」：见 msg.h。O(两个等待队列长度)，仅在诊断路径调用。 */
+int msg_waiter_present(const msgq_t *q, uint32_t pid) {
+    uint32_t i = 0;
+    for (i = 0; i < q->prod_count; i++)
+        if (q->producers[i].pid == pid) return 1;
+    for (i = 0; i < q->cons_count; i++)
+        if (q->consumers[i] == pid) return 1;
+    return 0;
+}

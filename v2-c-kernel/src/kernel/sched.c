@@ -646,15 +646,22 @@ void sched_reap(uint32_t pid) {
     reap_process(pid);
 }
 
-/** ---- 挂起看门狗（v0.3x 本地调试用）----
+/** ---- 挂起看门狗（v0.3x 本地调试用；v0.38 扩覆盖面）----
  * 现象：persist 层 CI 中第二次 `micc` fork 后子进程从不打开输入文件、父进程永久 wait，
  * 8/20/45s 三档超时均死；guest 表现为"只调度却无 syscall 进展"甚至整体冻结。
- * 本看门狗在每 WDG_PERIOD_TICKS 心跳扫描一次：若某个被 BLOCK_WAIT 等待的子进程
- * 处于就绪却久不被调度（kind=1），或运行中却久无 syscall 进展（kind=2），判定挂起，
- * 立即 dump 全部 PCB 现场（含各进程保存帧 eip/eflags），只报一次防刷屏。
+ * 本看门狗在每 WDG_PERIOD_TICKS 心跳扫描一次，判据一律是**"你等的那个东西已不可能让你前进"**，
+ * 而不是"等太久"（后者会对 BLOCK_SLEEP/BLOCK_KEYBOARD 这类**合法无限期等待**误报）：
+ *   kind=1 被 BLOCK_WAIT 等待的子进程就绪却久不被调度（就绪队列入队/alloc 竞态）；
+ *   kind=2 同上但在跑却久无 syscall 进展（用户态/内核态空转死循环）；
+ *   kind=3（v0.38）阻塞在 sem/msg 上却**不在**该对象的等待队列里 —— 唤醒只可能来自那个队列，
+ *         故这是**可判定的挂起**（同判据也由 selftest 的 [audit] ipc 主动查一次）。
+ *         补它是因为：此前只扫 BLOCK_WAIT，而 IPC 等待（BLOCK_SEM/BLOCK_MSG）一旦簿记失联
+ *         就永久挂起且**没有任何检查看得见**（#188 修的"交棒吞资源"正属这一类）。
+ * 判挂起即 dump 全部 PCB 现场（含各进程保存帧 eip/eflags）。
+ * 报频：**按 pid、按"一次挂起"报一次**（脱困即复位）——旧版是全局一次性，会漏掉后续的挂起。
  * 局限：若 guest 整体冻结（tick 停摆），本 tick 驱动看门狗也停摆，无法探测——
  * 该类由 QEMU 侧另行判定。本功能纯诊断，不参与任何门禁判定。 */
-static int         wdg_fired   = 0;
+static uint8_t     wdg_reported[MAX_PROCS];   /* 每个 pid 每次挂起只 dump 一次（防刷屏） */
 static uint32_t    wdg_next    = 0;
 #define WDG_PERIOD_TICKS  16   /* 每 16 心跳扫一次（MAX_PROCS=16，开销可忽略） */
 #define WDG_STALL_TICKS   60   /* 子进程"无实质进展"容忍心跳数（正常编译子进程 syscall 密集） */
@@ -683,30 +690,43 @@ void sched_mark_progress(void) {
 }
 
 static void wdog_check(registers_t *r) {
-    if (wdg_fired) return;
     if ((int32_t)(ticks - wdg_next) < 0) return;
     wdg_next = ticks + WDG_PERIOD_TICKS;
     for (uint32_t i = 1; i < MAX_PROCS; i++) {
         pcb_t *P = &procs[i];
-        if (P->state != PROC_BLOCKED || P->block_reason != BLOCK_WAIT) continue;
-        uint32_t cid = P->block_arg;
-        if (cid >= MAX_PROCS) continue;
-        pcb_t *C = &procs[cid];
-        if (C->state == PROC_FREE || C->state == PROC_ZOMBIE) continue;
-        int32_t since_run  = (int32_t)(ticks - C->last_run_tick);
-        int32_t since_prog = (int32_t)(ticks - C->last_prog_tick);
+        if (P->state != PROC_BLOCKED) { wdg_reported[i] = 0; continue; }  /* 已脱困 ⇒ 允许下次再报 */
         int kind = 0;
-        if (C->state == PROC_READY && since_run > WDG_STALL_TICKS)
-            kind = 1;   /* 子进程就绪却久不被调度（就绪队列入队/alloc 竞态） */
-        else if (C->state == PROC_RUNNING && since_prog > WDG_STALL_TICKS && since_run > 0)
-            kind = 2;   /* 子进程在跑却久无 syscall 进展（用户态/内核态空转死循环） */
-        if (!kind) continue;
-        serial_printf("\n[WATCHDOG] pid=%u waits child=%u STALLED kind=%u "
-                      "(since_run=%d since_prog=%d state=%u)\n",
-                      P->pid, cid, kind, since_run, since_prog, C->state);
+        uint32_t cid = P->block_arg;
+        int32_t since_run = 0, since_prog = 0;
+        if (P->block_reason == BLOCK_WAIT) {
+            if (cid >= MAX_PROCS) { wdg_reported[i] = 0; continue; }
+            pcb_t *C = &procs[cid];
+            if (C->state == PROC_FREE || C->state == PROC_ZOMBIE) { wdg_reported[i] = 0; continue; }
+            since_run  = (int32_t)(ticks - C->last_run_tick);
+            since_prog = (int32_t)(ticks - C->last_prog_tick);
+            if (C->state == PROC_READY && since_run > WDG_STALL_TICKS)
+                kind = 1;   /* 子进程就绪却久不被调度（就绪队列入队/alloc 竞态） */
+            else if (C->state == PROC_RUNNING && since_prog > WDG_STALL_TICKS && since_run > 0)
+                kind = 2;   /* 子进程在跑却久无 syscall 进展（用户态/内核态空转死循环） */
+        } else if (P->block_reason == BLOCK_SEM || P->block_reason == BLOCK_MSG) {
+            /* kind=3（v0.38）：阻塞在 IPC 上却不在该对象的等待队列 ⇒ 永不可能被唤醒。
+             * 不算"等太久"——sem/msg 等到天荒地老可以是合法语义；这里判的是**等不到**。 */
+            if (!ipc_blocked_ok(P->pid, P->block_reason, P->block_arg))
+                kind = 3;
+        }
+        if (!kind) { wdg_reported[i] = 0; continue; }
+        if (wdg_reported[i]) continue;                    /* 同一次挂起只报一次（防刷屏） */
+        if (kind == 3)
+            serial_printf("\n[WATCHDOG] pid=%u STALLED kind=3 (blocked reason=%u arg=%u "
+                          "但不在该对象等待队列 ⇒ 永不可能被唤醒)\n",
+                          P->pid, P->block_reason, P->block_arg);
+        else
+            serial_printf("\n[WATCHDOG] pid=%u waits child=%u STALLED kind=%u "
+                          "(since_run=%d since_prog=%d state=%u)\n",
+                          P->pid, cid, kind, since_run, since_prog, procs[cid].state);
         wdog_dump(r);
-        wdg_fired = 1;
-        return;
+        wdg_reported[i] = 1;
+        return;   /* 单次扫描最多 dump 一次；后续扫描会跳过已报的 pid、继续找其余挂起 */
     }
 }
 

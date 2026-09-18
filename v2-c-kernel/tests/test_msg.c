@@ -184,5 +184,21 @@ int main(void) {
     /* 11d) pid 不在任一队列：摘 0 个 */
     CHECK_EQ(msg_reap(&q, 12345), 0);
 
+    /* 12) 「挂起可达性」判据（msg_waiter_present）：看门狗 kind=3 与 [audit] ipc 的共用基础。
+     *     阻塞在 msg 上的进程必居"生产者暂存"或"消费者排队"之一，两者都不在即判挂起。 */
+    msg_init(&q, 1);
+    CHECK_EQ(msg_send_try(&q, 1, 51), 0);          /* 入队成功、占满（51 并未阻塞） */
+    CHECK_EQ(msg_send_try(&q, 2, 52), 1);          /* 52 暂存为阻塞生产者 */
+    CHECK_EQ(msg_waiter_present(&q, 52), 1);
+    CHECK_EQ(msg_waiter_present(&q, 51), 0);
+    CHECK_EQ(msg_recv_try(&q, &outv, 53), 0);      /* 缓冲非空 ⇒ 直接取出，53 不入队 */
+    CHECK_EQ(msg_waiter_present(&q, 53), 0);
+    msg_init(&q, 1);                               /* 消费者侧：空缓冲时 recv 才入队 */
+    CHECK_EQ(msg_recv_try(&q, &outv, 61), 1);
+    CHECK_EQ(msg_waiter_present(&q, 61), 1);
+    CHECK_EQ(msg_recv_wake(&q), MSG_NO_PID);       /* 无暂存生产者 ⇒ 不搬入 */
+    CHECK_EQ(msg_reap(&q, 61), 1);                 /* 回收后离开队列 */
+    CHECK_EQ(msg_waiter_present(&q, 61), 0);
+
     UTEST_SUMMARY("test_msg");
 }

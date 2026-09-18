@@ -3,6 +3,46 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - 看门狗覆盖 IPC 挂起 + rp_torture 接线（"可判定的挂起"必须看得见）
+
+**Added**
+
+* **看门狗 kind=3：IPC 挂起可达性**（`sched.c` + `usermode.c` 的 `ipc_blocked_ok`）。
+  原看门狗只扫 `BLOCK_WAIT`，IPC 等待（`BLOCK_SEM`/`BLOCK_MSG`）一旦簿记失联就**永久挂起、且没有任何
+  检查看得见**（#188 修的"交棒吞资源"正属这一类）。新判据与既有 kind=1/2 同一精神 —— **"你等的那个
+  东西已不可能让你前进"**，而不是"等太久"：
+  - 阻塞在 sem/msg 上却**不在**该对象的等待队列 ⇒ 唤醒只可能来自那个队列 ⇒ **永不可能被唤醒**。
+    这是**可判定**的（不依赖对用户意图的猜测），故无误报；
+  - 刻意**不扫** `BLOCK_SLEEP` / `BLOCK_KEYBOARD`：它们"等很久"是**合法语义**（由定时器 / 用户输入
+    兜底），扫它们只会制造误报 —— 这是"扩覆盖面"最容易踩错的地方。
+  - 判据下沉为纯逻辑 `sem_waiter_present` / `msg_waiter_present`（可宿主单测），内核侧统一封装为
+    `ipc_blocked_ok(pid, reason, id)`。
+* **报频由"全局一次性"改为"按 pid、按一次挂起报一次"**（`wdg_reported[]`，脱困即复位）。
+  旧版一旦 dump 过就永不再扫 ⇒ 只管得住**第一次**挂起，后续（或另一个进程的）挂起全部不可见。
+* **`[audit] ipc ok` 不变量审计**（selftest 链）：同一判据由自审计**主动查一遍**，并在
+  `qemu_regression.sh` 的 selftest 断言链里**钉住** —— 缺陷一出现断言先红，看门狗 dump 只负责给现场。
+  行内含 `checked N` 计数（"0 个被检对象"与"查过且都可达"是**不同**结论，故计数必须可读）；
+  ⚠ 已知局限：本轮 selftest 现场 `checked 0`（无 sem/msg 阻塞者），故它目前只证明"检查跑过且无违反"，
+  若要连同"验过真实等待者"一起证明，需在 selftest 前先 park 一个 IPC 等待者（后续项）。
+* **`make test-rp-torture`：接线 `tests/rp_torture.sh`** —— 此前它判据齐备却**未接任何 target**
+  ⇒ 写在仓库里但 CI 从没跑过。已入 `TEST_LAYERS` / `TEST_LAYERS_HEAVY` ⇒ CI 新增 `layer (rp-torture)`。
+  实测 **≈3.5 min、rc=0**（两次 icount 冷启 + 产物逐字节差分 + tr2sqlite 索引 + 基线巡检 + 现场复原归档）。
+* **三个"复现工具"的定位写进 Makefile**（`repro_closer.sh` / `repro_faithful.sh` / `ccboot_check.sh`）：
+  它们带 `<kernel.elf> <out.log>` 参数、**没有 pass/fail 判据**，接线成 target 会给出**虚假的绿** ⇒
+  有意不接，改为在 Makefile 里注明用途与用法（对应场景的常驻断言已在 `test_socket.sh`(F-0a/F-0b) 与
+  `test_miccboot.sh`(P1==P2) 里）。
+
+**Engineering**
+
+* 闸门：`test-fast` ✔（host 20 套件，含 `test_sem` **127/0**、`test_msg` **159/0** 的新判据用例；
+  audit / golden sha256 / boundary 36 形态）· `test-serial` ✔ · `test-rp-torture` ✔（新层）·
+  `miccboot` **P1 == P2** ✔ · 内核 `-Wall -Wextra -Werror` 零告警。
+* ⚠ 本地 `test-qemu` 出现 3 条**超时型**失败（`deepexec` / `ccboot` 两个最慢步骤）：现场显示 guest 健康、
+  目标日志行**随后确实出现**，且本轮 `[WATCHDOG]` **零次**（无误报）⇒ 判为**本机计时抖动**
+  （正是本轮评审提到的"假失败侵蚀套件可信度"那一类）。该层以 CI 为准（上一轮 CI 为绿）。
+
+---
+
 ## [Unreleased] - IPC 生命周期两轴拍板 + 死等待者回收（"F2 该修的那一半"）
 
 **Changed（语义拍板——把长期争论变成台账记录）**
