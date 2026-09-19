@@ -74,6 +74,41 @@
 * 稳定性：同机 3 次 5.653–5.679s（离散 <30ms）；`make test-fast` rc=0（6 层总 16.3s）。
 * 端口默认 7793/7794/7795 + 8093/8094/8095，刻意避开业务层在用的 7777/7778/8080。
 
+## [Unreleased] - 接线：dldemo 128KB 下载 e2e 升为 HEAVY 层 `tcp-dl`（并拆掉 8080 硬编码）
+
+**Added**
+
+* **新测试层 `tcp-dl`**（`tests/test_tcp_dl.sh` → `TEST_LAYERS_HEAVY`，实测 24.6–29.6s）
+  ——`dldemo` 拉 128KB（远大于 `TCP_RXB` 16KB 接收缓冲）的端到端判据早已写好，但**全仓零引用**：
+  不在 `Makefile` 任何目标里，也不在 CI 任何 job 里 ⇒ 与 `proxy-window` 同一形态的"判据静默失效"。
+
+**Fixed**
+
+* **宿主端口不再硬依赖 8080**（接线前实测：8080 严格 `bind()` 得 `EADDRINUSE` ⇒ 该脚本 2/2 红在
+  `起 DL HTTP 失败 / OSError: [Errno 98] Address already in use`，与代码无关）：
+  - **成因订正（复核）**：这个"被占"**不是**监听中的服务——`ss -ltnp` 无监听、`curl` 无应答，
+    而是 `127.0.0.1:8080` 上的 **TIME-WAIT 残留**（`SO_REUSEADDR` 可绕过），最可能来自**同一套
+    测试先前运行**留下的宿主 HTTP 服务。残留比"在跑的服务"更常见，故本项可搬运性修复更有必要。
+  - `src/app/dldemo.c` / `src/app/httpdemo.c` 的端口常量改为 `#ifndef` 保护，可由
+    `-DDL_PORT=` / `-DHTTP_PORT=` 覆盖；`Makefile` 新增 `APP_PORT_DEFS`（`make DL_PORT=8137` 即生效）；
+  - `test_tcp_dl.sh` 自动向内核要一个**空闲 TCP 口**并同时用于"宿主监听"与"编进 guest 的
+    `DL_PORT`" ⇒ 两端同源，不要求任何环境空着 8080；
+  - **转发器 UDP 口刻意保留契约值 7778**（guest 侧 `src/app/tcp.c:21 TCP_PROXY_PORT` 编译期
+    硬编码，且 `docs/tcp-session-proto.md` 附录 A 规定了线上一跳）⇒ 该口只做占用预检，
+    不自动改选。这一点是我第一版补丁犯的错：把 UDP 口也自动挑 ⇒ 会话开不起来，
+    7 项断言全红；改回契约口后一次通过。
+
+**Engineering**
+
+* 失败分类：缺依赖 / 端口被占 = **环境病 exit 2**（沿用 `test_tcp_attack.sh` 口径，不 `fuser -k`）；
+  断言不过 = **代码病 exit 1**。
+* **判别力实测**（先确认变异真的写进文件再跑，避免"测了未变异代码当证据"）：
+  注入"下行发送丢弃尾部 <1500B" ⇒ 本层 rc=1，红在 `len=131072/131072`、`tail=EOFTAIL`、
+  `RESULT PASS` 三条上（正是这条 e2e 独属的性质——尾块完整性）；还原代理后复绿。
+  另：一次"提前发 MSG_CLOSED（不等在途窗口确认）"的变异**不会**丢字节（包已上线），
+  当时误读成"判据失灵"，实为无效变异 ⇒ 换成真丢字节的变异才有结论。
+* 稳定性：还原后端直跑 + `make` 目标共 5 次，4 绿 1（变异）红，无端口/时序抖动。
+
 ---
 
 ## [Unreleased] - 看门狗覆盖 IPC 挂起 + rp_torture 接线（"可判定的挂起"必须看得见）

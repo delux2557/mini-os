@@ -12,7 +12,9 @@
 #include "tcp.h"
 
 #define DL_IP     0x7F000001u   /* 127.0.0.1：宿主大文件服务（转发器视角的真实可达目标） */
-#define DL_PORT   8080
+#ifndef DL_PORT
+#define DL_PORT   8080            /* 可被 -DDL_PORT=<n> 覆盖（见 Makefile dl-port / CI 可搬运） */
+#endif
 #define DL_MAX    131200        /* 捕获上限：HTTP 头(~55B) + 131072B body，须 ≥ 头+body 总量，
                                    使 body 末尾 EOFTAIL 落在捕获窗口内 */
 #define DL_EXPECT 131072        /* 期望的 body 大小（128KB） */
