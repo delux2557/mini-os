@@ -147,14 +147,46 @@ done
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 
+# ---- 分片复核（与 test_serial.sh / qemu_regression.sh 同判据、同复核器）：guest 串口行非原子，
+# `[shell] bg 'sockdemo' pid=…` 这类行会被并发输出（内核心跳/其它进程）插在中间切成多片，整行
+# grep 永远不中 ⇒ 与代码无关的假红（CI 实证：本脚本的 `sockdemo 进程生成` 即因此偶发红）。
+# 复核器只吃字面量，故先把 grep-BRE 去壳（`\[shell\]` → `[shell]`）再交 `-F`；自带自检（判据的判据），
+# 自检不过即**禁用**复核——宁可严格失败，也不接受假绿。
+split_matcher_selfcheck() {
+    local d; d=$(mktemp -d)
+    printf '[shell] \x27[sched] wake pid=5 at tick=1\n[net] recvfrom sock=1 -> 0B\nx\x27 exited code=0\n' > "$d/split.log"
+    printf "[shell] 'other' exited code=1\n" > "$d/absent.log"
+    printf '[shell] bg \x27[net] recvfrom sock=1 -> 0B\n[net] recvfrom sock=1 -> 0B\nsockdemo\x27 pid=4 (no wait)\n' > "$d/split_f.log"
+    local bad=0
+    python3 tests/split_line_grep.py "$d/split.log" "'x' exited code=0" >/dev/null 2>&1 \
+        || { echo "[FAIL] 分片复核器自检：正例未命中（会漏掉真被切的行）"; bad=1; }
+    python3 tests/split_line_grep.py "$d/absent.log" "'absent' exited code=0" >/dev/null 2>&1 \
+        && { echo "[FAIL] 分片复核器自检：不存在的目标却命中（假绿）"; bad=1; }
+    python3 tests/split_line_grep.py -F "$d/split_f.log" "[shell] bg 'sockdemo' pid=" >/dev/null 2>&1 \
+        || { echo "[FAIL] 分片复核器自检（-F）：带方括号字面量正例未命中"; bad=1; }
+    python3 tests/split_line_grep.py -F "$d/absent.log" "[shell] bg 'sockdemo' pid=" >/dev/null 2>&1 \
+        && { echo "[FAIL] 分片复核器自检（-F）：不存在的目标却命中（假绿）"; bad=1; }
+    rm -rf "$d"; return $bad
+}
+SPLIT_RECHECK=1
+split_matcher_selfcheck || { echo "[note] 分片复核器自检未通过 ⇒ 禁用复核（回到严格整行判据）"; SPLIT_RECHECK=0; }
+
 echo "== [4/4] 校验 =="
 check() {   # check "<说明>" "<正则>"
     if grep -aq "$2" "$LOG" 2>/dev/null; then
         echo "[ok]   $1"
-    else
-        echo "[FAIL] 缺少 $1 (匹配: $2)"
-        FAIL=$((FAIL + 1))
+        return
     fi
+    # 同 wait_after：整行被并发输出切碎时走分片复核（去壳为字面量后 -F；自检已在上方把关）。
+    if [ "${SPLIT_RECHECK:-1}" = 1 ]; then
+        local lit; lit=$(printf '%s' "$2" | sed 's/\\\([^0-9A-Za-z]\)/\1/g')
+        if python3 tests/split_line_grep.py -F "$LOG" "$lit" "${SPLIT_SPAN:-12}"; then
+            echo "[ok]   $1（整行被并发输出切碎；分片复核命中，语义等价）"
+            return
+        fi
+    fi
+    echo "[FAIL] 缺少 $1 (匹配: $2)"
+    FAIL=$((FAIL + 1))
 }
 
 check "e1000 探测 + MMIO + 链路"   "\[net\] e1000: MAC .* bar=.* link=1"
@@ -175,7 +207,7 @@ check "ICMP 发送 Echo 请求（netdiag）" "icmp: tx echo req .* -> 10.0.2.2"
 check "ICMP 收到 Echo 应答（netdiag）" "\[icmp\] echo reply from 10.0.2.2 OK"
 # ---- v0.20 用户态 UDP socket：sockdemo 经 sys_net_* 系统调用端到端回环 ----
 # v0.37（R1.2 后半）：sockdemo 不再由内核启动序列 spawn，改由 /init.rc `bg` 拉起
-check "sockdemo 进程生成"          "\[shell\] bg 'sockdemo' pid=[0-9][0-9]*"
+check "sockdemo 进程生成"          "\[shell\] bg 'sockdemo' pid=.*"
 check "内核创建 UDP socket"        "\[net\] socket port=0 -> id=[0-9]"
 check "用户态 socket 打开"         "\[netsock\] open id=.* port="
 check "用户态 sendto PING"         "\[sock\] sendto PING -> 4B"
