@@ -16,7 +16,9 @@ K=$(cd "$(dirname "$0")/.." && pwd)             # v2-c-kernel
 A=$K/tests/audit; B=$A/bin; G=$K/tests/golden
 RUN_TIMEOUT=10
 export CC500_SRC=$K/tools/cc500 MINICC_SRC=$K/tools/minicc
-[ -x "$B/hostcc500" ] && [ -x "$B/hostminicc32" ] || { bash "$A/scripts/build_audit.sh" >/dev/null || { echo "BUILD FAIL"; exit 2; }; }
+# 陈旧产物陷阱（同 test_boundary.sh）：只判"产物存在"会在改了 cc500.c/minicc.c/harness_src 后沿用
+# 旧二进制 ⇒ 基线把"代码已改"误报成"产物漂移"。改为按依赖 mtime 判定（--check-stale）。
+bash "$A/scripts/build_audit.sh" --check-stale && { bash "$A/scripts/build_audit.sh" >/dev/null || { echo "BUILD FAIL"; exit 2; }; }
 
 RUM=""
 ( cd "$B" && ./cc500run >/dev/null 2>&1 ); rc=$?

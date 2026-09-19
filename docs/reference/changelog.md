@@ -3,6 +3,32 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - 审计工具链"陈旧产物"陷阱：改为按依赖 mtime 重建
+
+**Fixed**
+
+* **`tests/audit/bin/*` 陈旧陷阱**：`test_boundary.sh` / `golden.sh` / `test_diffsynth.sh` 此前只判
+  "产物二进制**是否存在**" ⇒ 改了 `tools/cc500/cc500.c` / `tools/minicc/minicc.c` / `tests/audit/harness_src/*`
+  后**不重编**，台账/基线仍跑**旧二进制**，把"代码已改"误报成"产物漂移"假红。
+  - **实证**：本会话切回 main 后复跑 `test_boundary.sh`，`SPLIT-C-dup*` 三项的 min 列显示 **165/0/0**
+    （即 F7 修复**之前**的行为），而工作树里 F7 已在 —— 台账读的是陈旧 `hostminicc32`。
+  - **修法**：`build_audit.sh` 新增 **`--check-stale`** 模式（`0`=需重建 / `1`=无需）：依赖集 =
+    两份编译器源 + `harness_src/*.c|*.s` + 脚本自身，任一比 `hostcc500`/`hostminicc32` 新即触发重建；
+    三个调用方改用它（`test_audit.sh` 本就无条件重建，不动）。
+  - 顺带修 `start32.o` 的同款陷阱：此前 `[ -f $B/start32.o ]` 只判存在，改了 `start32.s` 不重编；
+    改为 `-nt` 比较。
+
+**验证**
+
+| 项 | 结果 |
+|---|---|
+| `--check-stale` 三态 | ✅ 无改动→`1`；`touch tools/minicc/minicc.c`→`0`；`touch harness_src/start32.s`→`0` |
+| `make test-boundary`（源已 touch） | ✅ 触发重建（`hostminicc32` mtime 前进）且 **36 形态三方逐位全 PASS** |
+| 二次跑（无改动） | ✅ 未重建（mtime 不变）、exit 0 —— 验证"该建才建，不空建" |
+| `make test-fast` / `make test-diffsynth` | ✅ 全绿（golden / diffsynth 两条调用路径同改） |
+
+---
+
 ## [Unreleased] - test-serial：定位并修掉"整行 grep vs 非原子串口行"的假红（根因实证）
 
 **Fixed**

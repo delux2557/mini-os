@@ -38,7 +38,8 @@ echo "== [2/2] 动态子集：cc500 目标（能力集裁剪 + cc500 本体三�
 # 让 cc500 本体既验**接受面**也验**产物退码面**（装载器 cc500run，产物是 mini-os ABI）。
 export CC500_SRC="$PWD/tools/cc500" MINICC_SRC="$PWD/tools/minicc"
 AB="$PWD/tests/audit/bin"
-if [ ! -x "$AB/hostcc500" ] || [ ! -x "$AB/cc500run" ]; then
+if [ ! -x "$AB/hostcc500" ] || [ ! -x "$AB/cc500run" ] || \
+   bash tests/audit/scripts/build_audit.sh --check-stale; then
   bash tests/audit/scripts/build_audit.sh >/dev/null || { echo "[SKIP] 需 tests/audit 工具链（build_audit.sh：gcc-multilib + qemu-i386）"; exit 2; }
 fi
 for seed in 7 42 99; do
