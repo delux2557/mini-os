@@ -9,6 +9,11 @@
 
 * `ip_frag_dropped()`（`src/net/ip.c` / `ip.h`）：分片丢弃计数，供分发层日志与宿主单测断言；
   协议层自身不打日志（与 `icmp/udp/netutil` 同风格），日志归 `netsock` 分发处。
+  - **复核补：可观测性覆盖到两个方向**。`ip_parse` 有**两个**入向调用者——`netsock` 的 UDP 分发，
+    与 **`e1000` 驱动的 ICMP 路径**（`drv/e1000.c` 直调 `icmp_parse`）。只在分发处打日志会漏掉
+    ICMP 方向，故把**累计计数**汇入自审计行：`[audit] net: ip fragments dropped: N`
+    （**仅观测、不入 `bad`**，同 `fs_owner_violations` 惯例——非 0 表示"有人发分片"，属被防守住的
+    输入而非健康失效），并在 `qemu_regression.sh` 的 selftest 断言链里钉住该行。
 
 **Fixed**
 
@@ -21,7 +26,8 @@
 `plen>TCP_MAX_PAYLOAD`、`slip.h` `SLIP_MAX` 1600、`NET_ETH_FRAME_MAX` 1518）证实
 **所有合法路径都不分片**。
 
-**验证**（本沙箱 8080 被反代占用的环境下）：
+**验证**（本次运行环境：8080 严格 `bind()` 得 `EADDRINUSE`——经复核为 **TIME-WAIT 残留**而非
+在跑的服务，见文末订正）：
 
 | 步骤 | 结果 |
 |---|---|
@@ -31,9 +37,15 @@
 | `make test-host` | ✅ `pass=20 fail=0` |
 | `make test-net test-tcp` | ✅ 两者全绿，`grep ip fragment dropped` 命中 **0 次** ⇒ 零功能回归 |
 
-**附带（不在本 PR 范围）**：`test-tcp` 在宿主 8080 被占环境下 `rc=2`（环境病），
-已用本次可搬运性修复（`HTTP_PORT=8137 make test-tcp` 实测 `rc=0`，双通道绿）证明
-问题只是端口；真正接 CI 前仍需 `test_tcp.sh` 自动挑空闲口（同 `test_tcp_dl.sh` 的改法）。
+**附带（不在本 PR 范围）**：`test-tcp` 的宿主 HTTP 口取自 `HTTP_PORT`（默认 8080）；当 8080
+不可 `bind` 时它 `rc=2`（环境病）。已用 `HTTP_PORT=8137 make test-tcp` 实测 `rc=0`（双通道绿）
+证明问题只是端口；真正接 CI 前仍建议 `test_tcp.sh` 自行挑空闲口（同 `test_tcp_dl.sh` 的改法，见 #192）。
+
+- **复核订正（成因陈述）**：8080 的成因**不是"被反向代理占用"**——`ss -ltnp` 无监听、
+  `curl 127.0.0.1:8080` 无应答，而是 `127.0.0.1:8080` 上的 **TIME-WAIT 残留**
+  （`SO_REUSEADDR` 可绕过），最可能来自**同一套测试先前运行**留下的宿主 HTTP 服务；
+  另有一条 ESTAB 是**出向**连接到远端 `10.96.138.204:8080`，与本地 `bind` 无关。
+  **"上一轮残留"比"在跑的服务"更常见**，故端口可搬运性这件事比原陈述的理由更站得住。
 
 * **不变量核查**：`ip_frag_dropped()` 只读，不改变任何返回码语义；分片段在 `ip.c` 入口早 `return -1`，不影响现有合法路径。
 
