@@ -455,6 +455,16 @@ golden-update:
 test-boundary:
 	bash tests/test_boundary.sh
 
+# 转发器（tcp_proxy.py）窗口/可靠度宿主判据聚合层：上行停等 + 上行滑窗 + 下行滑窗。
+# 这三个 python 判据早已存在但**全仓零引用**（既不接 make 也不接 CI），且其中两个
+# 不自拉 proxy（proxy 端口是 argv 入参）⇒ 独立直跑必失败，"判据静默失效"的活例。
+# 本层按各自门面拉起独立 proxy 实例后跑全三条。实测 5.7s（3 次离散 <30ms）⇒ 归 FAST。
+# 退出码：0 全绿 / 1 断言失败（代码病）/ 2 环境病（缺 python3 或所需端口被占，
+# 与 test_tcp_attack.sh 同源口径；绝不 fuser -k 他人进程）。判别力已变异实测：
+# UP_WIN 8→1 与"乱序不暂存直接投递"两个变异均使本层 rc=1 且精确定位到子判据。
+test-proxy-window:
+	bash tests/test_proxy_window.sh
+
 # P0-2 守卫消失审查（advisory）：diff 中净消失的 MC-/CC-/F-/fail("...") 标记需"GUARD-CHANGE:"声明；
 # CI fast job 以 continue-on-error 步消费（提示不阻断），本地/严格场景用退出码 2。
 GUARD_BASE ?=
@@ -498,8 +508,8 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host audit golden boundary qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture stack
-TEST_LAYERS_FAST  = host stack audit golden boundary
+TEST_LAYERS       = host audit golden boundary qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture stack proxy-window
+TEST_LAYERS_FAST  = host stack audit golden boundary proxy-window
 TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture
 
 test: $(addprefix test-,$(TEST_LAYERS))
@@ -561,4 +571,4 @@ clean:
 -include $(BUILD)/*.d
 -include $(BUILD)/apps/*.d
 
-.PHONY: run run-serial test test-host test-audit test-golden guard-diff test-boundary golden-update test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-miccboot test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-rp-torture test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-audit test-golden guard-diff test-boundary test-proxy-window golden-update test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-miccboot test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-rp-torture test-repro test-tcp-attack test-stack test-layers lint clean
