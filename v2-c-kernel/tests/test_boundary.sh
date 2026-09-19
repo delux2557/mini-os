@@ -17,7 +17,9 @@ set -u
 K=$(cd "$(dirname "$0")/.." && pwd)
 A=$K/tests/audit; B=$A/bin
 export CC500_SRC=$K/tools/cc500 MINICC_SRC=$K/tools/minicc
-[ -x "$B/hostcc500" ] || bash "$A/scripts/build_audit.sh" >/dev/null || { echo "[boundary] BUILD FAIL"; exit 2; }
+# 陈旧产物陷阱：此前只判"hostcc500 是否存在"⇒ 改了 cc500.c/minicc.c/harness_src 后不重编，
+# 台账仍跑旧二进制，把"代码已改"误报成"产物漂移"假红。改为按依赖 mtime 判定（--check-stale）。
+bash "$A/scripts/build_audit.sh" --check-stale && { bash "$A/scripts/build_audit.sh" >/dev/null || { echo "[boundary] BUILD FAIL"; exit 2; }; }
 ( cd "$B" && ./cc500run >/dev/null 2>&1 ); rc=$?
 RUM=""
 if [ "$rc" = 126 ] && command -v qemu-i386 >/dev/null 2>&1; then RUM="qemu-i386"; fi
