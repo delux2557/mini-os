@@ -39,8 +39,11 @@
 
 **Fixed**
 
-* **宿主端口不再硬依赖 8080**（接线前实测：本沙箱 8080 被占 ⇒ 该脚本 2/2 红在
+* **宿主端口不再硬依赖 8080**（接线前实测：8080 严格 `bind()` 得 `EADDRINUSE` ⇒ 该脚本 2/2 红在
   `起 DL HTTP 失败 / OSError: [Errno 98] Address already in use`，与代码无关）：
+  - **成因订正（复核）**：这个"被占"**不是**监听中的服务——`ss -ltnp` 无监听、`curl` 无应答，
+    而是 `127.0.0.1:8080` 上的 **TIME-WAIT 残留**（`SO_REUSEADDR` 可绕过），最可能来自**同一套
+    测试先前运行**留下的宿主 HTTP 服务。残留比"在跑的服务"更常见，故本项可搬运性修复更有必要。
   - `src/app/dldemo.c` / `src/app/httpdemo.c` 的端口常量改为 `#ifndef` 保护，可由
     `-DDL_PORT=` / `-DHTTP_PORT=` 覆盖；`Makefile` 新增 `APP_PORT_DEFS`（`make DL_PORT=8137` 即生效）；
   - `test_tcp_dl.sh` 自动向内核要一个**空闲 TCP 口**并同时用于"宿主监听"与"编进 guest 的
