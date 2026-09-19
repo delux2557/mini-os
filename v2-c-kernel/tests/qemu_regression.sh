@@ -173,8 +173,10 @@ cmd "exec 失败反馈"   "exec nosuchprog
 # v0.21：第 6 项为内核自审计（帧配平/堆完整性/信号量守恒/PCB 状态机）
 # v0.38：自审计新增 IPC 挂起可达性（阻塞在 sem/msg 者必须在对应等待队列里）⇒ 一并钉住；
 #        该行含 "checked N" 计数，故断言只取前缀（N 随当轮阻塞进程数变化）。
+# 安全复核 F5：自审计新增"IP 分片丢弃计数"（仅观测不入 bad，正常引导恒 0）⇒ 钉住该行；
+#        判据源头是宿主单测 tests/test_ip.c 的四段断言（host 层），此处只是让它在 guest 侧可见。
 cmd "selftest 自检"   "selftest
-"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] heap ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[audit\] ipc ok" "\[selftest\] PASS (6 checks)"
+"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] heap ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[audit\] ipc ok" "\[audit\] net: ip fragments dropped" "\[selftest\] PASS (6 checks)"
 # ---- v0.17 syscall 边界校验：内核指针全部被拒 ----
 cmd "run abuse"       "run abuse
 "      "\[abuse\] write buf@0xB8000 -> 4294967295" "\[abuse\] verify OK"

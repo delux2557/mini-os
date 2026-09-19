@@ -3,6 +3,51 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - F5：IP 分片显式拒绝可观测化
+
+**Added**
+
+* `ip_frag_dropped()`（`src/net/ip.c` / `ip.h`）：分片丢弃计数，供分发层日志与宿主单测断言；
+  协议层自身不打日志（与 `icmp/udp/netutil` 同风格），日志归 `netsock` 分发处。
+  - **复核补：可观测性覆盖到两个方向**。`ip_parse` 有**两个**入向调用者——`netsock` 的 UDP 分发，
+    与 **`e1000` 驱动的 ICMP 路径**（`drv/e1000.c` 直调 `icmp_parse`）。只在分发处打日志会漏掉
+    ICMP 方向，故把**累计计数**汇入自审计行：`[audit] net: ip fragments dropped: N`
+    （**仅观测、不入 `bad`**，同 `fs_owner_violations` 惯例——非 0 表示"有人发分片"，属被防守住的
+    输入而非健康失效），并在 `qemu_regression.sh` 的 selftest 断言链里钉住该行。
+
+**Fixed**
+
+* **IP 分片守卫**（`src/net/ip.c` 安全复核 F5）：`ip_parse` 从不读 flags/fragment offset，
+  **分片**一律**拒绝**——否则 `udp_parse` 把攻击者自选长度当作完整数据报交给 socket。
+* 分发处新增"分片被丢弃"的日志（首次与每 64 次）。
+
+**Why now**：F5 是这条评审链上最后一个已知缺口（`src/net/ip.c:47-52`），静态取证
+（`usermode.c:1054` `iov.max>1400`、`netsock.c:41` `plen>NET_RXMAX`、`tcp.c`
+`plen>TCP_MAX_PAYLOAD`、`slip.h` `SLIP_MAX` 1600、`NET_ETH_FRAME_MAX` 1518）证实
+**所有合法路径都不分片**。
+
+**验证**（本次运行环境：8080 严格 `bind()` 得 `EADDRINUSE`——经复核为 **TIME-WAIT 残留**而非
+在跑的服务，见文末订正）：
+
+| 步骤 | 结果 |
+|---|---|
+| `make`（`-Werror`） | ✅ 干净 |
+| `test_ip`（ASan+UBSan，宿主/FAST） | ✅ `pass=31 fail=0`；4 段断言（非首片拒、MF=1 拒、DF 仍受、计数增长不再误增） |
+| 判别力反向变异 | ⚠ 注入"分片守卫旁路"⇒ `test_ip` rc=1（4 条 FAIL），还原后 rc=0：变异落盘确认；不依赖 `test-tcp` 环境 |
+| `make test-host` | ✅ `pass=20 fail=0` |
+| `make test-net test-tcp` | ✅ 两者全绿，`grep ip fragment dropped` 命中 **0 次** ⇒ 零功能回归 |
+
+**附带（不在本 PR 范围）**：`test-tcp` 的宿主 HTTP 口取自 `HTTP_PORT`（默认 8080）；当 8080
+不可 `bind` 时它 `rc=2`（环境病）。已用 `HTTP_PORT=8137 make test-tcp` 实测 `rc=0`（双通道绿）
+证明问题只是端口；真正接 CI 前仍建议 `test_tcp.sh` 自行挑空闲口（同 `test_tcp_dl.sh` 的改法，见 #192）。
+
+- **复核订正（成因陈述）**：8080 的成因**不是"被反向代理占用"**——`ss -ltnp` 无监听、
+  `curl 127.0.0.1:8080` 无应答，而是 `127.0.0.1:8080` 上的 **TIME-WAIT 残留**
+  （`SO_REUSEADDR` 可绕过），最可能来自**同一套测试先前运行**留下的宿主 HTTP 服务；
+  另有一条 ESTAB 是**出向**连接到远端 `10.96.138.204:8080`，与本地 `bind` 无关。
+  **"上一轮残留"比"在跑的服务"更常见**，故端口可搬运性这件事比原陈述的理由更站得住。
+
+* **不变量核查**：`ip_frag_dropped()` 只读，不改变任何返回码语义；分片段在 `ip.c` 入口早 `return -1`，不影响现有合法路径。
 ## [Unreleased] - 接线：转发器窗口宿主判据升为 FAST 层 `proxy-window`（三个从未跑过的判据）
 
 **Added**
