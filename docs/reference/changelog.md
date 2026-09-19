@@ -48,6 +48,31 @@
   **"上一轮残留"比"在跑的服务"更常见**，故端口可搬运性这件事比原陈述的理由更站得住。
 
 * **不变量核查**：`ip_frag_dropped()` 只读，不改变任何返回码语义；分片段在 `ip.c` 入口早 `return -1`，不影响现有合法路径。
+## [Unreleased] - 接线：转发器窗口宿主判据升为 FAST 层 `proxy-window`（三个从未跑过的判据）
+
+**Added**
+
+* **新测试层 `proxy-window`**（`tests/test_proxy_window.sh`；`TEST_LAYERS_FAST` 第 6 层，实测 5.7s）
+  ——把三个**早已写好却全仓零引用**的转发器判据接进门禁：
+  `test_upstream_reliable.py`（上行停等 + 重复包幂等）、`test_upstream_window.py`
+  （上行滑窗：突发/乱序暂存/凑齐排出/累计 ACK 跃迁/超窗丢弃 + 恢复）、
+  `test_downlink_window.py`（下行滑窗发送端：窗口上限不无界连发/累计 ACK 才推进/
+  尾块分片/最老未确认优先重传/CLOSED 在所有下行字节被 ACK 之后）。
+* 接线前实测：后两条**独立直跑必失败**（`rc=1 [FAIL] session never opened`，733ms）——
+  它们的 proxy 端口是 **argv 入参**，开发时是挂在 `test_tcp.sh` Part A 已启动的代理上跑的，
+  从来没有独立入口。本层按各自门面拉起**各自独立**的 proxy 实例（不与会话状态串味）。
+
+**Engineering**
+
+* 防假黄：rc=0 还**必须**出现子判据自己的 `[PASS]` 行，否则视为未真正执行（判 rc=1）。
+* 退出码分层：缺 `python3` / 所需端口被占 = **环境病 rc=2**（与 `test_tcp_attack.sh` 同源口径，
+  绝不 `fuser -k` 偷杀他人进程）；断言不过 = **代码病 rc=1**。
+* **判别力变异实测**（不是"预期能挡"，是摘掉/改坏后看会不会红）：
+  ① `UP_WIN 8→1` ⇒ 本层 rc=1，红在 `upstream-window`（补位后未累计推进）；
+  ② 把"窗口内乱序暂存"改成"直接按到达序投递" ⇒ rc=1，`upstream-reliable` 与
+  `upstream-window` 同时红（精确归因，下行不受影响）；还原后 3/3 复绿。
+* 稳定性：同机 3 次 5.653–5.679s（离散 <30ms）；`make test-fast` rc=0（6 层总 16.3s）。
+* 端口默认 7793/7794/7795 + 8093/8094/8095，刻意避开业务层在用的 7777/7778/8080。
 
 ---
 
