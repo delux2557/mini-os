@@ -431,6 +431,14 @@ if [ "$SAN_OK" = 1 ]; then
     fi
 fi
 
+echo "== [2b8] §6 语言面表补齐的接受面镜像（#157 声明子句表 / 空语句） =="
+# §6 自称"语言面唯一事实来源"，但这三批语法早已实装、当时只落在 changelog 与代码注释里
+# （#187 登记的文档债）。其中 `p[i]`(#171) 与 `goto`/标签(#175) 的接受面已由 [2b5] / [2b6] 钉住，
+# 本块只补 #157 缺的两条：**声明子句表**与**C 空语句**。（清单 ↔ 镜像：改 §6.2d 必须同步改本块。）
+hrun t_decllist   'int main(){int a,b,*c;a=1;b=2;c=&a;if(a+b-*c==2)return 0;return 1;}' 0 'compiled OK' ''
+hrun t_gdecllist  'int g1,g2[2],*g3;int main(){return 0;}'                           0 'compiled OK' ''
+hrun t_emptystmt  'int main(){;;;{;}return 0;}'                                       0 'compiled OK' ''
+
 echo "== [2c] 宿主产物编码断言（objdump） =="
 # 除法 idiv: pop;xchg;cdq;idiv -> 应含 f7 fb；取模含 89 d0（mov %edx,%eax）
 # 注意源码含 % 与 ;，printf 须用 '%s' 格式防格式串解析

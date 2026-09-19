@@ -182,6 +182,25 @@ V1 现状：`code` 缓冲（2 倍增长）、`syms`/`patches`/`labs` 定长数�
   **self 编译器同特性**（V3b 同步，§7.3）：循环帧栈以 [32 帧×64 槽] 线性展开（minicc 不支持多维数组
   声明，host 用 `loop_brk[32][64]`）；[2b4] 双编译器产物逐字节比对覆盖 do/break/continue。
 
+### 6.2d 语言面表补齐：声明子句表 / C 空语句 / 指针下标糖 `p[i]` / `goto`+标签
+
+> 本节补的是**早已实装、却只落在 changelog 与代码注释里**的三批语法（#157 / #171 / #175）——
+> §6 自称"语言面唯一事实来源"，漏登即"表与实现不一致"。按 §6 开头的规矩，每条都由**接受面探针**钉住。
+
+- ✅ **声明子句表**（#157）：一条声明可含多个声明子句——`int a,b,*c;`、`char c[3],d;`；全局同形
+  （`int g1,g2[2],*g3;`，数组仅 0 填、标量取常量初值）。函数声明子句形态（`int f();`）仍拒
+  （`unsupported: function declarator in list`）。
+- ✅ **C 空语句**（#157）：`;` 合成空 `ND_BLOCK`（codegen 走子链天然无操作）；`do … while(c);{;}` 这类
+  体后独立空语句同构。
+- ✅ **指针下标糖 `p[i]`**（#171，与 #165 同一收口）：脱糖为 `*(p+i)`，复用既有指针缩放 + 解引用取宽，
+  **零新增 codegen**。非指针带下标拒（`subscript of non-pointer`），下标为指针/数组拒（`index must be integer`）。
+- ✅ **`goto` / 标签**（#175 host、#182 self）：`goto ident;` 与 `ident:`，**函数作用域**（标签表按函数重置）；
+  前向引用由 pending 链回填。`label redefined` / `undefined label` / 单标签 >32 个 goto 均编译期报错。
+- 测试锚点（接受面）：声明子句表 / 空语句 = `test_minicc.sh [2b8]` 的 `t_decllist` / `t_gdecllist` /
+  `t_emptystmt`；`p[i]` = `[2b5]`（`/p165_loop.c` 双实现一致性）与 golden `g12_ptr.c`（产物 sha + 运行值）；
+  `goto` = `[2b6]`（host）与 `[2b4]` 的 `v3b_goto`（self 同特性、host/self 产物逐字节相同）；
+  空语句另有 golden `g09_semi.c`（sha + 运行值）。**改本节必须同步改对应探针，反之亦然。**
+
 ### 6.3 明确拒绝清单（编译期静态报错，不产出坏码）
 
 `long double`、`double`/`float`、`unsigned`、`struct/union/enum`、VLA、可变参数、位域、预处理指令、取未定义函数地址、**多级指针** **`int**`（V2b 起）**、解引用非指针、对非左值取地址、以及**指针→整型**方向的混赋；F7 起再加两条：**同作用域重声明**（`int a=1,a;`／同块内 `int a;int a;`，报 `redeclaration in same scope`）与**形参表内重名**（`int f(int a,int a)`，报 `duplicate parameter name`）——此前三族均静默接受且产物语义与 C 不可对应（安全复核 F7）。
