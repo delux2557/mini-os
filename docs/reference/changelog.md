@@ -3,6 +3,31 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - test-serial：定位并修掉"整行 grep vs 非原子串口行"的假红（根因实证）
+
+**Fixed**
+
+* **`test_serial.sh` 的 `deep 退出码` 假红：根因找到并修掉**。它此前被归类为"CI 负载抖动"
+  （重跑即绿），**实为判据缺陷**：
+  - **实证**（CI artifact `build-logs` 里的 guest 串口日志）：guest 侧一切正常——`[user] sys_exit(0) pid=3`、
+    `[sched] exit pid=3 name=deep code=0`、`[sched] reap pid=3 name=deep code=0` 全在；但 shell 的整行
+    `[shell] 'deep' exited code=0` 被**并发输出切成两段**：`[shell] '` +（6 行后台心跳/收包）+
+    `deep' exited code=0` ⇒ `grep -aq "'deep' exited code=0"` **永远匹配不上**。时序 TSV 也记
+    `deep 退出码 20249 timeout`（白等满 20s）。
+  - **量化**（同一份日志）：**内核记账行 51/51、回收行 60/60 完整**，而用户 shell 行至少 1 条被切
+    ⇒ 用户进程打的行会被抢占切碎，内核在 tick/中断上下文打的行不被打断。
+  - **修法**：`wait_for` 超时后追加**有界分片复核**（`tests/split_line_grep.py`，成本只在失败路径付）：
+    用**同一模式**匹配"行首片段 + 其后 ≤12 行内某行的行首片段"的拼接，命中记
+    `[ok] …（整行被并发输出切碎，语义等价）`；**不放松判据**——真正的缺失仍不中。
+    复核器自带**自检**（正例必中／不存在的目标必不中），自检不过即**禁用复核**（宁可严格失败，不要假绿）。
+  - **验证**：在**真实 CI 失败日志**上命中该行（行 3382 的 `'` + 行 3388 的 `deep' exited code=0`）；
+    三个反例（错进程名／错退出码／不存在）均不中；`make test-serial` 全绿。
+  - **未覆盖（如实登记）**：`qemu_regression.sh` 的 `cmd` 助手同样是"对累计输出做整串匹配"，
+    理论上同一暴露面；本轮**无该处被切的证据**（此前本地观测到的超时项，其目标行在日志中**完整存在**，
+    故判为等待窗口而非切碎），故未一并改，留作后续。
+
+---
+
 ## [Unreleased] - F5：IP 分片显式拒绝可观测化
 
 **Added**
