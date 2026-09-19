@@ -16,7 +16,12 @@ uint16_t ip_checksum(const uint8_t *buf, uint32_t len);
 uint32_t ip_build(uint8_t *frame, uint32_t src_ip, uint32_t dst_ip,
                   uint8_t proto, const uint8_t *payload, uint32_t plen);
 
-/* 解析 IPv4 头：校验版本/IHL/总长/校验和，返回源 IP、协议、载荷指针（指向 frame 内）与长度 */
+/* 分片丢弃累计计数（本栈不重组，分片一律拒；见 ip.c 的 F5 说明）。
+ * 供分发层做可观测日志与宿主单测断言用，不改变任何返回码语义。 */
+uint32_t ip_frag_dropped(void);
+
+/* 解析 IPv4 头：校验版本/IHL/总长/分片(flags+offset)/校验和，
+ *  返回源 IP、协议、载荷指针（指向 frame 内）与长度 */
 int ip_parse(const uint8_t *frame, uint32_t len, uint32_t *src_ip,
              uint8_t *proto, const uint8_t **payload, uint32_t *plen);
 

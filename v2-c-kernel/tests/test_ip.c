@@ -47,6 +47,33 @@ int main(void) {
     CHECK(ip_parse(bad, 40, &sip, &proto, &pay, &plen) < 0);
     bad[10] ^= 0x01; bad[3] = 0x80;                                /* total 超 len */
     CHECK(ip_parse(bad, 40, &sip, &proto, &pay, &plen) < 0);
+    bad[3] = 0x28;                                                 /* 复原：tot=40 */
+
+    /* ---- F5：分片一律拒（本栈无重组）+ 计数可观测 ----
+     * 旧实现在此**放行**：非首片会带着自定 tot 通过并被 udp_parse 当作完整数据报交付。 */
+    uint32_t base = ip_frag_dropped();
+    uint8_t frg[40];
+    for (int i = 0; i < 40; i++) frg[i] = pkt[i];
+    frg[6] = 0x00; frg[7] = 0x01;                     /* 片偏移 = 1（非首片） */
+    frg[10] = 0; frg[11] = 0; frg[10] = (uint8_t)(ip_checksum(frg, 20) >> 8);
+    frg[11] = (uint8_t)(ip_checksum(frg, 20) & 0xFF); /* 重算校验和，排除"因校验和被拒" */
+    CHECK(ip_parse(frg, 40, &sip, &proto, &pay, &plen) < 0);
+    CHECK(frg[7] == 0x01);                            /* 确认这次拒的原因是分片段，非其他 */
+    CHECK(ip_frag_dropped() == base + 1);             /* 计数 +1 */
+
+    frg[6] = 0x20; frg[7] = 0x00;                     /* MF=1 首片：同样无路可走，必须拒 */
+    frg[10] = 0; frg[11] = 0;
+    frg[10] = (uint8_t)(ip_checksum(frg, 20) >> 8);
+    frg[11] = (uint8_t)(ip_checksum(frg, 20) & 0xFF);
+    CHECK(ip_parse(frg, 40, &sip, &proto, &pay, &plen) < 0);
+    CHECK(ip_frag_dropped() == base + 2);
+
+    frg[6] = 0x40; frg[7] = 0x00;                     /* DF=1 且偏移 0：正常数据报，必须放过 */
+    frg[10] = 0; frg[11] = 0;                         /* —— 反向哨兵：防把"拒分片"写成"拒一切带 flags 的包" */
+    frg[10] = (uint8_t)(ip_checksum(frg, 20) >> 8);
+    frg[11] = (uint8_t)(ip_checksum(frg, 20) & 0xFF);
+    CHECK(ip_parse(frg, 40, &sip, &proto, &pay, &plen) == 0);
+    CHECK(ip_frag_dropped() == base + 2);             /* 计数不再增长 */
 
     UTEST_SUMMARY("test_ip");
 }

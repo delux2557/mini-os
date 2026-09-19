@@ -10,6 +10,7 @@
 #include "netsock.h"
 #include "netif.h"
 #include "udp.h"
+#include "ip.h"        /* F5：ip_frag_dropped() 计数，用于分片丢弃的可观测日志 */
 #include "dhcp.h"
 #include "sched.h"     /* v0.31 socket 归属：sched_current_pid */
 #include "serial.h"
@@ -35,7 +36,15 @@ static void dispatch_frame(const uint8_t *frame, uint32_t len) {
     uint32_t sip = 0, plen = 0;
     uint16_t sp = 0, dp = 0;
     const uint8_t *pay = 0;
-    if (udp_parse_ip(frame, len, &sip, &sp, &dp, &pay, &plen) != 0) return;
+    uint32_t frag_before = ip_frag_dropped();
+    if (udp_parse_ip(frame, len, &sip, &sp, &dp, &pay, &plen) != 0) {
+        /* F5 可观测性：分片被拒要"看得见"——否则丢包与攻击不可分辨；但绝不被洪水刷日志，
+         * 故只在**首次**与每 64 次时报。 */
+        uint32_t frag_now = ip_frag_dropped();
+        if (frag_now != frag_before && (frag_now == 1u || (frag_now % 64u) == 0u))
+            serial_printf("[net] ip fragment dropped (no reassembly; total=%u)\n", frag_now);
+        return;
+    }
     net_sock_t *s = find_by_port(dp);
     if (!s) return;
     if (plen > NET_RXMAX) plen = NET_RXMAX;
