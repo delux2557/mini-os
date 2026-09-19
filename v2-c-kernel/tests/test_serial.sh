@@ -72,6 +72,15 @@ wait_for() {   # wait_for <说明> <正则> [超时秒]
         echo "[ok]   $desc"
         return 0
     fi
+    # 超时后的**分片复核**（成本只在失败路径付）：guest 串口行非原子——用户进程打的一行可能被
+    # 并发输出切成两段（CI 实证：`[shell] '` + 6 行 + `deep' exited code=0`，整行 grep 永远不中；
+    # 见 tests/split_line_grep.py 头注）。口径**不放松判据**：真正的缺失仍不中（复核器自带自检）。
+    if [ "${SPLIT_RECHECK:-1}" = 1 ] && command -v python3 >/dev/null 2>&1 && \
+       python3 tests/split_line_grep.py "$LOG" "$re" "${SPLIT_SPAN:-12}"; then
+        pop_ts "$TSV" "$desc" "$((t1 - t0))" ok-split
+        echo "[ok]   $desc（整行被并发输出切碎；分片复核命中，语义等价）"
+        return 0
+    fi
     pop_ts "$TSV" "$desc" "$((t1 - t0))" timeout
     echo "[FAIL] $desc (缺: $re)"
     echo "  >> 现场（LOG 尾 ~20 行）："
@@ -79,6 +88,25 @@ wait_for() {   # wait_for <说明> <正则> [超时秒]
     FAIL=$((FAIL + 1)); return 1
 }
 send() { printf '%s\n' "$1" >&9; sleep 0.3; }
+
+# 分片复核器**自检**（判据的判据）：正例必须中、不存在的目标必须不中。
+# 自检不过就**禁用**复核（SPLIT_RECHECK=0）——宁可严格失败，也不接受假绿。
+split_matcher_selfcheck() {
+    local d; d=$(mktemp -d)
+    printf '[shell] \x27[sched] wake pid=5 at tick=1\n[net] recvfrom sock=1 -> 0B\nx\x27 exited code=0\n' > "$d/split.log"
+    printf "[shell] 'other' exited code=1\n" > "$d/absent.log"
+    local bad=0
+    python3 tests/split_line_grep.py "$d/split.log" "'x' exited code=0" >/dev/null 2>&1 \
+        || { echo "[FAIL] 分片复核器自检：正例未命中（会漏掉真被切的行）"; bad=1; }
+    python3 tests/split_line_grep.py "$d/absent.log" "'absent' exited code=0" >/dev/null 2>&1 \
+        && { echo "[FAIL] 分片复核器自检：不存在的目标却命中（假绿）"; bad=1; }
+    rm -rf "$d"; return $bad
+}
+if command -v python3 >/dev/null 2>&1; then
+    split_matcher_selfcheck || { echo "[note] 分片复核器自检未通过 ⇒ 禁用复核（回到严格整行判据）"; SPLIT_RECHECK=0; }
+else
+    SPLIT_RECHECK=0
+fi
 
 # 等 shell 提示符出现（内核启动 + 加载 shell 完成）
 wait_for "shell 提示符"        "mini-os\$ " 20
