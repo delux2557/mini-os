@@ -10,14 +10,53 @@
 #   - tcp_open/wait_open/tcp_send 成功
 #   - recv 累加满 128KB 且 closed=1，尾部 EOFTAIL 完整，RESULT PASS
 #   - 独立探针：转发器日志出现 MSG_OPEN / OPENED（wire 双向）
+# 端口：默认自动挑空闲口（宿主 HTTP + 转发器 UDP），并把 HTTP 口经 DL_PORT 编进 guest；
+#       DL_HTTP/DL_UDP 可显式覆盖（会做占用预检）。端口类失败一律 exit 2=环境病。
 set -u
 cd "$(dirname "$0")/.." || exit 1
 source tests/_build_env.sh
 for c in qemu-system-i386 python3 curl; do
     command -v "$c" >/dev/null 2>&1 || { echo "[ERR] 缺 $c"; exit 2; }
 done
-DL_HTTP="${DL_HTTP:-8080}"
+# ---- 端口：不再硬写 8080/7778 ----------------------------------------
+# 旧默认把宿主 HTTP 口钉在 8080：任何占着 8080 的环境（沙箱反向代理、共享 runner、
+# 上一轮残留进程）都会让本层红在"起 DL HTTP 失败"上——那是**与代码无关的假红**，
+# 也正是这份判据此前从未被接进 CI 的原因之一。现在：
+#   · 调用者显式给 DL_HTTP/DL_UDP ⇒ 尊重，但先做占用预检；被占 = 环境病 exit 2；
+#   · 未给 ⇒ 自行向后端要一个**空闲口**，并用它编进 guest（见下面 make DL_PORT=…）。
+pick_free_port() {   # 让内核挑一个空闲 TCP 端口（bind 0 后读出再关闭）
+    python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(('127.0.0.1', 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+port_free() {        # 探测某显式端口是否可用
+    python3 - "$1" "$2" <<'PY'
+import socket, sys
+fam = socket.AF_INET if sys.argv[2] != 'udp' else socket.AF_INET
+kind = socket.SOCK_DGRAM if sys.argv[2] == 'udp' else socket.SOCK_STREAM
+s = socket.socket(fam, kind)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('127.0.0.1', int(sys.argv[1])))
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+PY
+}
+# 宿主 HTTP 口：可自动挑空闲口（guest 目标端口由 DL_PORT 编进去，两端同源）。
+[ -n "${DL_HTTP:-}" ] || { DL_HTTP=$(pick_free_port) || { echo "[ERR] 环境病：取不到空闲 TCP 端口"; exit 2; }; }
+# ⚠ 转发器 UDP 口**不能**自动挑：它是 guest 侧的编译期契约
+#   （src/app/tcp.c:21 `#define TCP_PROXY_PORT 7778`，亦见 docs/tcp-session-proto.md 附录 A
+#    的线上一跳规定；test_tcp.sh / test_tcp_attack.sh 同用此口）。本测试只做占用预检。
 DL_UDP="${DL_UDP:-7778}"
+port_free "$DL_HTTP" tcp || { echo "[ERR] 环境病：宿主 HTTP 口 $DL_HTTP 已被占用"; exit 2; }
+port_free "$DL_UDP" udp || { echo "[ERR] 环境病：转发器契约口 $DL_UDP(udp) 已被占用（guest 硬编码此口）"; exit 2; }
+echo "      端口：宿主 HTTP=$DL_HTTP（自动）/ 转发器 UDP=$DL_UDP（guest 契约口）→ guest 将编入 DL_PORT=$DL_HTTP"
 FAIL=0
 QPID=""; PROXY_PID=""; HTTP_PID=""
 RESTORED=0
@@ -62,14 +101,26 @@ PY
         sleep 0.4
     done
     if [ "$ok" = 1 ]; then echo "      dl-server pid=$HTTP_PID (self-check 200)"; return 0; fi
-    echo "[FAIL] DL HTTP 服务未就绪"; return 1
+    # HTTP 服务侧起不来 = 基础设施/环境病，而不是"下载判据没过"。
+    # 早退前先确认子进程还活着：已退出且日志有 bind 错误 ⇒ 端口抢占（环境病）。
+    if [ -n "$HTTP_PID" ] && ! kill -0 "$HTTP_PID" 2>/dev/null; then
+        echo "[ERR] 环境病：DL HTTP 服务进程已退出（端口被抢或解释器异常）"; return 2
+    fi
+    echo "[ERR] 环境病：DL HTTP 服务未在超时内就绪（自检 200 未出现）"; return 2
 }
 
 echo "== [1/4] 构建内核（DL_DEMO=1：开机 dldemo 拉 128KB） =="
 make clean BUILD="$BUILD" >/dev/null 2>&1
-if ! make DL_DEMO=1 BUILD="$BUILD" >/dev/null 2>&1; then echo "[FAIL] Part A 内核构建失败"; exit 1; fi
+# DL_PORT=$DL_HTTP：把 guest 侧要连的目标端口编进 dldemo（Makefile 的 APP_PORT_DEFS），
+# 于是"宿主监听口"与"guest 去连的口"由同一个值决定，不再要求各环境都空着 8080。
+if ! make DL_DEMO=1 DL_PORT="$DL_HTTP" BUILD="$BUILD" >/dev/null 2>&1; then
+    echo "[FAIL] Part A 内核构建失败"; exit 1
+fi
 rm -f "$BUILD/tcp_dl.log" "$BUILD/tcp_dl_proxy.log"
-run_dl_server || { echo "[FAIL] 起 DL HTTP 失败"; exit 1; }
+if ! run_dl_server; then
+    rc=$?; [ "$rc" = 2 ] && { echo "[ERR] 起 DL HTTP 失败（环境病，非代码回归）"; exit 2; }
+    echo "[FAIL] 起 DL HTTP 失败"; exit 1
+fi
 python3 tests/tcp_proxy.py --mode udp --port $DL_UDP --log "$BUILD/tcp_dl_proxy.log" >/dev/null 2>&1 &
 PROXY_PID=$!
 sleep 0.5

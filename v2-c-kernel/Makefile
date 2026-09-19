@@ -195,8 +195,19 @@ SHELL_ELFOBJ = $(BUILD)/apps/shell_elf.o
 
 # 编译（源文件在 src/app/；构建输出仍在 build/apps/）
 # P2：普通 app 追加 canary flags；cc500.o/cc500_crt.o 走下方独立显式规则豁免（见 v0.27 段）。
+# CI/沙箱可搬运性：guest 侧目标端口原本硬写在 app 里（httpdemo 8080 / dldemo 8080），
+# 宿主一旦占着 8080（沙箱、共享 runner、上一轮残留），`test_tcp*` 就红在"起 HTTP 失败"
+# 这种与代码无关的位置。改为可注入：`make HTTP_PORT=8137 DL_PORT=8137` ⇒ app 编到别的口；
+# 测试侧（见 tests/test_tcp_dl.sh）自行挑空闲口，故无需调用者记忆端口。
+ifdef HTTP_PORT
+APP_PORT_DEFS += -DHTTP_PORT=$(HTTP_PORT)
+endif
+ifdef DL_PORT
+APP_PORT_DEFS += -DDL_PORT=$(DL_PORT)
+endif
+
 $(BUILD)/apps/%.o: src/app/%.c
-	$(CC) $(CFLAGS) $(APP_SEC_CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(APP_SEC_CFLAGS) $(APP_PORT_DEFS) -c $< -o $@
 
 # 链接到固定地址（-e _start 指定 ELF 入口；crt.o 提供 _start：app_main 返回即 sys_exit）
 $(BUILD)/apps/hello.elf: $(BUILD)/apps/hello.o $(BUILD)/apps/crt.o
@@ -464,6 +475,15 @@ test-boundary:
 # UP_WIN 8→1 与"乱序不暂存直接投递"两个变异均使本层 rc=1 且精确定位到子判据。
 test-proxy-window:
 	bash tests/test_proxy_window.sh
+# 大文件下载 e2e（dldemo 拉 128KB，走虚拟 TCP 通道）：判据早已存在但**从未接进门禁**
+# （接线前实测：本层在宿主占着 8080 的环境下 2/2 红在"起 DL HTTP 失败"=与代码无关的假红）。
+# 现改为：宿主 HTTP 口自动挑空闲口并经 DL_PORT 编进 guest；转发器 UDP 口仍守 guest 编译期
+# 契约（src/app/tcp.c:21 TCP_PROXY_PORT=7778，见 docs/tcp-session-proto.md 附录 A），只做占用预检。
+# 端口类失败一律 exit 2=环境病；断言失败 exit 1=代码病。
+# 判别力实测：注入"下行丢弃尾部 <1500B"变异 ⇒ 本层 rc=1 且红在 len=131072 / tail=EOFTAIL /
+# RESULT PASS 三条上；还原后 4 次跑全绿（24.6–29.6s，含内核重编）。⇒ 归 HEAVY（需 QEMU）。
+test-tcp-dl:
+	bash tests/test_tcp_dl.sh
 
 # P0-2 守卫消失审查（advisory）：diff 中净消失的 MC-/CC-/F-/fail("...") 标记需"GUARD-CHANGE:"声明；
 # CI fast job 以 continue-on-error 步消费（提示不阻断），本地/严格场景用退出码 2。
@@ -508,9 +528,9 @@ test-stack: $(STACK_OBJS)
 # HEAVY = 其余慢层，进并行矩阵，利于失败时按层快速定位。
 # 不变量：FAST ∪ HEAVY == TEST_LAYERS 且相离。某层从秒级变慢（或反之）时移动一个名字即可，
 #         划分标准见 docs/README.md 维护规则。
-TEST_LAYERS       = host audit golden boundary qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture stack proxy-window
+TEST_LAYERS       = host audit golden boundary qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture stack proxy-window tcp-dl
 TEST_LAYERS_FAST  = host stack audit golden boundary proxy-window
-TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture
+TEST_LAYERS_HEAVY = qemu serial persist net socket cc500 minicc miccboot diffsynth diffsynth-guest slip tcp det tr rp rp-torture tcp-dl
 
 test: $(addprefix test-,$(TEST_LAYERS))
 test-fast: $(addprefix test-,$(TEST_LAYERS_FAST))
@@ -571,4 +591,4 @@ clean:
 -include $(BUILD)/*.d
 -include $(BUILD)/apps/*.d
 
-.PHONY: run run-serial test test-host test-audit test-golden guard-diff test-boundary test-proxy-window golden-update test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-miccboot test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-rp-torture test-repro test-tcp-attack test-stack test-layers lint clean
+.PHONY: run run-serial test test-host test-audit test-golden guard-diff test-boundary test-proxy-window golden-update test-qemu test-serial test-persist test-net test-socket test-cc500 test-minicc test-miccboot test-diffsynth test-diffsynth-guest test-slip test-tcp test-det test-tr test-tr-stable test-rp test-rp-torture test-repro test-tcp-attack test-stack test-layers lint clean test-tcp-dl
