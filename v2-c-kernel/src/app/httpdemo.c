@@ -1,6 +1,6 @@
 /* mini-os/v2-c-kernel/src/app/httpdemo.c
  * 虚拟 TCP 薄包装演示（netif Step 4）：经"宿主转发器 -> 真实 TCP"拉一次 HTTP 请求-响应。
- *  阶段1（成功）：tcp_open(127.0.0.1:8080) -> tcp_send(GET) -> 循环 tcp_recv
+ *  阶段1（成功）：tcp_open(127.0.0.1:HTTP_PORT(默认 8080，可 -D 覆盖)) -> tcp_send(GET) -> 循环 tcp_recv
  *    -> 收到含 "200 OK" 的响应体，对端 `Connection: close` 正常关闭时 recv 返回 0
  *  阶段2（失败路径断言）：tcp_open 到无监听端口 -> 转发器连接被拒回 MSG_ERROR
  *    -> tcp_recv 返回 -1（"失败"与"对端关闭 0"必须可区分，见 docs/tcp-thin-api.md §1.1）
@@ -10,7 +10,9 @@
 #include "tcp.h"
 
 #define HTTP_IP     0x7F000001u   /* 127.0.0.1：宿主 HTTP 服务（以转发器视角的真实可达目标） */
-#define HTTP_PORT   8080
+#ifndef HTTP_PORT
+#define HTTP_PORT   8080          /* 可被 -DHTTP_PORT=<n> 覆盖，使 test-tcp/test-net 可搬端口 */
+#endif
 #define REFUSE_PORT 59998         /* 宿主上无监听 -> 测 MSG_ERROR / -1 路径 */
 
 /* 用户态无 libc strstr，手写子串匹配（判断响应状态行含 "200 OK"） */
