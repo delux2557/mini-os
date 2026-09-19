@@ -80,6 +80,25 @@ wait_after() {   # wait_after <起始行> <说明> <正则> [超时秒]；命中
         echo "[ok]   $desc"
         return 0
     fi
+    # 超时后的**分片复核**（与 test_serial.sh 同判据、同复核器，见 tests/split_line_grep.py 头注）：
+    # guest 串口行非原子——`[shell] bg 'semhold' pid=3 (no wait)` 这类行会被并发的内核心跳
+    # （sockdemo/dhcpd 每 tick 的 `[net] recvfrom ...`）插在中间切成多片，整行 grep 永远不中，
+    # 与代码无关。复核器**只对纯字面量模式**生效（含正则元字符者返回未命中，行为同改动前），
+    # 自带自检（下方 split_matcher_selfcheck）：真缺失仍不中，不放松判据。
+    if [ "${SPLIT_RECHECK:-1}" = 1 ] && command -v python3 >/dev/null 2>&1; then
+        local slice lit; slice=$(mktemp)
+        tail -n +$((start + 1)) "$LOG" 2>/dev/null > "$slice"
+        # grep-BRE 去壳成字面量（`\[shell\]` → `[shell]`）后按 -F 复核；本来就是正则的（如
+        # `pid=[0-9][0-9]*`）去壳后是其字面写法、日志里不存在 ⇒ 不中，行为同改动前。
+        lit=$(printf '%s' "$re" | sed 's/\\\([^0-9A-Za-z]\)/\1/g')
+        if python3 tests/split_line_grep.py -F "$slice" "$lit" "${SPLIT_SPAN:-12}"; then
+            rm -f "$slice"
+            pop_ts "$TSV" "$desc" "$((t1 - t0))" ok-split
+            echo "[ok]   $desc（整行被并发输出切碎；分片复核命中，语义等价）"
+            return 0
+        fi
+        rm -f "$slice"
+    fi
     pop_ts "$TSV" "$desc" "$((t1 - t0))" timeout
     echo "[FAIL] 未等到 $desc (匹配: $re)"
     echo "  >> 现场（LOG 尾 ~20 行）："
@@ -88,7 +107,9 @@ wait_after() {   # wait_after <起始行> <说明> <正则> [超时秒]；命中
 }
 
 # ---- 注入一条命令并等待其若干输出标记（基线=发送前行号，避免命中旧输出/漏掉同步写入）。
-# 偶发 socat/sendkey 注入丢失时自动重发一次；仅最终失败才计入 INTERACTIVE_FAIL。 ----
+# 偶发 socat/sendkey 注入丢失时自动重发一次；仅最终失败才计入 INTERACTIVE_FAIL。
+# 超时按步可调：调用处写 `CMD_TMO=<秒> cmd ...`（默认 8s）。慢步（自举编译/大 ELF/深栈）
+# 在负载宿主上 8s 偏紧会假红——按步给余量，而不是整体放宽（避免掩盖真正的卡死）。 ----
 cmd() {   # cmd <说明前缀> <命令串> [等待正则...]
     local desc="$1" s="$2"; shift 2
     local start re attempt ok
@@ -97,13 +118,44 @@ cmd() {   # cmd <说明前缀> <命令串> [等待正则...]
         sendkeys "$s"
         ok=1
         for re in "$@"; do
-            wait_after "$start" "$desc" "$re" || ok=0
+            wait_after "$start" "$desc" "$re" "${CMD_TMO:-8}" || ok=0
         done
         [ "$ok" -eq 1 ] && return 0
         sleep 0.5   # 注入重试前略等（让 shell 回到提示符）
     done
     INTERACTIVE_FAIL=$((INTERACTIVE_FAIL + 1))
 }
+
+# 分片复核器**自检**（判据的判据，与 test_serial.sh 同款）：正例必须中、不存在的目标必须不中。
+# 自检不过就**禁用**复核（SPLIT_RECHECK=0）——宁可严格失败，也不接受假绿。
+split_matcher_selfcheck() {
+    local d; d=$(mktemp -d)
+    printf '[shell] \x27[sched] wake pid=5 at tick=1\n[net] recvfrom sock=1 -> 0B\nx\x27 exited code=0\n' > "$d/split.log"
+    printf "[shell] 'other' exited code=1\n" > "$d/absent.log"
+    # -F 字面量路径的正例：带 `[shell]` 前缀（grep 里写作 `\[shell\]`，去壳后为裸方括号）
+    printf '[shell] \x27[sched] wake pid=5 at tick=1\n[net] recvfrom sock=1 -> 0B\ncrash\x27 exited code=0\n' > "$d/split_f.log"
+    # `.*` 分段路径的正例：`pid=.*` 的两段字面量各自被切碎，仍须命中
+    printf '[deepfork] CHILD pid=4 grew beyond[net] recvfrom sock=1 -> 0B\n[net] recvfrom sock=1 -> 0B\n inherited stack, survived\n' > "$d/split_w.log"
+    local bad=0
+    python3 tests/split_line_grep.py "$d/split.log" "'x' exited code=0" >/dev/null 2>&1 \
+        || { echo "[FAIL] 分片复核器自检：正例未命中（会漏掉真被切的行）"; bad=1; }
+    python3 tests/split_line_grep.py "$d/absent.log" "'absent' exited code=0" >/dev/null 2>&1 \
+        && { echo "[FAIL] 分片复核器自检：不存在的目标却命中（假绿）"; bad=1; }
+    python3 tests/split_line_grep.py -F "$d/split_f.log" "[shell] 'crash' exited code=0" >/dev/null 2>&1 \
+        || { echo "[FAIL] 分片复核器自检（-F）：带方括号字面量正例未命中"; bad=1; }
+    python3 tests/split_line_grep.py -F "$d/absent.log" "[shell] 'absent' exited code=0" >/dev/null 2>&1 \
+        && { echo "[FAIL] 分片复核器自检（-F）：不存在的目标却命中（假绿）"; bad=1; }
+    python3 tests/split_line_grep.py -F "$d/split_w.log" "[deepfork] CHILD pid=.* grew beyond inherited stack" >/dev/null 2>&1 \
+        || { echo "[FAIL] 分片复核器自检（.* 分段）：正例未命中"; bad=1; }
+    python3 tests/split_line_grep.py -F "$d/absent.log" "[deepfork] CHILD pid=.* grew beyond inherited stack" >/dev/null 2>&1 \
+        && { echo "[FAIL] 分片复核器自检（.* 分段）：不存在的目标却命中（假绿）"; bad=1; }
+    rm -rf "$d"; return $bad
+}
+if command -v python3 >/dev/null 2>&1; then
+    split_matcher_selfcheck || { echo "[note] 分片复核器自检未通过 ⇒ 禁用复核（回到严格整行判据）"; SPLIT_RECHECK=0; }
+else
+    SPLIT_RECHECK=0
+fi
 
 echo "== [3/4] 交互式注入 shell 命令 =="
 cmd "shell help"     "help
@@ -140,18 +192,18 @@ cmd "run stackovf"   "run stackovf
 cmd "run deep"       "run deep
 "      "\[deep\] pid=.* recursing 12\*1KB on a 4KB start stack" "\[stack\] grow pid=" "\[deep\] survived 12KB recursion via stack growth" "\[shell\] 'deep' exited code=0"
 # ---- v0.29 回归盲区补格：已生长栈 × fork / exec 组合 ----
-cmd "run deepfork"   "run deepfork
+CMD_TMO=20 cmd "run deepfork"   "run deepfork
 "      "\[deepfork\] pid=.* stack grown ~12KB, forking" "\[deepfork\] CHILD pid=.* inherited grown stack" "\[deepfork\] CHILD pid=.* grew beyond inherited stack" "\[deepfork\] PARENT pid=.* waited child=" "\[deepfork\] fork-of-grown-stack OK" "\[shell\] 'deepfork' exited code=0"
-cmd "run deepexec"   "run deepexec
+CMD_TMO=20 cmd "run deepexec"   "run deepexec
 "      "\[deepexec\] pid=.* stack grown, exec'ing hello from depth" "Hello from 'hello' app! pid=" "\[shell\] 'deepexec' exited code=0"
 # ---- v0.26#2 用户堆（brk/sbrk）：扩展/写入校验/收缩复用/bump alloc ----
 cmd "run heapdemo"   "run heapdemo
 "      "\[heapdemo\] initial brk=0x801a4000" "\[heapdemo\] sbrk(4096) old=0x801a4000" "\[heapdemo\] 4KB page write+verify OK" "\[heapdemo\] 16KB write+verify OK" "\[heapdemo\] shrink+reuse write+verify OK" "\[heapdemo\] bump alloc 3 blocks write+verify OK" "\[heapdemo\] survived heap brk/sbrk demo" "\[shell\] 'heapdemo' exited code=0"
 # ---- v0.26#3 ELF 加载去上限：>64KB 大 ELF（旧 32KB/8 帧上限会拒绝） ----
-cmd "run bigdemo"    "run bigdemo
+CMD_TMO=15 cmd "run bigdemo"    "run bigdemo
 "      "\[bigdemo\] pid=.* blob=70KB size=70000" "\[bigdemo\] 70KB write+verify sum=" "LONGPRINT_TAIL" "\[bigdemo\] survived big-ELF load" "\[shell\] 'bigdemo' exited code=0"
 # ---- v0.27 工具链自举：cc500 编译自身两次，P1==P2 逐字节一致（写-编-跑闭环） ----
-cmd "ccboot 自举"     "ccboot
+CMD_TMO=30 cmd "ccboot 自举"     "ccboot
 "      "cc500: compiled OK" "\[ccboot\] byte-identical PASS"
 # ---- v0.14 文件系统增强：shell 目录命令 + fsdemo ----
 # 注意：QEMU HMP sendkey 不支持 '/'（斜杠会静默丢弃），此处用平铺名；
@@ -162,21 +214,29 @@ cmd "ls 子目录"      "ls dir1
 "      "\[ls\] dir1:"
 cmd "rmdir 目录"     "rmdir dir1
 "      "\[shell\] rmdir 'dir1' -> 0"
-cmd "run fsdemo"     "run fsdemo
+CMD_TMO=15 cmd "run fsdemo"     "run fsdemo
 "      "\[fsdemo\] mkdir /etc -> " "\[fsdemo\] seek(5) read '8080" "\[fsdemo\] big.bin 100000B indirect spot-check OK" "\[fsdemo\] done" "\[shell\] 'fsdemo' exited code=0"
 # ---- v0.15 wait 语义：wait(-1) 任意子进程 + exec 失败反馈 ----
 cmd "run waitdemo"   "run waitdemo
 "      "\[waitdemo\] parent pid=[0-9][0-9]* forked" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=7" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=9" "\[waitdemo\] wait any -> pid=[0-9][0-9]* code=11" "\[waitdemo\] verify OK" "\[waitdemo\] final wait any -> 4294967295" "\[waitdemo\] done" "\[shell\] 'waitdemo' exited code=0"
 cmd "exec 失败反馈"   "exec nosuchprog
 "      "\[exec\] FAILED to exec '"
+# ---- v0.38 IPC 挂起可达性：先造一个"**停在** sem 等待上"的真等待者，再让 selftest 去查 ----
+# 动机：`[audit] ipc ok` 会打印 `checked N`；若 N 恒为 0，该断言只证明"检查跑过"（真空成立），
+# 不证明"判据能在真实等待者上得出正确结论"。semhold 用 `bg`（后台 spawn、不等待）起一个在无人
+# signal 的信号量上永久 sem_wait 的进程 ⇒ 本轮后续审计的 checked ≥ 1。
+# 反证力：若判据把"已登记"误判成"不可达"，或登记路径被破坏（#188 那类簿记失配），
+#         [audit] ipc FAIL + [selftest] audit≠0 会立刻红；看门狗 kind=3 也**不应**有任何输出。
+cmd "park IPC waiter" "bg semhold
+"      "bg 'semhold' pid=" "parked on sem 5"
 # ---- v0.16 单行结构化自检（agent 可 grep 一行确认全量通过） ----
 # v0.21：第 6 项为内核自审计（帧配平/堆完整性/信号量守恒/PCB 状态机）
 # v0.38：自审计新增 IPC 挂起可达性（阻塞在 sem/msg 者必须在对应等待队列里）⇒ 一并钉住；
-#        该行含 "checked N" 计数，故断言只取前缀（N 随当轮阻塞进程数变化）。
+#        `checked` 计数**锁 ≥1** —— 上一步已 park 真等待者，故这里断言的是非真空结论。
 # 安全复核 F5：自审计新增"IP 分片丢弃计数"（仅观测不入 bad，正常引导恒 0）⇒ 钉住该行；
 #        判据源头是宿主单测 tests/test_ip.c 的四段断言（host 层），此处只是让它在 guest 侧可见。
 cmd "selftest 自检"   "selftest
-"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] heap ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[audit\] ipc ok" "\[audit\] net: ip fragments dropped" "\[selftest\] PASS (6 checks)"
+"      "\[selftest\] audit=0" "\[audit\] mem ok" "\[audit\] heap ok" "\[audit\] sched ok" "\[audit\] sem ok" "\[audit\] ipc ok: blocked-waiter reachability (checked [1-9]" "\[audit\] net: ip fragments dropped" "\[selftest\] PASS (6 checks)"
 # ---- v0.17 syscall 边界校验：内核指针全部被拒 ----
 cmd "run abuse"       "run abuse
 "      "\[abuse\] write buf@0xB8000 -> 4294967295" "\[abuse\] verify OK"
@@ -203,10 +263,18 @@ FAIL=0
 check() {   # check "<说明>" "<正则>"
     if grep -q "$2" "$LOG"; then
         echo "[ok]   $1"
-    else
-        echo "[FAIL] 缺少 $1 (匹配: $2)"
-        FAIL=$((FAIL + 1))
+        return
     fi
+    # 同 wait_after：整行被并发输出切碎时走分片复核（去壳为字面量后 -F；自检已在上方把关）。
+    if [ "${SPLIT_RECHECK:-1}" = 1 ] && command -v python3 >/dev/null 2>&1; then
+        local lit; lit=$(printf '%s' "$2" | sed 's/\\\([^0-9A-Za-z]\)/\1/g')
+        if python3 tests/split_line_grep.py -F "$LOG" "$lit" "${SPLIT_SPAN:-12}"; then
+            echo "[ok]   $1（整行被并发输出切碎；分片复核命中，语义等价）"
+            return
+        fi
+    fi
+    echo "[FAIL] 缺少 $1 (匹配: $2)"
+    FAIL=$((FAIL + 1))
 }
 
 # ---- v0.1 ~ v0.5 基础 ----
@@ -230,8 +298,8 @@ check "crash 进程被终止"    "kill pid=5"
 check "僵尸被回收"         "reap pid=5"
 # ---- v0.6 IPC/同步 ----
 check "信号量创建"         "\[sem\] create id=1"
-check "sem 等待阻塞"       "sem\] wait.*block"
-check "sem 信号唤醒"       "sem\] signal.*wake"
+check "sem 等待阻塞"       "sem\] wait pid=.* -> block"
+check "sem 信号唤醒"       "sem\] signal id=.* -> wake pid="
 check "共享内存页映射"      "sem\] shmem slot=0"
 check "rendezvous 会合"    "rendezvous done"
 check "A 互斥自增"         "\[SA\] locked cnt="
@@ -239,9 +307,9 @@ check "B 互斥自增"         "\[SB\] locked cnt="
 check "sem 演示完成"       "\[SB\] done"
 # ---- v0.7 消息队列 ----
 check "msg 队列创建"       "msg\] create id=1"
-check "msg 消费者阻塞"     "msg\] recv.*block"
-check "msg 生产者阻塞"     "msg\] send.*block"
-check "msg 生产者被唤醒"    "msg\] recv.*wake producer"
+check "msg 消费者阻塞"     "msg\] recv pid=.* -> block"
+check "msg 生产者阻塞"     "msg\] send pid=.* -> block"
+check "msg 生产者被唤醒"    "msg\] recv id=.* -> wake producer pid="
 check "msg 消费者拿到消息"  "\[MC\] got val="
 check "msg 生产者发送"     "\[MP\] sent val="
 check "msg 演示完成"       "\[MC\] done"

@@ -3,6 +3,63 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - IPC 挂起可达性：断言由"检查跑过"升级为"验过真实等待者"（+ qemu 门禁假红加固）
+
+**Added**
+
+* `src/app/semhold.c`：**常驻 IPC 等待者夹具**。在**无人会 signal** 的信号量（约定槽 `id=5`）上永久
+  `sem_wait` ⇒ 常驻该 sem 的 `waiters[]`；由 `qemu_regression.sh` 用 `bg semhold`（后台 spawn、不等待）拉起。
+  - **动机**：#189 的 `[audit] ipc ok: blocked-waiter reachability (checked N)` 若 N 恒为 0，这行只证明
+    "检查跑过"（**真空成立**），**不证明**判据能在真实等待者上给出正确结论——而仓库里此前**没有**任何
+    "停在 IPC 等待上"的用例（开机的 sem/msg demo 会跑完，`run` 又是同步 wait）。
+  - 接线：`src/fs/storage.c` 入 initramfs；`Makefile` 的 `APPS` + 显式 `.elf` 规则。
+  - **反证力**：判据把"已登记"误判为"不可达" ⇒ `[audit] ipc FAIL` + `[selftest] audit≠0` 立刻红；
+    #188 那类登记簿记失配同样立刻红。semhold 若被唤醒会打 `UNEXPECTED` 并以 `code=9` 退出，便于识别。
+
+**Changed**
+
+* `qemu_regression.sh` 的 selftest 断言由 `\[audit\] ipc ok`（只钉前缀）**收紧**为
+  `… blocked-waiter reachability (checked [1-9]` —— 锁 **N ≥ 1**，与前一步 `park IPC waiter` 配套，
+  断言的是**非真空结论**。
+
+**Fixed（门禁假红，根因实证 —— 接 #193 明确登记的"留作后续"）**
+
+#193 修好了 `test_serial.sh` 的"整行 grep vs 非原子串口行"假红，并**如实登记** `qemu_regression.sh` 的
+`cmd` 有**同一暴露面**、因当时无该处被切的证据而留作后续。本轮实测到该证据（guest 带后台 `sockdemo`/`dhcpd`
+每 tick 打 `[net] recvfrom …`，把 shell/app 的整行切碎；实证：`[shell] bg '` + 三行 + `semhold' pid=3` + … +
+` (no wait)`），遂一并修掉：
+
+* **分片复核接线**：`wait_after`/`check` 超时后走 `tests/split_line_grep.py`（与 `test_serial.sh` 同判据、
+  同复核器；自带自检，**自检不过即禁用复核**，宁可严格失败不要假绿）。
+* **去壳为字面量**：qemu 侧模式是 grep-BRE（`\[shell\]`），复核器只吃字面量 ⇒ 调用侧先把 `\x` 去壳再按
+  `-F` 复核；本就是正则语义的（如 `[0-9][0-9]*`）去壳后是其字面写法、日志里不会出现 ⇒ **仍不中**，行为同改动前。
+* **`.*` 有序分段**（`-F` 模式新增）：`\[deepfork\] CHILD pid=.* grew beyond inherited stack` 这类模式按 `.*`
+  切成若干**字面量段**，各段各自做两片复核、**按序命中**才算命中（强度不变：两段都必须在）。**短段（<6 字符）
+  拒绝复核**——避免"按序拼接"引入假绿。
+* **慢步按步给超时**：`cmd` 支持 `CMD_TMO=<秒>`，对自举编译/深栈/大 ELF/fsdemo 分别给 20–30s。这是"按 step
+  分类给余量"，不是整体放宽（避免掩盖真正的卡死）。
+* 顺带把 3 条 `.*` 两侧过短的 boot-demo 断言改具体（`msg\] recv.*block` → `msg\] recv pid=.* -> block`），
+  使两段都够长、可进复核。
+
+**验证**
+
+| 项 | 结果 |
+|---|---|
+| `make test-qemu` ×6 | ✅ **6/6** 全绿（同一宿主加固前实测 4/5、5/6）；每轮分片复核命中 1–4 次 ⇒ 加固确在起作用 |
+| guest 非真空证据 | ✅ `[shell] bg 'semhold' pid=3 (no wait)`、`[semhold] pid=3 parked on sem 5 …`、`[audit] ipc ok: … (checked 1)` |
+| 看门狗 kind=3 | ✅ `kind=3` 命中 **0** 次（semhold 登记正确 ⇒ 不被误判为不可达） |
+| `make test-serial` | ✅ 全绿（同一复核器默认路径未变） |
+| `make test-fast` / `test-miccboot` / `test-persist` | ✅ 全绿（initramfs 多一个 ~9KB 文件 + Makefile 一条规则，无回归） |
+
+**未覆盖（如实登记）**
+
+* `.*` 分段复核对**短段**（<6 字符）**主动放弃**：宁可不复核，也不接受按序拼接的假绿。
+* 分段"按序命中"**不保证两段来自同一逻辑行**（可能是相邻行的巧合）；靠**段足够长 + 自检反例**兜底。
+* selftest 的 `(checked [1-9]` 含字符类，**不在**复核覆盖内；其行是内核**单次** `serial_printf`，本轮 6 次
+  未见被切（#193 已量化：被切高发区是用户进程**多次** `sys_print` 的行）。
+
+---
+
 ## [Unreleased] - test-serial：定位并修掉"整行 grep vs 非原子串口行"的假红（根因实证）
 
 **Fixed**
