@@ -59,6 +59,8 @@ run_test test_netif   "src/net/netif.c tests/test_netif.c"
 run_test test_slip    "src/net/slip.c tests/test_slip.c"
 # v1.4 heredoc 修复回归：DELIM 终结判定（shell_heredoc.h，防"bug 直达 CI"）
 run_test test_heredoc "tests/test_heredoc.c"
+# 日志放大面：限流助手"首次 + 每 N 次"的边界语义与有界性（v0.38）
+run_test test_logthrottle "tests/test_logthrottle.c"
 
 # ---- 阶段二加固：宿主侧 fuzz（阶段建议 v0.29）----
 # 对纯逻辑解析模块（fs_walk/elf/arp/ip/udp/icmp/dhcp）注入随机字节/随机路径，

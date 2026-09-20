@@ -27,6 +27,7 @@
 #include "netio.h"
 #include "e1000.h"   /* v0.38（R1.3 后半）：DHCP 续约原子能力 e1000_dhcp_* */
 #include "syscall_table.h"   /* R1.1（外部审计 A5）：syscall 号/名/掩码唯一事实源 */
+#include "logthrottle.h"     /* 日志放大面收口：高发拒绝日志"首次 + 每 N 次" */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -41,6 +42,22 @@ static const struct { uint32_t num; const char *name; } syscall_tab[] = {
     SYS_TABLE(SYS_NAME_ENTRY)
 };
 #undef SYS_NAME_ENTRY
+
+/* ---- 日志放大面收口：高发**拒绝日志**的限流状态（每站点一个）----
+ * ring3 可无界触发这些"每次必打"的拒绝日志（实测：循环未知 syscall 50 次 ⇒ 50 行，零限流），
+ * 而串口整行输出在 cli 内忙等（见 serial.c 的 K1 说明）⇒ 既烧带宽又抬高行撕裂概率。
+ * 改为"首次 + 每 LOG_THROTTLE_PERIOD 次"，命中时把累计次数一并打出（抑制量可见）。
+ * 口径与 #191 的分片日志一致；`[msg] … block (full)`（调用者随即阻塞，自限）与
+ * `[syscall] rejected from ring`（非 ring3 可达）**不在此列**。 */
+static log_throttle_t lt_masked;      /* [syscall] masked syscall */
+static log_throttle_t lt_sem_denied;  /* [sem] create DENIED negative init */
+static log_throttle_t lt_spawn_name;  /* [user] spawn_file name too long/invalid */
+static log_throttle_t lt_vm_badaddr;  /* [vm] map_page bad addr */
+static log_throttle_t lt_vm_cap;      /* [vm] map_page cap 8 full */
+static log_throttle_t lt_net_sock;    /* [net] socket table full */
+static log_throttle_t lt_heap_range;  /* [heap] brk bad addr */
+static log_throttle_t lt_heap_cap;    /* [heap] brk over cap */
+static log_throttle_t lt_unknown;     /* [user] unknown syscall */
 
 /* ---- v0.6 IPC/同步：内核信号量表（用户通过固定 id 引用，id 0 保留） ---- */
 #define SEM_MAX_OBJ 16
@@ -596,7 +613,9 @@ void syscall_dispatch(registers_t *r) {
     {
         pcb_t *curp = sched_get(sched_current_pid());
         if (curp && curp->sc_mask && num < 64 && (curp->sc_mask & (1ull << num))) {
-            serial_printf("[syscall] pid=%u masked syscall %u\n", curp->pid, num);
+            if (log_throttle_hit(&lt_masked, LOG_THROTTLE_PERIOD))
+                serial_printf("[syscall] pid=%u masked syscall %u (total=%u)\n",
+                              curp->pid, num, lt_masked.n);
             r->eax = (uint32_t)-1;
             return;
         }
@@ -647,7 +666,9 @@ void syscall_dispatch(registers_t *r) {
         /* A-2 ② SEM-1：init 按 int32 解释，负数（含"误传 -1"这类哨兵）会令 sem 计数为负，
          * 触发 sem_invariant_ok 审计误报且无合法语义——显式拒绝（fail-closed，打日志）。 */
         if ((int32_t)b < 0) {
-            serial_printf("[sem] create id=%u DENIED negative init=%d\n", a, (int32_t)b);
+            if (log_throttle_hit(&lt_sem_denied, LOG_THROTTLE_PERIOD))
+                serial_printf("[sem] create id=%u DENIED negative init=%d (total=%u)\n",
+                              a, (int32_t)b, lt_sem_denied.n);
             r->eax = (uint32_t)-1;
             return;
         }
@@ -889,7 +910,9 @@ void syscall_dispatch(registers_t *r) {
          * 超长名字显式失败（返回 -2 → 本次 -1），不静默截断撞前名前缀误加载。 */
         char namebuf[64];
         if (copyin_str_full((const char *)a, namebuf, sizeof(namebuf)) < 0) {
-            serial_printf("[user] spawn_file name too long/invalid\n");
+            if (log_throttle_hit(&lt_spawn_name, LOG_THROTTLE_PERIOD))
+                serial_printf("[user] spawn_file name too long/invalid (total=%u)\n",
+                              lt_spawn_name.n);
             r->eax = (uint32_t)-1;
             return;
         }
@@ -965,7 +988,9 @@ void syscall_dispatch(registers_t *r) {
                 * v0.11 每进程地址空间演示：同一虚拟地址在不同进程映射到不同物理页，
                 * 互不可见；页面随进程退出回收。要求页对齐且位于用户半区、未映射。 */
         if (a < 0x80000000u || a >= 0xFFC00000u || (a & 0xFFF)) {
-            serial_printf("[vm] map_page pid=%u bad addr=%x\n", sched_current_pid(), a);
+            if (log_throttle_hit(&lt_vm_badaddr, LOG_THROTTLE_PERIOD))
+                serial_printf("[vm] map_page pid=%u bad addr=%x (total=%u)\n",
+                              sched_current_pid(), a, lt_vm_badaddr.n);
             r->eax = (uint32_t)-1;
             return;
         }
@@ -974,8 +999,9 @@ void syscall_dispatch(registers_t *r) {
          * 进程退出时该帧永久泄漏（审查 P0-1）。 */
         pcb_t *p_ = sched_get(sched_current_pid());
         if (p_ && p_->map_fcount >= 8) {
-            serial_printf("[vm] map_page pid=%u map cap 8 full, reject\n",
-                          sched_current_pid());
+            if (log_throttle_hit(&lt_vm_cap, LOG_THROTTLE_PERIOD))
+                serial_printf("[vm] map_page pid=%u map cap 8 full, reject (total=%u)\n",
+                              sched_current_pid(), lt_vm_cap.n);
             r->eax = (uint32_t)-1;
             return;
         }
@@ -1039,8 +1065,14 @@ void syscall_dispatch(registers_t *r) {
     case SYS_NET_SOCKET: { /* sys_net_socket(port)：创建 UDP socket；port=0 自动分配；返回 socket id */
         if (b || c) { r->eax = (uint32_t)-1; return; }
         int s = netsock_open((uint16_t)a);
-        if (s < 0) serial_printf("[net] socket table full\n");   /* v0.31 观测：表满专项日志 */
-        serial_printf("[net] socket port=%u -> id=%d\n", (uint16_t)a, s);
+        if (s < 0) {
+            /* v0.31 观测：表满专项日志。**限流**：表满后 socket() 不占槽，ring3 可循环刷屏
+             * （旧实现每次失败打两条：table full + 下面那条 id=-1）⇒ 收敛为"首次 + 每 N 次"。 */
+            if (log_throttle_hit(&lt_net_sock, LOG_THROTTLE_PERIOD))
+                serial_printf("[net] socket table full (total=%u)\n", lt_net_sock.n);
+        } else {
+            serial_printf("[net] socket port=%u -> id=%d\n", (uint16_t)a, s);
+        }
         r->eax = (uint32_t)s;
         return;
     }
@@ -1074,7 +1106,9 @@ void syscall_dispatch(registers_t *r) {
         if (!p) { r->eax = (uint32_t)-1; return; }
         if (a == 0) { r->eax = p->heap_brk; return; }
         if (!brk_in_range(a, p->heap_base, USER_HEAP_MAX)) {
-            serial_printf("[heap] brk pid=%u bad addr=%x\n", p->pid, a);
+            if (log_throttle_hit(&lt_heap_range, LOG_THROTTLE_PERIOD))
+                serial_printf("[heap] brk pid=%u bad addr=%x (total=%u)\n",
+                              p->pid, a, lt_heap_range.n);
             r->eax = (uint32_t)-1;
             return;
         }
@@ -1087,7 +1121,9 @@ void syscall_dispatch(registers_t *r) {
              * ≤ 目标页数。单调增长下两式等价；收缩-再涨下本式正确（S8）。 */
             uint32_t cap = ((a - p->heap_base) + 0xFFFu) >> 12;
             if (cap > USER_HEAP_PAGES) {
-                serial_printf("[heap] brk pid=%u over cap %u pages\n", p->pid, cap);
+                if (log_throttle_hit(&lt_heap_cap, LOG_THROTTLE_PERIOD))
+                    serial_printf("[heap] brk pid=%u over cap %u pages (total=%u)\n",
+                                  p->pid, cap, lt_heap_cap.n);
                 r->eax = (uint32_t)-1;
                 return;
             }
@@ -1175,7 +1211,8 @@ void syscall_dispatch(registers_t *r) {
         r->eax = 0;
         return;
     default:
-        serial_printf("[user] unknown syscall %u\n", num);
+        if (log_throttle_hit(&lt_unknown, LOG_THROTTLE_PERIOD))
+            serial_printf("[user] unknown syscall %u (total=%u)\n", num, lt_unknown.n);
         r->eax = (uint32_t)-1;
         return;
     }

@@ -93,6 +93,7 @@ extern char _binary_badinsn_elf_start[], _binary_badinsn_elf_end[];   /* SEC-01 
 extern char _binary_chaos_elf_start[], _binary_chaos_elf_end[];       /* 加固 A-1 ④: ring3 随机坏指令探针 */
 extern char _binary_dhcpd_elf_start[], _binary_dhcpd_elf_end[];      /* v0.36（R1.3）: DHCP 续约守护进程 */
 extern char _binary_semhold_elf_start[], _binary_semhold_elf_end[];  /* v0.38: 常驻 sem 等待者（审计非真空夹具） */
+extern char _binary_logflood_elf_start[], _binary_logflood_elf_end[]; /* v0.38: 日志放大面洪泛探针 */
 
 /* ---- V4 mini-Csmith guest 差分（方案 B，仅 GUEST_DIFF=1 时启用） ----
  * 差分对拍把 minicc 编译的随机样本 .elf 嵌入 initramfs，guest 内 `run dsXX` 拿语义退码
@@ -197,6 +198,10 @@ static void initramfs_setup(void) {
     initramfs_file("semhold",
                    _binary_semhold_elf_start,
                    (uint32_t)(_binary_semhold_elf_end - _binary_semhold_elf_start));
+    /* v0.38：日志放大面洪泛探针——测试侧 `run logflood` 后断言串口日志行数**有界**（限流生效）。 */
+    initramfs_file("logflood",
+                   _binary_logflood_elf_start,
+                   (uint32_t)(_binary_logflood_elf_end - _binary_logflood_elf_start));
     /* DoS 回归夹具 `zbig`：84B 畸形 ELF，p_memsz=0x06001000(96MB)、p_filesz=0。
      * 若加载器未在 load_elf_file 钳制区间（BUG-056），run zbig 会触发巨大映射；门禁
      * 断言其必被 -1 拒绝且整机不 [FATAL]（qemu_regression/test_serial 覆盖）。 */

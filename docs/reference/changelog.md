@@ -3,6 +3,58 @@
 > 格式遵循 Keep a Changelog 精神：每个版本列出 Added / Changed / Fixed / Engineering。
 > **测试脚本退出码约定（v0.33 起）**：`0` 全绿 / `1` 断言失败（被测代码挂）/ `2` 环境或依赖缺失（缺 qemu/socat/nasm/gcc 等）。目的：让"环境病"显式区别于"代码病"，CI 应将 `2` 标为环境错误而非被测回归。
 
+## [Unreleased] - 日志放大面收口：ring3 高发拒绝日志限流（"首次 + 每 64 次"，OBS-014）
+
+**Added**
+
+* `src/kernel/logthrottle.h`：**共享限流助手**（`log_throttle_hit(&st, period)`；命中 = 第 1 次或第 N 次，
+  `period=0` 显式不限流）。口径与 #191 的分片日志一致，本 PR 把它**抽成共享件**，不再各站点各写各的。
+* `src/app/logflood.c`（guest 洪泛探针）+ `tests/test_logthrottle.c`（宿主单测）：两级判据，见下。
+
+**Fixed（可观测性 DoS，非内存安全）**
+
+* **ring3 可无界触发高发拒绝日志、零限流**。独立实测（guest 内 `minicc` 编译的探针，非采信自述）：
+  循环调**未知 syscall 50 次 ⇒ `[user] unknown syscall` 恰好 50 行**（对照 0 行；17 次 ⇒ 17 行，精确
+  1:1）。代码面确认 `usermode.c` 有 9 处"每次调用必打"的拒绝/失败日志，而**同一项目在 #191 已对分片
+  日志限流**（`netsock.c`：首次 + 每 64 次）⇒ 处置不一致。
+* **危害机制（订正一处表述）**：不是"串口写持锁"，而是 `serial.c` 的 K1——整行输出在 **`cli` 区间内
+  忙等 THR**（代码注释自标：真机/慢后端下 80 字符行 @38400 ≈ **21ms 关中断**）。洪泛因此既烧带宽、
+  又屏蔽 IRQ0 扰动时间基准、还抬高**用户行撕裂**概率（#193 已量化；被切的是用户进程**多段 `sys_print`**
+  拼出的行，内核单次 `serial_printf` 的整行在 `cli` 内不被打断）。
+* **修法**：9 处收成"首次 + 每 64 次"，命中行附**累计次数**（抑制量可见，不做静默失真）：
+  `unknown syscall`、`masked syscall`、`sem create DENIED`、`spawn_file name too long/invalid`、
+  `map_page bad addr`、`map_page cap 8 full`、`socket table full`、`brk bad addr`、`brk over cap`。
+  顺带把 `socket()` 失败路径的两条日志并成一条（旧实现每次失败打 `table full` + `port=… -> id=-1` 两条）。
+* **两处刻意不动**（如实登记）：`[msg] send … block (full)` 的调用者**随即阻塞**（自限，非洪泛源）；
+  `[syscall] rejected from ring %u` 判的是 `cs&3 != 3`，**ring3 根本不可达**——原评审把它列入"9 处"，
+  此处订正。
+
+**验证**
+
+| 项 | 结果 |
+|---|---|
+| 端到端（guest）：`run logflood`（200 未知 / 64 brk 越界 / 64 sem DENIED） | ✅ 串口计数 **4 / 2 / 2**，与 `1 + N/64` 精确吻合；断言"行数有界"入 `qemu_regression.sh` |
+| **变异测试（判别力）** | ✅ 把周期临时改成 `1`（=关掉限流）⇒ 计数回到 **200 / 64 / 64**、断言 **exit=2 变红**；还原后复绿 |
+| 宿主单测 `test_logthrottle` | ✅ `pass=10 fail=0`（首次必打 / 第 N 次必打 / N±1 静默 / `period=0` 不限流 / 10 万次有界性） |
+| `make test-host` | ✅ `pass=21 fail=0` |
+| `make test-serial` | ✅ 全绿（`masked syscall` 断言仍命中——首次必打） |
+| `make test-socket` | ✅ 全绿（F-0a 故意打满 socket 表，限流后语义不变） |
+| `make test-net` | ✅ 全绿（`socket port=0 -> id=[0-9]` 成功路径仍逐条打） |
+| `make test-fast` / `test-miccboot` / `test-persist` | ✅ 全绿 |
+| `make test-qemu` ×3 | ✅ 全绿 |
+
+**未覆盖（如实登记）**
+
+* **成功路径的逐调用日志仍未限流**：如 `[net] recvfrom sock=%d -> %dB`（sockdemo 正在每 tick 刷）、
+  `[fs] open/read/write`、`[sem] wait/signal`、`[vm] map_page … addr phys`。这些是**合法**操作的可观测面，
+  限流会削弱正常诊断；本 PR 只收"拒绝/失败"这一类（问题面比原评审的"9 处拒绝日志"更宽，此处明示）。
+* 限流状态是**按站点**（static，非按 pid）：某进程洪泛会连累他进程的**同类**日志一并被抑制。
+  接受理由：被抑制的是同一站点的高频重复，且累计次数仍逐条可见；当前只有显式设过掩码的进程
+  才会走 `masked` 那条（仅 sandboxdemo）。
+* 只对**命中行**打印累计次数；两次命中之间的具体参数（如每个未知 syscall 号）会丢失。
+
+---
+
 ## [Unreleased] - test-net："sockdemo 进程生成"整行被切碎的假红（与 #194 同一判据收口）
 
 **Fixed**

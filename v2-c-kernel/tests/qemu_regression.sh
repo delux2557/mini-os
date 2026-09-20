@@ -229,6 +229,12 @@ cmd "exec 失败反馈"   "exec nosuchprog
 #         [audit] ipc FAIL + [selftest] audit≠0 会立刻红；看门狗 kind=3 也**不应**有任何输出。
 cmd "park IPC waiter" "bg semhold
 "      "bg 'semhold' pid=" "parked on sem 5"
+# ---- v0.38 日志放大面：ring3 洪泛高发拒绝路径，验证日志**行数有界**（限流生效） ----
+# logflood 三段各打固定次数（n1=200 未知 syscall / n2=64 brk 越界 / n3=64 sem DENIED）并自报计数；
+# 定量断言在下方 [4/4] 校验段（对串口日志计数，上界 = 1 + N/64，见 src/kernel/logthrottle.h）。
+# 放在 selftest **之前**：洪泛若留下状态，紧随其后的内核自审计就先红（顺序即防线）。
+cmd "run logflood"    "run logflood
+"      "\[logflood\] n1=200 n2=64 n3=64 done" "\[shell\] 'logflood' exited code=0"
 # ---- v0.16 单行结构化自检（agent 可 grep 一行确认全量通过） ----
 # v0.21：第 6 项为内核自审计（帧配平/堆完整性/信号量守恒/PCB 状态机）
 # v0.38：自审计新增 IPC 挂起可达性（阻塞在 sem/msg 者必须在对应等待队列里）⇒ 一并钉住；
@@ -421,6 +427,32 @@ check "wait 内核日志 reaped"      "\[user\] wait any -> pid="
 # ---- 通用 ----
 check "idle 状态行心跳"     "alive="
 check "定时器心跳正常"      "ticks="
+
+# ---- v0.38 日志放大面：ring3 洪泛下日志行数必须**有界**（判据的定量表述见 logthrottle.h） ----
+# logflood 各段调用数 N 与周期 64 已知 ⇒ 期望行数 = 1 + floor(N/64)；给 ±1 级余量。
+# 反证力：去掉限流（回到"每次必打"）则计数回到 200/64/64 立刻红 —— 这条断言就是该防线的门禁。
+flood_bound() {   # flood_bound <说明> <grep 正则> <调用数>
+    local desc="$1" re="$2" n="$3" got
+    got=$(grep -c "$re" "$LOG" 2>/dev/null || echo 0)
+    # 上界 = 1（首次）+ floor(N/64) + 2 余量（防止它处偶发同类日志把计数顶出）
+    local ub=$(( 1 + n / 64 + 2 ))
+    if [ "$got" -ge 1 ] && [ "$got" -le "$ub" ]; then
+        echo "[ok]   $desc：$got 行（调用 $n 次；上界 $ub，未限流会是 $n）"
+    else
+        echo "[FAIL] $desc 日志未限流：$got 行（调用 $n 次，期望 1..$ub）"
+        FAIL=$((FAIL + 1))
+    fi
+}
+flood_bound "未知 syscall 洪泛"   "\[user\] unknown syscall"                        200
+flood_bound "brk 越界洪泛"        "\[heap\] brk pid=.* bad addr"                   64
+flood_bound "sem DENIED 洪泛"     "\[sem\] create id=.* DENIED negative init"      64
+# 限流后仍**可观测**：命中行带累计次数（total=），不是静默失真
+if grep -q "\[user\] unknown syscall .* (total=" "$LOG"; then
+    echo "[ok]   限流命中行含累计次数（total=）——抑制量可见非静默"
+else
+    echo "[FAIL] 限流命中行缺累计次数标记（total=）"
+    FAIL=$((FAIL + 1))
+fi
 
 echo
 FAIL=$((FAIL + INTERACTIVE_FAIL))
